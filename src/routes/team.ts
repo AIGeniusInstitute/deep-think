@@ -112,30 +112,35 @@ teamRoutes.post('/runs', async (c) => {
     executionMode: parsed.data.executionMode,
   };
 
-  // Fire-and-forget（沿用 team-builder.ts buildRunContext().then().catch() 范式）：
-  // buildTeam 同步阻塞于 decompose（最坏 240s），放到后台跑，HTTP 立即返回。
+  // Fire-and-forget。关键：必须用 setImmediate 真正延迟到下一个事件循环 tick，
+  // 否则 buildTeam 的同步前缀（decompose → sdkQuery → SDK query() 子进程握手，
+  // 实测 ~21s 同步阻塞）会在当前请求 tick 上执行，导致 POST /api/team/runs
+  // 超过前端 8s 请求超时、前端拿到 "Request timeout" 而 buildId 丢失，组建虽然
+  // 后台仍在跑但前端无法轮询。setImmediate 让 HTTP 立即返回 buildId，前端即可
+  // 开始轮询 GET /api/team/runs/:buildId；buildTeam 同步前缀的 21s 阻塞由轮询的
+  // 单次失败重试（pollBuild catch → 下一轮）吸收，不影响终态回写。
   // 成功回写 plan+runId，失败回写 error；进程级 unhandledRejection 已有 logger 兜底。
-  console.error(`[team-timing] before buildTeam call at +${Date.now() - _t0}ms`);
-  webDeps
-    .buildTeam(input)
-    .then((result) => {
-      if ('error' in result) {
-        failTeamBuild(buildId, `${result.error}${result.detail ? `：${result.detail}` : ''}`);
-        logger.warn({ buildId, err: result.error, detail: result.detail }, 'team build failed');
-        return;
-      }
-      completeTeamBuild(buildId, {
-        plan_json: JSON.stringify(result.plan),
-        run_id: result.runId,
+  setImmediate(() => {
+    webDeps
+      .buildTeam(input)
+      .then((result) => {
+        if ('error' in result) {
+          failTeamBuild(buildId, `${result.error}${result.detail ? `：${result.detail}` : ''}`);
+          logger.warn({ buildId, err: result.error, detail: result.detail }, 'team build failed');
+          return;
+        }
+        completeTeamBuild(buildId, {
+          plan_json: JSON.stringify(result.plan),
+          run_id: result.runId,
+        });
+        logger.info({ buildId, runId: result.runId }, 'team build completed');
+      })
+      .catch((err: unknown) => {
+        failTeamBuild(buildId, (err as Error).message?.slice(0, 500) ?? 'unknown error');
+        logger.error({ buildId, err }, 'team build threw');
       });
-      logger.info({ buildId, runId: result.runId }, 'team build completed');
-    })
-    .catch((err: unknown) => {
-      failTeamBuild(buildId, (err as Error).message?.slice(0, 500) ?? 'unknown error');
-      logger.error({ buildId, err }, 'team build threw');
-    });
+  });
 
-  console.error(`[team-timing] before return at +${Date.now() - _t0}ms`);
   return c.json({ ok: true, buildId, status: 'running' });
 });
 
