@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { api } from '../api/client';
 
-type EngineKey = 'claude' | 'atomcode' | 'codex' | 'opencode';
+type EngineKey = 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
 
 interface EngineDef {
   key: EngineKey;
@@ -45,6 +45,13 @@ const ENGINES: EngineDef[] = [
     settingsTab: 'opencode',
     alwaysOn: false,
   },
+  {
+    key: 'pi',
+    label: 'pi',
+    description: 'self-extensible coding agent harness,通过 RPC 模式 (stdio JSONL) 接入,支持 20+ provider。',
+    settingsTab: 'pi',
+    alwaysOn: false,
+  },
 ];
 
 type EngineAvailability = Partial<Record<EngineKey, boolean>>;
@@ -59,12 +66,14 @@ export function EnginesPage() {
       api.get<{ enabled?: boolean }>('/api/config/atomcode').catch(() => null),
       api.get<{ enabled?: boolean }>('/api/config/codex').catch(() => null),
       api.get<{ enabled?: boolean }>('/api/config/opencode').catch(() => null),
-    ]).then(([a, c, o]) => {
+      api.get<{ enabled?: boolean }>('/api/config/pi').catch(() => null),
+    ]).then(([a, c, o, p]) => {
       if (cancelled) return;
       setAvailability({
         atomcode: a?.enabled === true,
         codex: c?.enabled === true,
         opencode: o?.enabled === true,
+        pi: p?.enabled === true,
       });
     });
     return () => { cancelled = true; };

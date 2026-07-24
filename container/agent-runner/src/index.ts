@@ -2300,13 +2300,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Engine branch: atomcode/codex/opencode route to dedicated engine adapters,
+  // Engine branch: atomcode/codex/opencode/pi route to dedicated engine adapters,
   // bypassing the Claude Agent SDK query() path entirely.
   const engine = (containerInput.engine ?? 'claude') as
     | 'claude'
     | 'atomcode'
     | 'codex'
-    | 'opencode';
+    | 'opencode'
+    | 'pi';
   if (engine === 'atomcode') {
     log('Engine = atomcode, routing to atomcode-engine adapter');
     const { runAtomcodeEngine } = await import('./atomcode-engine.js');
@@ -2359,6 +2360,25 @@ async function main(): Promise<void> {
         status: 'error',
         result: null,
         error: `OpenCode engine error: ${err instanceof Error ? err.message : String(err)}`,
+        turnId: containerInput.turnId,
+      });
+    }
+    process.exit(0);
+  }
+  if (engine === 'pi') {
+    log('Engine = pi, routing to pi-engine adapter');
+    const { runPiEngine } = await import('./pi-engine.js');
+    try {
+      await runPiEngine({
+        containerInput,
+        writeOutput,
+        log,
+      });
+    } catch (err) {
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: `Pi engine error: ${err instanceof Error ? err.message : String(err)}`,
         turnId: containerInput.turnId,
       });
     }

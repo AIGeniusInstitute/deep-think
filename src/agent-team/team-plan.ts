@@ -29,7 +29,7 @@ export const TeamMemberSchema = z.object({
     .regex(/^[a-zA-Z0-9_-]+$/, 'member name must be slug-ish (a-z0-9_-)'),
   role: z.string().min(1),
   systemPrompt: z.string().min(10),
-  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode']).default('claude'),
+  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode', 'pi']).default('claude'),
   model: z.string().nullable().default(null),
   skills: z.array(z.string()).default([]),
   mcpServers: z.array(z.string()).default([]),

@@ -35,6 +35,7 @@ import {
   getAtomcodeConfig,
   getCodexConfig,
   getOpencodeConfig,
+  getPiConfig,
 } from './runtime-config.js';
 
 import { providerPool } from './provider-pool.js';
@@ -50,6 +51,8 @@ import {
   setCodexThreadId,
   getOpencodeSessionId,
   setOpencodeSessionId,
+  getPiSessionId,
+  setPiSessionId,
   getAgentDefinition,
   listAgentMounts,
   getKnowledgeBase,
@@ -272,11 +275,12 @@ export interface ContainerInput {
   userLanguage?: string;
   /**
    * Agent execution engine. 'claude' (default, Claude Agent SDK) or 'atomcode'
-   * (open-source Rust coding agent via atomcode-daemon HTTP/SSE).
-   * When 'atomcode', agent-runner branches to atomcode-engine.ts instead of
-   * calling SDK query().
+   * (open-source Rust coding agent via atomcode-daemon HTTP/SSE). 'pi' routes
+   * to pi-engine.ts which drives `pi --mode rpc` stdio JSONL.
+   * When 'atomcode'/'codex'/'opencode'/'pi', agent-runner branches to the
+   * corresponding *-engine.ts instead of calling SDK query().
    */
-  engine?: 'claude' | 'atomcode' | 'codex' | 'opencode';
+  engine?: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
   /** Agent PaaS: 用户自定义 Agent 定义 + 挂载资源（已展平）。 */
   agentDefinition?: {
     id: string;
@@ -871,7 +875,8 @@ export function buildVolumeMounts(
     | 'claude'
     | 'atomcode'
     | 'codex'
-    | 'opencode';
+    | 'opencode'
+    | 'pi';
   if (groupEngine === 'atomcode') {
     const atomcodeCfg = getAtomcodeConfig();
     if (!atomcodeCfg.enabled || !atomcodeCfg.binaryPath) {
@@ -924,6 +929,30 @@ export function buildVolumeMounts(
     envLines.push(`OPENCODE_MODEL_ID=${opencodeCfg.modelID}`);
     envLines.push(`OPENCODE_WORKING_DIR=${opencodeCfg.workingDir || '/workspace/group'}`);
     envLines.push(`OPENCODE_PROVIDERS_JSON=${JSON.stringify(opencodeCfg.providers).replace(/'/g, "'\\''")}`);
+    envLines.push(`DT_CHAT_JID=web:${group.folder}`);
+    envLines.push(`DT_GROUP_FOLDER=${group.folder}`);
+    envLines.push(`DT_IS_HOME=${!!group.is_home}`);
+    envLines.push(`DT_IS_ADMIN_HOME=${!!group.is_home && group.folder === 'main'}`);
+    envLines.push(`DT_IPC_DIR=/workspace/ipc`);
+    envLines.push(`DT_WORKSPACE_GROUP=/workspace/group`);
+    envLines.push(`DT_WORKSPACE_GLOBAL=/workspace/global`);
+    envLines.push(`DT_WORKSPACE_MEMORY=/workspace/memory`);
+    envLines.push(`DT_DISABLE_MEMORY_LAYER=false`);
+  }
+  if (groupEngine === 'pi') {
+    const piCfg = getPiConfig();
+    if (!piCfg.enabled || !piCfg.binaryPath) {
+      throw new Error(
+        `Group ${group.folder} has engine=pi but pi is not enabled or binaryPath is empty. Configure in Settings → pi 引擎.`,
+      );
+    }
+    envLines.push(`PI_BINARY_PATH=${piCfg.binaryPath}`);
+    envLines.push(`PI_CLI_SCRIPT_PATH=${piCfg.cliScriptPath || ''}`);
+    envLines.push(`PI_WORKING_DIR=${piCfg.workingDir || '/workspace/group'}`);
+    envLines.push(`PI_DEFAULT_PROVIDER=${piCfg.defaultProvider}`);
+    envLines.push(`PI_DEFAULT_MODEL=${piCfg.defaultModel}`);
+    envLines.push(`PI_THINKING_LEVEL=${piCfg.thinkingLevel}`);
+    envLines.push(`PI_PROVIDERS_JSON=${JSON.stringify(piCfg.providers).replace(/'/g, "'\\''")}`);
     envLines.push(`DT_CHAT_JID=web:${group.folder}`);
     envLines.push(`DT_GROUP_FOLDER=${group.folder}`);
     envLines.push(`DT_IS_HOME=${!!group.is_home}`);
@@ -1795,7 +1824,8 @@ export async function runHostAgent(
     | 'claude'
     | 'atomcode'
     | 'codex'
-    | 'opencode';
+    | 'opencode'
+    | 'pi';
   const hostEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
   };
@@ -2081,6 +2111,39 @@ export async function runHostAgent(
       }
       hostEnv['DT_DISABLE_MEMORY_LAYER'] = hostEnv['DEEPTHINK_DISABLE_MEMORY_LAYER'] ?? 'false';
     }
+    if (groupEngine === 'pi') {
+      const piCfg = getPiConfig();
+      if (!piCfg.enabled || !piCfg.binaryPath) {
+        return hostModeSetupError(
+          'pi 引擎未启用或 binaryPath 为空。请在 设置 → pi 引擎 中配置启动命令（binaryPath）。',
+        );
+      }
+      hostEnv['PI_BINARY_PATH'] = piCfg.binaryPath;
+      hostEnv['PI_CLI_SCRIPT_PATH'] = piCfg.cliScriptPath || '';
+      hostEnv['PI_WORKING_DIR'] =
+        piCfg.workingDir && fs.existsSync(piCfg.workingDir)
+          ? piCfg.workingDir
+          : groupDir;
+      hostEnv['PI_DEFAULT_PROVIDER'] = piCfg.defaultProvider;
+      hostEnv['PI_DEFAULT_MODEL'] = piCfg.defaultModel;
+      hostEnv['PI_THINKING_LEVEL'] = piCfg.thinkingLevel;
+      // Inject providers JSON for pi-engine to map provider→env API key / --api-key
+      hostEnv['PI_PROVIDERS_JSON'] = JSON.stringify(piCfg.providers);
+      // MCP bridge context (kept for parity; pi-engine first version does not bridge MCP)
+      hostEnv['DT_CHAT_JID'] = `web:${group.folder}`;
+      hostEnv['DT_GROUP_FOLDER'] = group.folder;
+      hostEnv['DT_IS_HOME'] = String(!!group.is_home);
+      hostEnv['DT_IS_ADMIN_HOME'] = String(isGroupAdminHome);
+      hostEnv['DT_IPC_DIR'] = groupIpcDir;
+      hostEnv['DT_WORKSPACE_GROUP'] = groupDir;
+      if (hostEnv['DEEPTHINK_WORKSPACE_GLOBAL']) {
+        hostEnv['DT_WORKSPACE_GLOBAL'] = hostEnv['DEEPTHINK_WORKSPACE_GLOBAL'];
+      }
+      if (hostEnv['DEEPTHINK_WORKSPACE_MEMORY']) {
+        hostEnv['DT_WORKSPACE_MEMORY'] = hostEnv['DEEPTHINK_WORKSPACE_MEMORY'];
+      }
+      hostEnv['DT_DISABLE_MEMORY_LAYER'] = hostEnv['DEEPTHINK_DISABLE_MEMORY_LAYER'] ?? 'false';
+    }
 
     // 5b. Host capability preflight — detect external tools & inject env vars
     const capResult = await checkHostCapabilities();
@@ -2237,7 +2300,10 @@ export async function runHostAgent(
             : groupEngine === 'opencode'
               ? (getOpencodeSessionId(group.folder, input.agentId || '') ??
                 input.sessionId)
-              : input.sessionId;
+              : groupEngine === 'pi'
+                ? (getPiSessionId(group.folder, input.agentId || '') ??
+                  input.sessionId)
+                : input.sessionId;
       const hostAgentDef = loadGroupAgentDefinition(
         group.agentDefId,
         group.created_by,

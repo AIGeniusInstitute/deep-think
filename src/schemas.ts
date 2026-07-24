@@ -241,7 +241,7 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
-  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode']).optional(),
+  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode', 'pi']).optional(),
   agent_def_id: z.string().max(200).nullable().optional(),
 });
 
@@ -250,7 +250,7 @@ export const AgentDefinitionCreateSchema = z.object({
   description: z.string().max(500).optional(),
   system_prompt: z.string().max(20000).optional(),
   model: z.string().max(100).optional().nullable(),
-  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode']).optional(),
+  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode', 'pi']).optional(),
   avatar_emoji: z.string().max(20).optional().nullable(),
   avatar_color: z.string().max(50).optional().nullable(),
   max_turns: z.number().int().min(1).max(200).optional().nullable(),
@@ -263,7 +263,7 @@ export const AgentDefinitionPatchSchema = z.object({
   description: z.string().max(500).optional(),
   system_prompt: z.string().max(20000).optional(),
   model: z.string().max(100).optional().nullable(),
-  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode']).optional(),
+  engine: z.enum(['claude', 'atomcode', 'codex', 'opencode', 'pi']).optional(),
   avatar_emoji: z.string().max(20).optional().nullable(),
   avatar_color: z.string().max(50).optional().nullable(),
   max_turns: z.number().int().min(1).max(200).optional().nullable(),
@@ -349,6 +349,25 @@ export const OpencodeConfigSchema = z.object({
   modelID: z.string().max(128).optional(),
   workingDir: z.string().max(512).optional(),
   providers: z.array(OpencodeProviderSchema).optional(),
+});
+
+export const PiProviderSchema = z.object({
+  provider: z.string().min(1).max(64),
+  // 公开 GET 响应不返回 apiKey；PUT 时空/缺省表示保留原值（见路由 keep-existing 逻辑）
+  apiKey: z.string().min(1).max(512).optional(),
+  baseURL: z.string().max(512).optional(),
+  model: z.string().min(1).max(128),
+});
+
+export const PiConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  binaryPath: z.string().max(512).optional(),
+  cliScriptPath: z.string().max(1024).optional(),
+  workingDir: z.string().max(512).optional(),
+  defaultProvider: z.string().max(64).optional(),
+  defaultModel: z.string().max(128).optional(),
+  thinkingLevel: z.string().max(32).optional(),
+  providers: z.array(PiProviderSchema).optional(),
 });
 
 export const AtomcodeProviderCreateSchema = z.object({

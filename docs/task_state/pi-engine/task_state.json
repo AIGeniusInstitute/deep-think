@@ -1,0 +1,40 @@
+{
+  "task": "接入 pi 作为 DeepThink 第四 Agent 执行引擎",
+  "branch": "feat/pi-engine",
+  "worktree": "/home/me/deepthink/.claude/worktrees/pi-engine",
+  "pi_source": "/home/me/pi",
+  "pi_version": "0.82.0",
+  "created_at": "2026-07-25",
+  "status": "merging",
+  "current_phase": "phase7-merge",
+  "phases": [
+    { "id": "phase1-design", "title": "PRD + 技术方案", "status": "done", "artifacts": ["docs/prd/pi-engine/PRD.md", "docs/tech_solution/pi-engine/SOLUTION.md"] },
+    { "id": "phase2-backend", "title": "后端：DB 迁移 + runtime-config + routes + container-runner 分发", "status": "done", "artifacts": ["src/db.ts", "src/runtime-config.ts", "src/schemas.ts", "src/container-runner.ts", "src/routes/config.ts", "src/routes/groups.ts", "src/index.ts", "src/types.ts", "src/agent-team/team-plan.ts", "src/routes/team.ts"] },
+    { "id": "phase3-agent-runner", "title": "pi-engine.ts + index.ts 分支", "status": "done", "artifacts": ["container/agent-runner/src/pi-engine.ts", "container/agent-runner/src/index.ts", "container/agent-runner/src/types.ts"] },
+    { "id": "phase4-frontend", "title": "ChatPage 切换器 + SettingsPage pi 区块 + EnginesPage 卡片", "status": "done", "artifacts": ["web/src/components/settings/PiEngineSection.tsx", "web/src/components/chat/EngineSwitcher.tsx", "web/src/pages/EnginesPage.tsx", "web/src/components/settings/SettingsNav.tsx", "web/src/pages/SettingsPage.tsx", "web/src/stores/chat.ts", "web/src/types.ts", "web/src/components/settings/types.ts"] },
+    { "id": "phase5-build-pi", "title": "cd ~/pi && npm install + npm run build 产出 dist/cli.js", "status": "done", "artifacts": ["~/pi/packages/coding-agent/dist/cli.js"] },
+    { "id": "phase6-test", "title": "typecheck + build + pi RPC 烟雾测试（浏览器 E2E 按用户指示跳过）", "status": "done", "artifacts": ["docs/test_report/pi-engine/TEST_REPORT.md"] },
+    { "id": "phase7-merge", "title": "提交 + 合并 main + push", "status": "in_progress", "artifacts": [] }
+  ],
+  "touch_files": [
+    { "path": "src/db.ts", "lines": ["1339-add pi_session_id column", "4904-add getPiSessionId/setPiSessionId/clearPiSessionId", "5118-add 'pi' to engine validation", "9432-add 'pi' to RegisteredGroup.engine type"] },
+    { "path": "src/runtime-config.ts", "lines": ["4503-add PiConfig/PiProvider/getPiConfig/savePiConfig/toPublicPiConfig/resolvePiProvidersForSave"] },
+    { "path": "src/schemas.ts", "lines": ["244,253,266-add 'pi' to engine enum", "341-add PiProviderSchema/PiConfigSchema"] },
+    { "path": "src/container-runner.ts", "lines": ["279-add 'pi' to ContainerInput.engine", "870-874-add 'pi' to as union", "911-add pi env injection branch", "1317,1795,1992,2231-add 'pi' branches"] },
+    { "path": "src/routes/config.ts", "lines": ["3530-add GET/PUT/POST /api/config/pi routes + testPiRpc"] },
+    { "path": "src/routes/groups.ts", "lines": ["126-add 'pi' to engine union"] },
+    { "path": "src/types.ts", "lines": ["75,81-add 'pi'"] },
+    { "path": "container/agent-runner/src/types.ts", "lines": ["57-add 'pi'"] },
+    { "path": "container/agent-runner/src/index.ts", "lines": ["2305-2309-add 'pi' to as union", "2366-add pi branch"] },
+    { "path": "container/agent-runner/src/pi-engine.ts", "lines": ["NEW-runPiEngine"] },
+    { "path": "web/src/components/chat/EngineSwitcher.tsx", "lines": ["12,14-19,21-25,34-45-add pi"] },
+    { "path": "web/src/components/settings/PiEngineSection.tsx", "lines": ["NEW"] },
+    { "path": "web/src/components/settings/SettingsNav.tsx", "lines": ["register pi tab"] },
+    { "path": "web/src/pages/EnginesPage.tsx", "lines": ["19-add pi card"] },
+    { "path": "web/src/stores/chat.ts", "lines": ["326,1773-add 'pi'"] },
+    { "path": "web/src/types.ts", "lines": ["GroupInfo.engine add 'pi'"] },
+    { "path": "web/src/api/client.ts", "lines": ["add piApi"] }
+  ],
+  "issues_encountered": [],
+  "test_results": {}
+}

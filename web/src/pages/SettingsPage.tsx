@@ -27,6 +27,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { AtomcodeEngineSection } from '../components/settings/AtomcodeEngineSection';
 import { CodexEngineSection } from '../components/settings/CodexEngineSection';
 import { OpencodeEngineSection } from '../components/settings/OpencodeEngineSection';
+import { PiEngineSection } from '../components/settings/PiEngineSection';
 import { EmbeddingSettingsSection } from '../components/settings/EmbeddingSettingsSection';
 import type { SettingsTab } from '../components/settings/types';
 
@@ -136,6 +137,7 @@ export function SettingsPage() {
     atomcode: 'AtomCode 引擎',
     codex: 'Codex 引擎',
     opencode: 'OpenCode 引擎',
+    pi: 'pi 引擎',
     embedding: 'Embedding 配置',
   };
 
@@ -235,6 +237,7 @@ export function SettingsPage() {
                   {activeTab === 'atomcode' && <AtomcodeEngineSection />}
                   {activeTab === 'codex' && <CodexEngineSection />}
                   {activeTab === 'opencode' && <OpencodeEngineSection />}
+                  {activeTab === 'pi' && <PiEngineSection />}
                   {activeTab === 'embedding' && <EmbeddingSettingsSection />}
                 </CardContent>
               </Card>

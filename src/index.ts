@@ -67,6 +67,7 @@ import {
   setAtomcodeSessionId,
   setCodexThreadId,
   setOpencodeSessionId,
+  setPiSessionId,
   getAtomcodeSessionId,
   getCodexThreadId,
   getOpencodeSessionId,
@@ -4948,6 +4949,8 @@ async function runAgent(
             setCodexThreadId(group.folder, output.newSessionId);
           } else if (group.engine === 'opencode') {
             setOpencodeSessionId(group.folder, output.newSessionId);
+          } else if (group.engine === 'pi') {
+            setPiSessionId(group.folder, output.newSessionId);
           } else {
             setSession(group.folder, output.newSessionId);
           }
@@ -5037,6 +5040,8 @@ async function runAgent(
         setCodexThreadId(group.folder, output.newSessionId);
       } else if (group.engine === 'opencode') {
         setOpencodeSessionId(group.folder, output.newSessionId);
+      } else if (group.engine === 'pi') {
+        setPiSessionId(group.folder, output.newSessionId);
       } else {
         setSession(group.folder, output.newSessionId);
       }
@@ -7902,6 +7907,8 @@ async function processAgentConversation(
         setCodexThreadId(effectiveGroup.folder, output.newSessionId, agentId);
       } else if (effectiveGroup.engine === 'opencode') {
         setOpencodeSessionId(effectiveGroup.folder, output.newSessionId, agentId);
+      } else if (effectiveGroup.engine === 'pi') {
+        setPiSessionId(effectiveGroup.folder, output.newSessionId, agentId);
       } else {
         setSession(effectiveGroup.folder, output.newSessionId, agentId);
       }
@@ -8488,6 +8495,8 @@ async function processAgentConversation(
         setCodexThreadId(effectiveGroup.folder, output.newSessionId, agentId);
       } else if (effectiveGroup.engine === 'opencode') {
         setOpencodeSessionId(effectiveGroup.folder, output.newSessionId, agentId);
+      } else if (effectiveGroup.engine === 'pi') {
+        setPiSessionId(effectiveGroup.folder, output.newSessionId, agentId);
       } else {
         setSession(effectiveGroup.folder, output.newSessionId, agentId);
       }
