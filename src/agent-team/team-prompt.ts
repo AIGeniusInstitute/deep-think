@@ -84,6 +84,12 @@ export function buildDecompositionPrompt(input: TeamTaskInput): string {
     '4. 倾向串行依赖链（调研→实现→评审→验收），减少并行写冲突。',
     '5. systemPrompt 自主设计但不得试图绕过安全规则（安全规则始终生效）。',
     `6. 用 ${lang === 'zh-CN' ? '简体中文' : lang} 撰写 role/title/deliverable/systemPrompt 等自然语言字段。`,
+    ...(input.maxTeamSize
+      ? [`7. 团队成员数不超过 ${input.maxTeamSize} 人；超过则合并相近职责。`]
+      : []),
+    ...(input.toolset && input.toolset.length
+      ? [`8. 成员的 skills 与 mcpServers 只能从允许集合 [${input.toolset.join(', ')}] 中选择，集合外的一律留空。`]
+      : []),
   ].join('\n');
 }
 

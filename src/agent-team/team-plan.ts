@@ -79,6 +79,23 @@ export interface TeamTaskInput {
   groupFolder: string;
   chatJid: string;
   userLanguage?: string;
+  /**
+   * v2 (TeamPage UI): max team member count. When set and the decomposed plan
+   * exceeds it, buildTeam caps members (preserving any member referenced by a
+   * graph node via dependency closure). Missing → no cap (backward compat).
+   */
+  maxTeamSize?: number;
+  /**
+   * v2 (TeamPage UI): allowed skill/mcp id allow-list. When set, buildTeam
+   * filters each member's skills/mcpServers to this set. Missing → no filter.
+   */
+  toolset?: string[];
+  /**
+   * v2 (TeamPage UI): 'semi-auto' inserts a human approval gate after each
+   * agent node (串入依赖链, blocks downstream until approved). 'auto' (default)
+   * = no extra gates. Missing → 'auto' (backward compat).
+   */
+  executionMode?: 'auto' | 'semi-auto';
 }
 
 export interface TeamBuildResult {

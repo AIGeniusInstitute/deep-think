@@ -42,7 +42,9 @@ export async function sdkQuery(
     const model = opts?.model || config.anthropicModel || undefined;
 
     let result = '';
-    const conversation = query({
+  const _t = Date.now();
+  console.error(`[sdkq] before query() call at +0ms`);
+  const conversation = query({
       prompt,
       options: {
         ...(model && { model }),
@@ -54,8 +56,9 @@ export async function sdkQuery(
         abortController,
       },
     });
-
-    for await (const event of conversation) {
+  console.error(`[sdkq] after query() call at +${Date.now() - _t}ms`);
+  for await (const event of conversation) {
+      console.error(`[sdkq] first event at +${Date.now() - _t}ms type=${event.type}`);
       if (event.type === 'result' && event.subtype === 'success') {
         result = event.result;
       }

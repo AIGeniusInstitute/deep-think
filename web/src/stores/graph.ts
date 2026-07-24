@@ -55,7 +55,7 @@ interface GraphState {
   selectedNodeId: string | null;
   fetchRuns: () => Promise<void>;
   loadRun: (id: string) => Promise<void>;
-  startPolling: (id: string) => void;
+  startPolling: (id: string, intervalMs?: number) => void;
   stopPolling: () => void;
   setSelectedNode: (id: string | null) => void;
   startRun: (opts: {
@@ -107,13 +107,25 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
-  startPolling: (id) => {
+  startPolling: (id, intervalMs) => {
     const { stopPolling, loadRun } = get();
     stopPolling();
     void loadRun(id);
     const timer = setInterval(() => {
+      // v2: stop polling once the run reaches a terminal state — avoids
+      // infinite polling after completed/failed/cancelled (AC6 + trace回溯).
+      const { currentRun } = get();
+      if (
+        currentRun &&
+        (currentRun.status === 'completed' ||
+          currentRun.status === 'failed' ||
+          currentRun.status === 'cancelled')
+      ) {
+        get().stopPolling();
+        return;
+      }
       void loadRun(id);
-    }, 5000);
+    }, intervalMs ?? 5000);
     set({ pollingTimer: timer });
   },
 

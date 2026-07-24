@@ -5,6 +5,10 @@
  * failed → error），不再用单次 280s 长超时阻塞请求——彻底消除"长时间阻塞 HTTP
  * 请求"的脆弱模式。终态拿到 runId 后，TeamPage 的 useEffect 会自动 startPolling
  * graph run（/api/graph/runs/:id）驱动 DAG 可视化，行为与改动前一致。
+ *
+ * v2 (TeamPage UI): buildTeam 透传高级选项三字段（maxTeamSize/toolset/
+ * executionMode）；新增 teamHistory + loadHistory（GET /api/team/runs 列表）+
+ * openHistory（按 buildId 重开历史任务，带 plan，角色名完整）。
  */
 import { create } from 'zustand';
 import { apiFetch } from '../api/client';
@@ -23,8 +27,17 @@ export interface TeamPlanMember {
 export interface TeamPlan {
   teamName: string;
   members: TeamPlanMember[];
-  graph: { nodes: Array<{ id: string; type: string; title: string; dependsOn?: string[] }> };
+  graph: { nodes: Array<{ id: string; type: string; title: string; dependsOn?: string[]; agentMember?: string }> };
   acceptanceCriteria?: string;
+}
+
+export interface TeamBuildSummary {
+  id: string;
+  teamName: string | null;
+  goalText: string;
+  status: 'running' | 'completed' | 'failed';
+  runId: string | null;
+  createdAt: number;
 }
 
 interface TeamState {
@@ -32,6 +45,9 @@ interface TeamState {
   error: string | null;
   lastRunId: string | null;
   lastPlan: TeamPlan | null;
+  /** v2: history list for the "历史任务" entry. */
+  history: TeamBuildSummary[];
+  historyLoading: boolean;
   buildTeam: (input: {
     goalText: string;
     background?: string;
@@ -39,8 +55,15 @@ interface TeamState {
     groupFolder: string;
     chatJid: string;
     userLanguage?: string;
+    maxTeamSize?: number;
+    toolset?: string[];
+    executionMode?: 'auto' | 'semi-auto';
   }) => Promise<{ runId: string; plan: TeamPlan } | null>;
   reset: () => void;
+  loadHistory: () => Promise<void>;
+  /** Reopen a historical team build: fetch its completed plan + runId, set
+   *  lastRunId/lastPlan so TeamPage switches to execution view with full plan. */
+  openHistory: (buildId: string) => Promise<void>;
 }
 
 // 模块级轮询令牌：每次 buildTeam/reset 自增，使上一轮 in-flight 轮询自停，
@@ -86,6 +109,8 @@ export const useTeamStore = create<TeamState>((set) => ({
   error: null,
   lastRunId: null,
   lastPlan: null,
+  history: [],
+  historyLoading: false,
 
   buildTeam: async (input) => {
     set({ building: true, error: null, lastRunId: null, lastPlan: null });
@@ -137,5 +162,33 @@ export const useTeamStore = create<TeamState>((set) => ({
   reset: () => {
     pollToken++; // 作废在跑的轮询
     set({ building: false, error: null, lastRunId: null, lastPlan: null });
+  },
+
+  loadHistory: async () => {
+    set({ historyLoading: true });
+    try {
+      const data = await apiFetch<{ runs: TeamBuildSummary[] }>('/api/team/runs');
+      set({ history: data.runs ?? [], historyLoading: false });
+    } catch {
+      set({ historyLoading: false });
+    }
+  },
+
+  openHistory: async (buildId) => {
+    set({ error: null });
+    try {
+      const data = await apiFetch<{ status?: string; runId?: string; plan?: TeamPlan; error?: string }>(
+        `/api/team/runs/${encodeURIComponent(buildId)}`,
+      );
+      if (data.status === 'completed' && data.runId && data.plan) {
+        set({ lastRunId: data.runId, lastPlan: data.plan, building: false });
+      } else if (data.status === 'failed') {
+        set({ error: data.error ?? '该历史任务组建失败' });
+      } else {
+        set({ error: '该历史任务仍在组建中' });
+      }
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
   },
 }));

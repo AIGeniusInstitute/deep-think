@@ -105,6 +105,47 @@ function createMemberAgent(
   return def.id;
 }
 
+/**
+ * v2 (TeamPage UI): apply user's advanced options to the decomposed plan.
+ * - maxTeamSize: cap members, preserving any member referenced by a graph
+ *   agent node (dependency closure) so the graph never references a dropped
+ *   member. Fill remaining slots in declaration order.
+ * - toolset: filter each member's skills/mcpServers to the allowed set.
+ * executionMode is honored in assembleGraphDefinition (inserts human gates).
+ * Surgical: both no-op when the option is missing (backward compat).
+ */
+function applyAdvancedOptions(plan: TeamPlan, input: TeamTaskInput): TeamPlan {
+  let members = plan.members;
+
+  if (input.maxTeamSize && members.length > input.maxTeamSize) {
+    const referenced = new Set(
+      plan.graph.nodes.filter((n) => n.agentMember).map((n) => n.agentMember!),
+    );
+    const keep: TeamMember[] = [];
+    // First: keep all members referenced by graph nodes (dependency closure).
+    for (const m of members) {
+      if (referenced.has(m.name)) keep.push(m);
+    }
+    // Then fill up to maxTeamSize in declaration order.
+    for (const m of members) {
+      if (keep.length >= input.maxTeamSize) break;
+      if (!keep.includes(m)) keep.push(m);
+    }
+    members = keep;
+  }
+
+  if (input.toolset && input.toolset.length) {
+    const allowed = new Set(input.toolset);
+    members = members.map((m) => ({
+      ...m,
+      skills: m.skills.filter((s) => allowed.has(s)),
+      mcpServers: m.mcpServers.filter((s) => allowed.has(s)),
+    }));
+  }
+
+  return members === plan.members ? plan : { ...plan, members };
+}
+
 /** Assemble a GraphDefinition from the plan + created member agent def ids. */
 export function assembleGraphDefinition(
   plan: TeamPlan,
@@ -116,6 +157,13 @@ export function assembleGraphDefinition(
   const edges: GraphEdge[] = [];
   const nodeIds = new Set(plan.graph.nodes.map((n) => n.id));
   let lastAgentNodeId: string | null = null;
+
+  // v2 semi-auto: for each agent node, a human approval gate is inserted right
+  // after it and spliced into the dependency chain — downstream nodes that
+  // depended on the agent now depend on the gate, so the run pauses for human
+  // approval before downstream work proceeds (AC6.5). Map agentId → reviewId.
+  const semiAuto = input.executionMode === 'semi-auto';
+  const reviewIdForAgent = new Map<string, string>();
 
   for (const gn of plan.graph.nodes) {
     const node: GraphNode = { id: gn.id, type: gn.type, title: gn.title };
@@ -130,6 +178,30 @@ export function assembleGraphDefinition(
       node.prompt = gn.deliverable || gn.title;
       node.isIdempotent = false;
       lastAgentNodeId = gn.id;
+
+      if (semiAuto) {
+        // Insert a human approval gate after this agent, spliced into the chain.
+        let reviewId = `${gn.id}-review`;
+        let i = 0;
+        while (nodeIds.has(reviewId)) {
+          i += 1;
+          reviewId = `${gn.id}-review-${i}`;
+        }
+        nodeIds.add(reviewId);
+        reviewIdForAgent.set(gn.id, reviewId);
+        nodes.push({
+          id: reviewId,
+          type: 'human',
+          title: `${gn.title} 产出确认`,
+          approvalPrompt: `${member.role} 的「${gn.title}」产出是否通过？通过则继续下游，打回则重做该节点。`,
+          approvalOptions: [
+            { label: '通过，继续下游', value: 'approve' },
+            { label: '打回重做', value: 'reject' },
+          ],
+          approvalStateKey: `node_${gn.id}_approval`,
+        });
+        edges.push({ id: `${gn.id}->${reviewId}`, from: gn.id, to: reviewId, type: 'data' });
+      }
     } else if (gn.type === 'gate') {
       node.assertions = gn.assertions;
       node.shellCheck = gn.shellCheck;
@@ -139,9 +211,12 @@ export function assembleGraphDefinition(
     nodes.push(node);
     for (const dep of gn.dependsOn) {
       if (nodeIds.has(dep)) {
+        // semi-auto: if this node depends on an agent that got a review gate,
+        // rewire the dependency to the review gate so approval blocks downstream.
+        const rewiredDep = (semiAuto && reviewIdForAgent.has(dep)) ? reviewIdForAgent.get(dep)! : dep;
         edges.push({
-          id: `${dep}->${gn.id}`,
-          from: dep,
+          id: `${rewiredDep}->${gn.id}`,
+          from: rewiredDep,
           to: gn.id,
           type: 'data',
         });
@@ -215,6 +290,9 @@ export async function buildTeam(
   } catch (err) {
     return { error: 'decomposition failed', detail: (err as Error).message };
   }
+
+  // v2: apply user advanced options (maxTeamSize / toolset) before creating members.
+  plan = applyAdvancedOptions(plan, input);
 
   // 2. Create agent members (idempotent).
   const memberDefIds: Record<string, string> = {};

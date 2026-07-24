@@ -21,6 +21,7 @@ import {
   getTeamBuild,
   completeTeamBuild,
   failTeamBuild,
+  listTeamBuilds,
 } from '../db.js';
 import { logger } from '../logger.js';
 
@@ -35,10 +36,45 @@ const TeamRunBodySchema = z.object({
   groupFolder: z.string().min(1),
   chatJid: z.string().min(1),
   userLanguage: z.string().optional(),
+  maxTeamSize: z.number().int().min(1).max(12).optional(),
+  toolset: z.array(z.string()).optional(),
+  executionMode: z.enum(['auto', 'semi-auto']).optional(),
+});
+
+/**
+ * GET /api/team/runs — list the current user's team builds (history, newest
+ * first). v2 (TeamPage UI): powers the "历史任务" entry so users can reopen a
+ * past team run with its full plan. Must be registered BEFORE /runs/:buildId
+ * so the literal /runs path isn't captured by the :buildId param route.
+ */
+teamRoutes.get('/runs', (c) => {
+  const authUser = c.get('user') as import('../types.js').AuthUser;
+  const rows = listTeamBuilds(authUser.id, 20);
+  return c.json({
+    runs: rows.map((r) => {
+      let teamName: string | null = null;
+      if (r.plan_json) {
+        try {
+          teamName = (JSON.parse(r.plan_json) as { teamName?: string }).teamName ?? null;
+        } catch {
+          teamName = null;
+        }
+      }
+      return {
+        id: r.id,
+        teamName,
+        goalText: r.goal_text,
+        status: r.status,
+        runId: r.run_id,
+        createdAt: r.created_at,
+      };
+    }),
+  });
 });
 
 /** POST /api/team/runs — 立即返回 buildId，后台 detached 组建团队。 */
 teamRoutes.post('/runs', async (c) => {
+  const _t0 = Date.now();
   const authUser = c.get('user') as import('../types.js').AuthUser;
   const body = await c.req.json().catch(() => null);
   const parsed = TeamRunBodySchema.safeParse(body);
@@ -61,6 +97,7 @@ teamRoutes.post('/runs', async (c) => {
     chat_jid: parsed.data.chatJid,
     goal_text: parsed.data.goalText,
   });
+  console.error(`[team-timing] createTeamBuild+parse done at +${Date.now() - _t0}ms`);
 
   const input = {
     goalText: parsed.data.goalText,
@@ -70,11 +107,15 @@ teamRoutes.post('/runs', async (c) => {
     groupFolder: parsed.data.groupFolder,
     chatJid: parsed.data.chatJid,
     userLanguage: parsed.data.userLanguage ?? 'zh-CN',
+    maxTeamSize: parsed.data.maxTeamSize,
+    toolset: parsed.data.toolset,
+    executionMode: parsed.data.executionMode,
   };
 
   // Fire-and-forget（沿用 team-builder.ts buildRunContext().then().catch() 范式）：
   // buildTeam 同步阻塞于 decompose（最坏 240s），放到后台跑，HTTP 立即返回。
   // 成功回写 plan+runId，失败回写 error；进程级 unhandledRejection 已有 logger 兜底。
+  console.error(`[team-timing] before buildTeam call at +${Date.now() - _t0}ms`);
   webDeps
     .buildTeam(input)
     .then((result) => {
@@ -94,6 +135,7 @@ teamRoutes.post('/runs', async (c) => {
       logger.error({ buildId, err }, 'team build threw');
     });
 
+  console.error(`[team-timing] before return at +${Date.now() - _t0}ms`);
   return c.json({ ok: true, buildId, status: 'running' });
 });
 
