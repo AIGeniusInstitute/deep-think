@@ -1,38 +1,69 @@
 /**
- * pi Engine Adapter
+ * pi Engine Adapter (v2 — RPC subprocess)
  *
- * Drives the pi coding agent (`pi --mode rpc`) as an alternative to the
- * Claude Agent SDK query() path. Invoked by index.ts main() when
- * ContainerInput.engine === 'pi'.
+ * Drives the pi coding agent as a **binary subprocess** in RPC mode, mirroring
+ * the atomcode / codex / opencode "external binary package" integration pattern.
  *
- * pi is a TypeScript monorepo (~/pi, v0.82.0) with four run modes. This
- * adapter uses **RPC mode** — a long-running stdio JSONL protocol designed
- * for process integration (pi README / rpc-types.ts):
- *   - stdin:  one JSONL `RpcCommand` per line (we send `prompt`, `get_state`,
- *             `extension_ui_response`)
- *   - stdout: one JSONL per line, either an `RpcResponse`, an
- *             `AgentSessionEvent`, or an `extension_ui_request`
+ * pi is published as the npm package `@earendil-works/pi-coding-agent` (bin `pi`).
+ * It ships a `--mode rpc` mode purpose-built for process integration: a long-lived
+ * child process that reads JSONL commands on stdin and writes JSONL responses +
+ * agent events on stdout (see ~/pi/packages/coding-agent/docs/rpc.md).
  *
- * Lifecycle:
+ * This adapter spawns that child once per DeepThink session, drives it over the
+ * JSONL protocol, and translates pi's `AgentSessionEvent` stream into DeepThink
+ * `StreamEvent`s. The pi child is the engine; we are only the driver.
+ *
+ * ── Protocol contract (pi rpc-types.ts / jsonl.ts) ──
+ *   stdin : one JSON `RpcCommand` per LF. We send: get_state, prompt,
+ *           extension_ui_response.
+ *   stdout: one JSON per LF — either an `RpcResponse` (carries the matching
+ *           request `id`), an `AgentSessionEvent` (streamed, no id), or an
+ *           `extension_ui_request` (carries a dialog `id`).
+ *   Framing: STRICT LF-only. pi forbids Node `readline` because it also splits
+ *           on U+2028 / U+2029, which are valid inside JSON strings. We use a
+ *           dedicated LF-only reader (see attachJsonlReader below).
+ *
+ * ── Lifecycle ──
  *   1. spawn `binaryPath [cliScriptPath] --mode rpc [--provider P] [--model M]
  *      [--thinking T] [--session <id>]`, cwd=workingDir, inject
  *      `<PROVIDER>_API_KEY` env + per-group `PI_CODING_AGENT_DIR`.
- *   2. Ready detection: send `get_state`, await matching `response success`
- *      (30s). Capture `sessionId` for persistence.
- *   3. Send first `prompt` command (drain IPC + scheduled-task prefix into
- *      the message). Translate subsequent `AgentSessionEvent`s to DeepThink
- *      StreamEvents via writeOutput({ status:'stream', streamEvent }).
- *   4. On `agent_settled`: emit writeOutput({ status:'success', result,
- *      newSessionId }) — `agent_settled` is the authoritative idle signal
- *      (agent_end may be followed by retry/compaction).
- *   5. IPC polling loop — on new message: send another `prompt` command.
+ *   2. Attach ONE LF-only JSONL reader to proc.stdout for the process lifetime.
+ *      It routes every line through `handleLine`: responses are correlated by
+ *      `id` to pending request promises; events flow to the active turn
+ *      handler; extension UI requests are auto-dismissed.
+ *   3. Ready detection: send `get_state` (await its response, 30s). Capture
+ *      `sessionId` for persistence.
+ *   4. First turn: register a transient event handler, send `prompt`, consume
+ *      events until `agent_settled` (authoritative idle signal — `agent_end`
+ *      may be followed by retry / compaction). Emit success.
+ *   5. IPC polling loop — on a new follow-up message: register a fresh handler,
+ *      send another `prompt`, repeat.
  *   6. `extension_ui_request`: reply `{ cancelled: true }` (no TUI in
  *      external-driver mode).
  *   7. On `_close` sentinel / SIGTERM: SIGTERM pi child → exit.
  *
+ * ── Unified LLM provider config (no machine-local pi config) ──
+ *   All provider/model/apiKey/baseURL settings come from DeepThink's Settings →
+ *   pi 引擎 UI (runtime-config.ts PiConfig, stored in DeepThink's
+ *   CLAUDE_CONFIG_DIR/pi.json). container-runner injects them as PI_BINARY_PATH /
+ *   PI_CLI_SCRIPT_PATH / PI_DEFAULT_PROVIDER / PI_DEFAULT_MODEL /
+ *   PI_THINKING_LEVEL / PI_PROVIDERS_JSON env vars. This adapter maps each
+ *   provider to its `<PROVIDER>_API_KEY` env var (so pi-ai reads it) and passes
+ *   `--provider`/`--model`/`--thinking` on the CLI. The per-group
+ *   PI_CODING_AGENT_DIR is an isolated empty dir, so pi never touches the
+ *   user's `~/.pi/agent` credentials or settings — users configure everything
+ *   in DeepThink.
+ *
+ * ── Why v2 (audit findings) ──
+ *   The prior implementation used two `readline.createInterface` instances on
+ *   the same stdout (one for ready detection, one per turn). That is (a) a
+ *   protocol violation — pi forbids readline, and (b) architecturally broken —
+ *   two readers on one stream split lines unpredictably and lose data. v2 uses
+ *   a single LF-only reader with id-correlated response dispatch, matching pi's
+ *   own `RpcClient` reference design.
+ *
  * Known limitations (documented in PRD §3.1):
  *   - No DeepThink MCP tool bridge (send_message/schedule_task/memory_*).
- *     pi core has no MCP client/server; first version does not bridge.
  *   - No image input (first version is text-only).
  *   - No sub-agents / skills / plugins / extensions bridging.
  */
@@ -41,10 +72,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
-import * as readline from 'node:readline';
+import { StringDecoder } from 'node:string_decoder';
 
 import type { ContainerInput, ContainerOutput, StreamEvent } from './types.js';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC constants (mirrors index.ts / codex-engine.ts so follow-up messages reach
+// the pi engine the same way they would reach the Claude path).
+// ─────────────────────────────────────────────────────────────────────────────
 const OUTPUT_START_MARKER = '---DEEPTHINK_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---DEEPTHINK_OUTPUT_END---';
 
@@ -104,11 +139,22 @@ interface PiProviderInput {
   model: string;
 }
 
-/** pi RPC stdout messages (discriminated union, see pi rpc-types.ts). */
-type PiRpcMessage =
-  | { id?: string; type: 'response'; command: string; success: boolean; data?: unknown; error?: { message?: string } | string }
-  | { type: 'extension_ui_request'; id: string; method: string }
-  | { type: string; [key: string]: unknown };
+/** A line emitted by pi RPC on stdout — discriminated by `type`. */
+interface PiResponse {
+  id?: string;
+  type: 'response';
+  command: string;
+  success: boolean;
+  data?: unknown;
+  error?: { message?: string } | string;
+}
+interface PiExtensionUiRequest {
+  type: 'extension_ui_request';
+  id: string;
+  method: string;
+}
+type PiEvent = { type: string; [key: string]: unknown };
+type PiRpcLine = PiResponse | PiExtensionUiRequest | PiEvent;
 
 interface RunOpts {
   containerInput: ContainerInput;
@@ -122,6 +168,45 @@ interface RunOneTurnResult {
   sessionId?: string;
   error?: string;
   interrupted?: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LF-only JSONL reader (DO NOT use node:readline — see file header).
+// Mirrors pi's attachJsonlLineReader (packages/coding-agent/src/modes/rpc/jsonl.ts).
+// ─────────────────────────────────────────────────────────────────────────────
+function attachJsonlReader(
+  stream: NodeJS.ReadableStream,
+  onLine: (line: string) => void,
+): () => void {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+
+  const emitLine = (line: string): void => {
+    onLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+  };
+
+  const onData = (chunk: Buffer | string): void => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    while (true) {
+      const nl = buffer.indexOf('\n');
+      if (nl === -1) return;
+      emitLine(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+  };
+
+  const onEnd = (): void => {
+    buffer += decoder.end();
+    if (buffer.length > 0) emitLine(buffer);
+    buffer = '';
+  };
+
+  stream.on('data', onData);
+  stream.on('end', onEnd);
+  return () => {
+    stream.off('data', onData);
+    stream.off('end', onEnd);
+  };
 }
 
 function emitStream(
@@ -140,9 +225,8 @@ function emitStream(
 }
 
 /**
- * Drain pending IPC input files. Mirrors the logic in index.ts / codex-engine
- * so the pi engine sees the same follow-up messages that the Claude path
- * would have absorbed into its initial prompt.
+ * Drain pending IPC input files. Mirrors index.ts / codex-engine so the pi
+ * engine sees the same follow-up messages the Claude path would have absorbed.
  */
 function drainIpcInput(): IpcDrainResult {
   const result: IpcDrainResult = { messages: [] };
@@ -173,17 +257,6 @@ function drainIpcInput(): IpcDrainResult {
   return result;
 }
 
-/** Write a JSONL command to the pi child's stdin. */
-function sendCommand(proc: ChildProcess, cmd: Record<string, unknown>): boolean {
-  if (!proc.stdin || proc.stdin.destroyed) return false;
-  try {
-    proc.stdin.write(JSON.stringify(cmd) + '\n');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Resolve a per-group PI_CODING_AGENT_DIR so multiple pi instances don't
  *  collide on ~/.pi/agent sessions. */
 function resolvePiAgentDir(groupFolder: string, log: (m: string) => void): string {
@@ -200,65 +273,248 @@ function resolvePiAgentDir(groupFolder: string, log: (m: string) => void): strin
   return dir;
 }
 
+/** Extract a human-readable error string from a pi response error field. */
+function piErrorToString(err: PiResponse['error']): string {
+  if (!err) return 'unknown error';
+  if (typeof err === 'string') return err;
+  return err.message ?? 'unknown error';
+}
+
+/**
+ * pi-ai provider name → models.json `api` field. Providers not listed default
+ * to "openai-completions" (the dominant compatibility shape). Anthropic-family
+ * providers use "anthropic-messages" so an Anthropic-compatible baseURL (e.g.
+ * DashScope's /apps/anthropic) speaks the right wire format.
+ */
+const PROVIDER_API: Record<string, string> = {
+  anthropic: 'anthropic-messages',
+  'ant-ling': 'anthropic-messages',
+  zai: 'anthropic-messages',
+  kimi: 'anthropic-messages',
+};
+
+/** Sanitize a DeepThink provider name into a pi custom-provider id (no slash,
+ *  no whitespace) so `--model <id>/<model>` parses correctly. */
+function toCustomProviderId(provider: string): string {
+  const cleaned = provider.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+  return `dt-${cleaned || 'default'}`;
+}
+
+/**
+ * Write `models.json` into the isolated PI_CODING_AGENT_DIR so pi picks up
+ * every DeepThink-configured provider that has a custom baseURL — without the
+ * user touching ~/.pi/agent on the machine. Providers with an empty baseURL
+ * stay on pi's built-in provider (env key only). The API key is referenced as
+ * `$<ENV_KEY>` so the secret stays in the spawned env, not on disk.
+ *
+ * Returns a map from the original provider name → the provider id to use on
+ * the CLI (`dt-<provider>` for custom, or the original name for built-in).
+ */
+function writePiModelsJson(
+  providers: PiProviderInput[],
+  piAgentDir: string,
+  thinkingLevel: string,
+  log: (m: string) => void,
+): Map<string, string> {
+  const idMap = new Map<string, string>();
+  const custom: Record<string, unknown> = {};
+  const reasoning = thinkingLevel !== 'off';
+  for (const p of providers) {
+    if (!p.baseURL) {
+      // Built-in provider — just inject env key (done by caller), use as-is.
+      idMap.set(p.provider, p.provider);
+      continue;
+    }
+    const customId = toCustomProviderId(p.provider);
+    idMap.set(p.provider, customId);
+    const envKey = PROVIDER_ENV_KEY[p.provider.toLowerCase()];
+    const apiKeyRef = envKey ? `$${envKey}` : p.apiKey; // fall back to literal
+    custom[customId] = {
+      baseUrl: p.baseURL,
+      api: PROVIDER_API[p.provider.toLowerCase()] ?? 'openai-completions',
+      apiKey: apiKeyRef,
+      models: [
+        {
+          id: p.model,
+          name: p.model,
+          reasoning,
+          input: ['text'],
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+      ],
+    };
+  }
+  const hasCustom = Object.keys(custom).length > 0;
+  if (!hasCustom) {
+    // No custom providers → remove a stale models.json from a prior run so pi
+    // doesn't pick up old entries.
+    const modelsPath = path.join(piAgentDir, 'models.json');
+    try { fs.unlinkSync(modelsPath); } catch { /* ignore */ }
+    return idMap;
+  }
+  try {
+    fs.mkdirSync(piAgentDir, { recursive: true });
+    const modelsPath = path.join(piAgentDir, 'models.json');
+    fs.writeFileSync(modelsPath, JSON.stringify({ providers: custom }, null, 2) + '\n', { mode: 0o600 });
+    fs.chmodSync(modelsPath, 0o600);
+    log(`Wrote pi models.json (${Object.keys(custom).length} custom provider(s)) → ${modelsPath}`);
+  } catch (err) {
+    log(`Failed to write pi models.json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return idMap;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pi RPC session driver: one persistent stdout reader + id-correlated command
+// dispatch + a swappable per-turn event handler.
+// ─────────────────────────────────────────────────────────────────────────────
+interface PendingRequest {
+  resolve: (resp: PiResponse) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+type TurnEventHandler = (ev: PiEvent) => void;
+
+class PiRpcDriver {
+  private proc: ChildProcess;
+  private log: (m: string) => void;
+  private pending = new Map<string, PendingRequest>();
+  private reqSeq = 0;
+  private turnHandler: TurnEventHandler | null = null;
+  private detachReader: (() => void) | null = null;
+  private exited = false;
+
+  constructor(proc: ChildProcess, log: (m: string) => void) {
+    this.proc = proc;
+    this.log = log;
+  }
+
+  /** Attach the single LF-only stdout reader. Call once after spawn. */
+  start(onUiRequest: (req: PiExtensionUiRequest) => void): void {
+    const stdout = this.proc.stdout;
+    if (!stdout) return;
+    this.detachReader = attachJsonlReader(stdout, (line) => {
+      this.handleLine(line, onUiRequest);
+    });
+    this.proc.once('close', (code, signal) => {
+      this.exited = true;
+      this.log(`pi child exited (code=${code} signal=${signal})`);
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.resolve({
+          id: undefined,
+          type: 'response',
+          command: '__exit__',
+          success: false,
+          error: `pi process exited (code=${code} signal=${signal})`,
+        });
+      }
+      this.pending.clear();
+    });
+  }
+
+  private handleLine(line: string, onUiRequest: (req: PiExtensionUiRequest) => void): void {
+    if (!line.trim()) return;
+    let msg: PiRpcLine;
+    try {
+      msg = JSON.parse(line) as PiRpcLine;
+    } catch {
+      // Non-JSONL (stderr bleed / logs) — ignore.
+      return;
+    }
+    if (msg.type === 'response') {
+      const resp = msg as PiResponse;
+      const id = resp.id;
+      if (id && this.pending.has(id)) {
+        const p = this.pending.get(id)!;
+        this.pending.delete(id);
+        clearTimeout(p.timer);
+        p.resolve(resp);
+      }
+      // Responses with no pending id (stray acks) — drop.
+      return;
+    }
+    if (msg.type === 'extension_ui_request') {
+      onUiRequest(msg as PiExtensionUiRequest);
+      return;
+    }
+    // Otherwise it's an AgentSessionEvent — route to the active turn.
+    const handler = this.turnHandler;
+    if (handler) {
+      try {
+        handler(msg as PiEvent);
+      } catch (err) {
+        this.log(`turn handler threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /** Send a command and await its response (correlated by id). */
+  async send<T = unknown>(cmd: Record<string, unknown>): Promise<PiResponse & { data?: T }> {
+    const stdin = this.proc.stdin;
+    if (!stdin || stdin.destroyed || this.exited) {
+      throw new Error('pi stdin unavailable');
+    }
+    const id = `req-${++this.reqSeq}`;
+    const fullCmd = { ...cmd, id };
+    return new Promise<PiResponse & { data?: T }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`pi command timeout: ${String(cmd.type)}`));
+      }, 30_000);
+      this.pending.set(id, {
+        resolve: (resp) => resolve(resp as PiResponse & { data?: T }),
+        timer,
+      });
+      try {
+        stdin.write(JSON.stringify(fullCmd) + '\n');
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** Install the handler that receives AgentSessionEvents for one turn. */
+  setTurnHandler(h: TurnEventHandler | null): void {
+    this.turnHandler = h;
+  }
+
+  hasExited(): boolean {
+    return this.exited;
+  }
+
+  kill(signal: NodeJS.Signals = 'SIGTERM'): void {
+    this.detachReader?.();
+    this.detachReader = null;
+    try { this.proc.kill(signal); } catch { /* ignore */ }
+  }
+}
+
 /**
  * Run one prompt turn against the long-lived pi RPC process:
  * send `prompt`, consume events until `agent_settled` (or error/abort).
  */
 async function runOneTurn(
   opts: {
-    proc: ChildProcess;
+    driver: PiRpcDriver;
     message: string;
     writeOutput: (out: ContainerOutput) => void;
     currentSessionId: string | undefined;
     turnId: string | undefined;
     log: (m: string) => void;
     signal?: AbortSignal;
-    onSessionId?: (id: string) => void;
-    onUiRequest?: (req: { id: string; method: string }) => void;
   },
 ): Promise<RunOneTurnResult> {
-  const { proc, message, writeOutput, currentSessionId, turnId, log, signal, onSessionId, onUiRequest } = opts;
-
-  const promptId = `turn-${turnId ?? 'x'}`;
+  const { driver, message, writeOutput, currentSessionId, turnId, signal } = opts;
   const result: RunOneTurnResult = { fullText: '', toolCalls: 0 };
-
   let settled = false;
-  let turnEnded = false;
 
-  // Resolve when agent_settled arrives (or error/abort).
   const settledPromise = new Promise<void>((resolve) => {
-    const stdout = proc.stdout;
-    if (!stdout) { resolve(); return; }
-    const rl = readline.createInterface({ input: stdout, crlfDelay: Infinity });
-
-    const onLine = (line: string): void => {
-      if (!line.trim()) return;
-      let msg: PiRpcMessage;
-      try {
-        msg = JSON.parse(line) as PiRpcMessage;
-      } catch {
-        // Non-JSONL (logs) — ignore.
-        return;
-      }
-      // Route by message kind.
-      if (msg.type === 'response') {
-        // Could be the prompt ack or a stray get_state response. The prompt
-        // ack only signals preflight passed; real results come via events.
-        if (msg.command === 'prompt' && !msg.success) {
-          const errMsg = typeof msg.error === 'string' ? msg.error : (msg.error as { message?: string })?.message ?? 'prompt rejected';
-          result.error = errMsg;
-          resolve();
-          return;
-        }
-        return;
-      }
-      if (msg.type === 'extension_ui_request') {
-        const req = msg as { id: string; method: string };
-        onUiRequest?.(req);
-        return;
-      }
-      // AgentSessionEvent routing.
-      switch (msg.type) {
+    const handler: TurnEventHandler = (ev) => {
+      switch (ev.type) {
         case 'agent_start':
           emitStream(writeOutput, {
             eventType: 'init',
@@ -267,25 +523,21 @@ async function runOneTurn(
           }, currentSessionId, turnId);
           break;
         case 'message_update': {
-          const ame = msg.assistantMessageEvent as
-            | { type?: string; delta?: string; content?: string; toolCall?: { name?: string; arguments?: unknown } }
-            | undefined;
+          const ame = (ev as {
+            assistantMessageEvent?: {
+              type?: string;
+              delta?: string;
+              content?: string;
+              toolCall?: { name?: string; arguments?: unknown };
+            };
+          }).assistantMessageEvent;
           if (!ame) break;
           if (ame.type === 'text_delta' && ame.delta) {
             result.fullText += ame.delta;
-            emitStream(writeOutput, {
-              eventType: 'text_delta',
-              agentScope: 'main',
-              text: ame.delta,
-            }, currentSessionId, turnId);
+            emitStream(writeOutput, { eventType: 'text_delta', agentScope: 'main', text: ame.delta }, currentSessionId, turnId);
           } else if (ame.type === 'thinking_delta' && ame.delta) {
-            emitStream(writeOutput, {
-              eventType: 'thinking_delta',
-              agentScope: 'main',
-              text: ame.delta,
-            }, currentSessionId, turnId);
+            emitStream(writeOutput, { eventType: 'thinking_delta', agentScope: 'main', text: ame.delta }, currentSessionId, turnId);
           } else if (ame.type === 'toolcall_end' && ame.toolCall) {
-            // Fallback tool-start if tool_execution_* not emitted.
             result.toolCalls += 1;
             emitStream(writeOutput, {
               eventType: 'tool_use_start',
@@ -298,7 +550,7 @@ async function runOneTurn(
         }
         case 'tool_execution_start': {
           result.toolCalls += 1;
-          const t = msg as { toolName?: string; args?: unknown };
+          const t = ev as { toolName?: string; args?: unknown };
           emitStream(writeOutput, {
             eventType: 'tool_use_start',
             agentScope: 'main',
@@ -308,7 +560,7 @@ async function runOneTurn(
           break;
         }
         case 'tool_execution_update': {
-          const t = msg as { toolName?: string; partialResult?: unknown };
+          const t = ev as { toolName?: string; partialResult?: unknown };
           emitStream(writeOutput, {
             eventType: 'tool_progress',
             agentScope: 'main',
@@ -318,7 +570,7 @@ async function runOneTurn(
           break;
         }
         case 'tool_execution_end': {
-          const t = msg as { toolName?: string; result?: unknown; isError?: boolean };
+          const t = ev as { toolName?: string; result?: unknown; isError?: boolean };
           emitStream(writeOutput, {
             eventType: 'tool_use_end',
             agentScope: 'main',
@@ -328,7 +580,7 @@ async function runOneTurn(
           break;
         }
         case 'bash_execution_update': {
-          const t = msg as { delta?: string };
+          const t = ev as { delta?: string };
           if (t.delta) {
             emitStream(writeOutput, {
               eventType: 'tool_progress',
@@ -339,11 +591,19 @@ async function runOneTurn(
           }
           break;
         }
-        case 'turn_end':
-          turnEnded = true;
+        case 'message_end': {
+          // Capture assistant errors (e.g. 403/429/5xx surfaced as
+          // stopReason:'error' + errorMessage). Without this the turn would
+          // emit an empty success instead of propagating the provider error.
+          const m = (ev as {
+            message?: { role?: string; stopReason?: string; errorMessage?: string };
+          }).message;
+          if (m?.role === 'assistant' && (m.stopReason === 'error' || m.errorMessage)) {
+            result.error = m.errorMessage || `assistant error (stopReason=${m.stopReason ?? 'unknown'})`;
+          }
           break;
-        case 'session_info_changed':
-          // No sessionId here; captured from get_state response instead.
+        }
+        case 'turn_end':
           break;
         case 'agent_end':
           // Not authoritative — may retry/compact. Wait for agent_settled.
@@ -353,13 +613,12 @@ async function runOneTurn(
           resolve();
           break;
         default:
-          // Unknown event — ignore (protocol-robust, don't crash).
+          // Unknown event — protocol-robust, don't crash.
           break;
       }
     };
-    rl.on('line', onLine);
+    driver.setTurnHandler(handler);
 
-    // If aborted externally, resolve.
     signal?.addEventListener('abort', () => {
       if (!settled) {
         result.interrupted = true;
@@ -368,17 +627,37 @@ async function runOneTurn(
     });
   });
 
-  // Send the prompt command.
-  if (!sendCommand(proc, { id: promptId, type: 'prompt', message })) {
-    return { fullText: result.fullText, toolCalls: result.toolCalls, error: 'pi stdin unavailable' };
+  // Send the prompt command. pi responds with success once the prompt is
+  // accepted; real output arrives as events. A failure response means the
+  // prompt was rejected before acceptance.
+  try {
+    const resp = await driver.send<{ sessionId?: string }>({ type: 'prompt', message });
+    if (!resp.success) {
+      result.error = piErrorToString(resp.error);
+      driver.setTurnHandler(null);
+      return result;
+    }
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err);
+    driver.setTurnHandler(null);
+    return result;
   }
 
   await settledPromise;
-  void turnEnded;
-
-  if (result.error) return result;
-  if (result.interrupted) return result;
+  driver.setTurnHandler(null);
   return result;
+}
+
+/** Write a raw JSONL command to a child's stdin without awaiting a response
+ *  (used for fire-and-forget replies like extension_ui_response). */
+function sendRawCommand(proc: ChildProcess, cmd: Record<string, unknown>): boolean {
+  if (!proc.stdin || proc.stdin.destroyed) return false;
+  try {
+    proc.stdin.write(JSON.stringify(cmd) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function runPiEngine(opts: RunOpts): Promise<void> {
@@ -442,11 +721,24 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
   }
 
   // ── 1c. Per-group PI_CODING_AGENT_DIR (session isolation) ──
+  // Empty isolated dir → pi never reads the user's ~/.pi/agent credentials or
+  // settings. All provider config comes from DeepThink env / CLI flags.
   const groupFolder = process.env.DT_GROUP_FOLDER || containerInput.groupFolder || 'default';
   const piAgentDir = resolvePiAgentDir(groupFolder, log);
   process.env.PI_CODING_AGENT_DIR = piAgentDir;
+  // Suppress pi's startup network calls (version check / telemetry) — we drive it.
+  process.env.PI_SKIP_VERSION_CHECK = process.env.PI_SKIP_VERSION_CHECK ?? '1';
+  process.env.PI_OFFLINE = process.env.PI_OFFLINE ?? '1';
 
-  // Override DT_CHAT_JID with the actual chatJid from containerInput.
+  // ── 1d. Generate models.json for providers with a custom baseURL ──
+  // Mirrors codex (config.toml) / opencode (opencode.jsonc): write the file
+  // into the isolated config dir so all provider settings come from DeepThink.
+  const providerIdMap = writePiModelsJson(providers, piAgentDir, thinkingLevel, log);
+  const defaultProviderId = providerIdMap.get(defaultProvider) ?? defaultProvider;
+  const defaultProviderHasBaseURL = providers.some(
+    (p) => p.provider === defaultProvider && !!p.baseURL,
+  );
+
   if (containerInput.chatJid) {
     process.env.DT_CHAT_JID = containerInput.chatJid;
   }
@@ -455,8 +747,13 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
   const args: string[] = [];
   if (cliScriptPath) args.push(cliScriptPath);
   args.push('--mode', 'rpc');
-  args.push('--provider', defaultProvider);
-  args.push('--model', defaultModel);
+  if (defaultProviderHasBaseURL) {
+    // Custom provider registered in models.json — select via `provider/id`.
+    args.push('--model', `${defaultProviderId}/${defaultModel}`);
+  } else {
+    args.push('--provider', defaultProvider);
+    args.push('--model', defaultModel);
+  }
   args.push('--thinking', thinkingLevel);
   // Resume persisted session if any.
   if (containerInput.sessionId) {
@@ -504,70 +801,59 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
     try { logStream?.write(line + '\n'); } catch { /* ignore */ }
   });
 
-  let piSessionId: string | undefined = containerInput.sessionId;
-  let ready = false;
-
-  // Helper to handle extension_ui_request globally.
-  const handleUiRequest = (req: { id: string; method: string }): void => {
-    // Notify/setStatus/setWidget/setTitle/set_editor_text are fire-and-forget;
-    // select/confirm/input/editor block until response — reply cancelled.
-    sendCommand(proc, { type: 'extension_ui_response', id: req.id, cancelled: true });
+  // ── 4. Start the single stdout reader + dispatch ──
+  const handleUiRequest = (req: PiExtensionUiRequest): void => {
+    // Dialog methods (select/confirm/input/editor) block until a response;
+    // fire-and-forget methods ignore the response. Replying `cancelled` to
+    // dialog methods is safe in external-driver mode (no TUI user to answer).
+    sendRawCommand(proc, { type: 'extension_ui_response', id: req.id, cancelled: true });
   };
 
-  // ── 4. Ready detection: send get_state, await response (30s) ──
-  const readyPromise = new Promise<boolean>((resolve) => {
-    const stdout = proc.stdout;
-    if (!stdout) { resolve(false); return; }
-    const rl = readline.createInterface({ input: stdout, crlfDelay: Infinity });
-    let resolved = false;
-    const timer = setTimeout(() => {
-      if (!resolved) { resolved = true; resolve(false); }
-    }, 30_000);
-    const onLine = (line: string): void => {
-      if (resolved) return;
-      if (!line.trim()) return;
-      let msg: PiRpcMessage;
-      try { msg = JSON.parse(line) as PiRpcMessage; } catch { return; }
-      if (msg.type === 'extension_ui_request') {
-        handleUiRequest(msg as { id: string; method: string });
-        return;
-      }
-      if (msg.type === 'response' && msg.command === 'get_state' && msg.success) {
-        const data = msg.data as { sessionId?: string; sessionFile?: string } | undefined;
-        if (data?.sessionId) {
-          piSessionId = data.sessionId;
-        }
-        resolved = true;
-        clearTimeout(timer);
-        rl.removeListener('line', onLine);
-        resolve(true);
-      }
-    };
-    rl.on('line', onLine);
-    proc.on('close', () => {
-      if (!resolved) { resolved = true; clearTimeout(timer); resolve(false); }
-    });
-    // Send get_state
-    if (!sendCommand(proc, { id: 'init', type: 'get_state' })) {
-      resolved = true; clearTimeout(timer); resolve(false);
-    }
-  });
+  const driver = new PiRpcDriver(proc, log);
+  driver.start(handleUiRequest);
 
-  ready = await readyPromise;
-  if (!ready) {
+  // ── 5. Ready detection: send get_state, await response (30s) ──
+  let piSessionId: string | undefined = containerInput.sessionId;
+  let ready = false;
+  try {
+    const resp = await driver.send<{ sessionId?: string; sessionFile?: string }>({ type: 'get_state' });
+    if (resp.success && resp.data?.sessionId) {
+      piSessionId = resp.data.sessionId;
+      ready = true;
+    } else if (driver.hasExited()) {
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: `pi 进程已退出，请检查 binaryPath/cliScriptPath 与 stderr 日志。${piErrorToString(resp.error)}`,
+        turnId,
+      });
+      try { logStream?.end(); } catch { /* ignore */ }
+      return;
+    } else {
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: `pi get_state 失败：${piErrorToString(resp.error)}`,
+        turnId,
+      });
+    }
+  } catch (err) {
     writeOutput({
       status: 'error',
       result: null,
-      error: 'pi 引擎就绪检测失败（30s 内未收到 get_state 响应）。请检查 binaryPath / cliScriptPath 配置与 pi stderr 日志。',
+      error: `pi 就绪检测失败（30s 内未收到 get_state 响应）：${err instanceof Error ? err.message : String(err)}`,
       turnId,
     });
-    try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+  }
+
+  if (!ready) {
+    driver.kill('SIGTERM');
     try { logStream?.end(); } catch { /* ignore */ }
     return;
   }
   log(`pi ready, sessionId=${piSessionId ?? '(none)'}`);
 
-  // ── 5. Prepare initial prompt (drain IPC, scheduled task prefix) ──
+  // ── 6. Prepare initial prompt (drain IPC, scheduled task prefix) ──
   let prompt = containerInput.prompt;
   if (containerInput.isScheduledTask) {
     prompt =
@@ -583,21 +869,19 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
     prompt += '\n' + pending.messages.map((m) => m.text).join('\n');
   }
 
-  // ── 6. First turn ──
+  // ── 7. First turn ──
   let abortController: AbortController | null = null;
 
   const runOneTurnWrapper = async (message: string): Promise<void> => {
     abortController = new AbortController();
     const result = await runOneTurn({
-      proc,
+      driver,
       message,
       writeOutput,
       currentSessionId: piSessionId,
       turnId,
       log,
       signal: abortController.signal,
-      onSessionId: (id) => { piSessionId = id; },
-      onUiRequest: handleUiRequest,
     });
     abortController = null;
 
@@ -625,32 +909,20 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
 
   await runOneTurnWrapper(prompt);
 
-  // ── 7. IPC polling loop — handle follow-up messages ──
+  // ── 8. IPC polling loop — handle follow-up messages ──
+  // The engine blocks here until the _close sentinel arrives (main process
+  // writes it when the turn is fully drained). index.ts does
+  // `await runPiEngine(); process.exit(0)` — without this block the process
+  // would exit immediately after the first turn and IPC follow-ups / steering
+  // messages would never be processed.
   let closed = false;
   let watcher: fs.FSWatcher | null = null;
   let fallbackTimer: ReturnType<typeof setInterval> | null = null;
-
-  const checkForNewMessages = async (): Promise<void> => {
-    if (closed) return;
-    try {
-      if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
-        log('IPC _close sentinel detected, shutting down');
-        closed = true;
-        cleanup();
-        return;
-      }
-    } catch { /* ignore */ }
-
-    const drain = drainIpcInput();
-    if (drain.messages.length === 0) return;
-    for (const msg of drain.messages) {
-      if (closed) break;
-      log(`IPC follow-up message: ${msg.text.slice(0, 80)}`);
-      await runOneTurnWrapper(msg.text);
-    }
-  };
+  let resolveClosed: (() => void) | null = null;
+  const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve; });
 
   const cleanup = async (): Promise<void> => {
+    if (closed) return;
     closed = true;
     if (watcher) {
       try { watcher.close(); } catch { /* ignore */ }
@@ -663,9 +935,30 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
     if (abortController) {
       try { abortController.abort(); } catch { /* ignore */ }
     }
-    try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    driver.kill('SIGTERM');
     try { logStream?.end(); } catch { /* ignore */ }
     writeOutput({ status: 'closed', result: null, turnId });
+    resolveClosed?.();
+    resolveClosed = null;
+  };
+
+  const checkForNewMessages = async (): Promise<void> => {
+    if (closed) return;
+    try {
+      if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+        log('IPC _close sentinel detected, shutting down');
+        await cleanup();
+        return;
+      }
+    } catch { /* ignore */ }
+
+    const drain = drainIpcInput();
+    if (drain.messages.length === 0) return;
+    for (const msg of drain.messages) {
+      if (closed) break;
+      log(`IPC follow-up message: ${msg.text.slice(0, 80)}`);
+      await runOneTurnWrapper(msg.text);
+    }
   };
 
   try { fs.mkdirSync(IPC_INPUT_DIR, { recursive: true }); } catch { /* ignore */ }
@@ -682,7 +975,7 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
   fallbackTimer = setInterval(() => {
     void checkForNewMessages();
   }, IPC_FALLBACK_POLL_MS);
-  fallbackTimer.unref();
+  fallbackTimer.unref?.();
 
   // SIGINT/SIGTERM handler
   const sigHandler = async (sig: string): Promise<void> => {
@@ -693,7 +986,11 @@ export async function runPiEngine(opts: RunOpts): Promise<void> {
   process.on('SIGINT', () => void sigHandler('SIGINT'));
   process.on('SIGTERM', () => void sigHandler('SIGTERM'));
 
-  // Export for index.ts protocol symmetry (unused but matches other engines).
+  // Block until _close sentinel / SIGTERM. Keeps the agent-runner process
+  // alive for IPC follow-ups and steering messages.
+  await closedPromise;
+
+  // Exported markers kept for index.ts protocol symmetry (unused here).
   void OUTPUT_START_MARKER;
   void OUTPUT_END_MARKER;
 }
