@@ -1,79 +1,99 @@
-# pi 引擎接入 测试报告
+# 测试报告：pi-engine v2 二进制包方式重新实现
 
-- **分支**：`feat/pi-engine` → `main`
-- **日期**：2026-07-25
-- **pi 版本**：0.82.0（`~/pi`）
-- **测试人**：DeepThink Agent
+- **分支**：`feat/pi-engine-rpc-fix`（基于 `main` a295eff）
+- **测试日期**：2026-07-25
+- **pi 版本**：0.82.0（`/home/me/pi/packages/coding-agent/dist/cli.js`）
+- **测试环境**：Node v24.15.0；DeepThink dev 后端（`WEB_PORT=9898 npx tsx src/index.ts`，host 模式）；DashScope Anthropic 兼容端点（`https://dashscope.aliyuncs.com/apps/anthropic`，model `glm-5.2`）
 
 ## 1. 测试范围
 
-按 PRD §6 验收标准与 §7 测试用例验证 pi 引擎接入。**浏览器 UI E2E（TC-E1~E8）经用户确认跳过**，直接合并（用户指示 2026-07-25 03:51:58 "直接合并, push main"）。本报告记录已完成的类型/构建/协议层验证。
+| 层级 | 测试方式 | 结果 |
+|------|----------|------|
+| L1 协议正确性 | 裸跑 `pi --mode rpc` dump 全事件流 | ✅ |
+| L2 引擎单元 | `runPiEngine` 直调 smoke（含 models.json 生成） | ✅ |
+| L3 agent-runner 集成 | 真实 `dist/index.js` + ContainerInput JSON + OUTPUT marker 协议 | ✅ |
+| L4 全栈 UI 等价 | WebSocket `send_message` → dev 后端 → engine=pi → agent-runner → pi → 回复 | ✅ |
+| L5 配置 UI | `PUT /api/config/pi` 保存 provider/apiKey/baseURL | ✅ |
+| L6 群组引擎切换 | `PATCH /api/groups/web:main {engine:"pi"}` | ✅ |
 
-## 2. 测试结果汇总
+## 2. L1 协议正确性（裸 pi RPC）
 
-| 用例 ID | 用例 | 结果 | 证据 |
-|---------|------|------|------|
-| TC-U1 | `make typecheck` 三端（后端+web+agent-runner） | ✅ PASS | 三端 `tsc --noEmit` 退出码 0 |
-| TC-U2 | `make build` 产出 `pi-engine.js` | ✅ PASS | `container/agent-runner/dist/pi-engine.js`（25236 字节）+ `dist/index.js` + `web/dist/index.html` 均产出 |
-| TC-C* | pi RPC 协议烟雾测试（spawn pi --mode rpc + get_state） | ✅ PASS | stdout 收到 `{"type":"response","command":"get_state","success":true,"data":{"sessionId":"019f9584-..."}}`，验证 PRD §3.1 A1/A8 假设（RPC 模式可驱动、agent_settled/get_state 协议、sessionId 可捕获） |
-| TC-E1~E8 | 浏览器 UI E2E（admin/88888888） | ⏭️ SKIP | 用户指示跳过，直接合并 |
+命令：`printf '{"id":"t1","type":"get_state"}\n' | node dist/cli.js --mode rpc --no-session --provider anthropic --model <id>`
 
-## 3. 类型检查详情
+结果：`get_state` 响应 `success:true` + `data.sessionId` 正常。事件流完整：
+agent_start → turn_start → message_start(user) → message_end(user) → message_start(assistant) → message_update(text_delta/thinking_delta) → message_end(assistant) → turn_end → agent_end → agent_settled
 
+确认 pi RPC 协议契约与 `~/pi/packages/coding-agent/docs/rpc.md` 一致。
+
+## 3. L2 引擎单元 smoke
+
+### 3.1 错误透传（B3 修复验证）
+配置 anthropic 直调 key（无 baseURL）→ Anthropic 返回 403 forbidden。
+结果：`{"status":"error","error":"pi 错误：403 {\"error\":{\"type\":\"forbidden\",\"message\":\"Request not allowed\"}}"}` ✅
+（v1 会返回"空回复 success"，v2 经 `message_end` 的 `stopReason:"error"` 分支正确捕获并透传）
+
+### 3.2 统一配置 happy path（B4 修复验证）
+`PiConfig.providers` 配 DashScope（含 baseURL）+ GLM-5.2，调 `runPiEngine`。
+结果：
+- 自动生成 `models.json`（1 个自定义 provider `dt-anthropic`，apiKey 用 `$ANTHROPIC_API_KEY` 引用不落盘）→ 写入隔离 `PI_CODING_AGENT_DIR/models.json` (0600)
+- spawn `--mode rpc --model dt-anthropic/glm-5.2 --thinking off`（baseURL 生效）
+- `get_state` 就绪 → `text_delta` 流式输出 "PONG" → `status:"success"` + `newSessionId` 持久化 ✅
+
+### 3.3 多轮 IPC 跟进（B5 修复验证）
+首轮 "FIRST" → 投递 IPC 跟进消息 "SECOND" → 投递 `_close`。
+结果：`success: FIRST | success: SECOND`，`_close` 触发 cleanup → `closedPromise` resolve → 进程退出 ✅
+（v1 设好 IPC 循环后函数即返回，`index.ts` 的 `process.exit(0)` 会立即杀进程，跟进消息永远不处理；v2 `await closedPromise` 阻塞保活）
+
+## 4. L3 agent-runner 集成
+
+命令：`node dist/index.js < ContainerInput.json`（PI_* env 按 container-runner 方式注入）
+ContainerInput：`{"engine":"pi","prompt":"Reply with exactly one word: PONG","turnId":"ui-int-1",...}`
+
+结果（经 OUTPUT marker 协议）：
 ```
-container/agent-runner  : tsc --noEmit  → EXIT 0
-src (backend)            : tsc --noEmit  → EXIT 0  （修复 1 处预存在错误后）
-web                      : tsc --noEmit  → EXIT 0
+[agent-runner] Engine = pi, routing to pi-engine adapter
+[agent-runner] Spawning pi: node .../cli.js --mode rpc --model dt-anthropic/glm-5.2 --thinking off
+[agent-runner] pi ready, sessionId=019f95dc-...
+{"status":"stream","streamEvent":{"eventType":"init","statusText":"pi 引擎已启动"}}
+{"status":"stream","streamEvent":{"eventType":"text_delta","text":"PONG"}}
+{"status":"success","result":"PONG","newSessionId":"019f95dc-...","finalizationReason":"completed"}
+{"status":"closed"}
 ```
+完整分发链路 `index.ts → runPiEngine → pi 子进程 → StreamEvent → success` 验证通过 ✅
 
-**预存在错误修复**：`src/routes/team.ts:124` 在 main 分支（ff916df）即已存在 `TS2722: Cannot invoke an object which is possibly 'undefined'`（`webDeps.buildTeam` 跨 `setImmediate` 闭包窄化丢失）。为使 `make typecheck` gate 通过，应用最小修复：在 guard 后提取 `const buildTeam = webDeps.buildTeam;` 局部常量再调用。该修复经在 main 分支独立复现确认是预存在问题，非 pi 改动引入。
+## 5. L4 全栈 UI 等价测试
 
-## 4. 构建详情
+dev 后端（`WEB_PORT=9898`，使用重建后的 `~/deepthink/container/agent-runner/dist`，含 v2 修复）。WebSocket 发消息：
 
-- `npm run build:all`（worktree）→ exit 0
-  - 后端：`dist/index.js`（460908 字节）
-  - 前端：`web/dist/index.html` + 资源
-  - agent-runner：`container/agent-runner/dist/pi-engine.js`（25236 字节）
-- `~/pi && npm install --ignore-scripts` → exit 0
-- `~/pi && npm run build` → exit 0，产出 `packages/coding-agent/dist/cli.js` + `rpc-entry.js`
+| 发送 | pi 引擎回复（dev 日志 `Agent output`） | 结果 |
+|------|----------------------------------------|------|
+| `用一句话回复：pong` | `pong`（04:51:52，长度 4） | ✅ |
+| `用一个词回复：ping` | `ping`（04:54:43） | ✅ |
 
-## 5. pi RPC 协议烟雾测试
+全栈链路：`WS send_message → 后端 → engine=pi（web:main）→ spawn host agent-runner → pi-engine.ts → pi 子进程（DashScope/GLM）→ "pong"/"ping" → OUTPUT marker → 后端 → "Agent output: pong" → 消息写回 web:main` ✅
 
-**脚本**：`/tmp/pi-smoke2.mjs`（spawn `node ~/pi/packages/coding-agent/dist/cli.js --mode rpc`，1.2s 后发 `{id:'t',type:'get_state'}`）。
+## 6. L5/L6 配置与切换
 
-**关键输出**：
-```
-<< {"id":"t","type":"response","command":"get_state","success":true,"data":{"model":{"id":"claude-opus-4-8",...},"sessionId":"019f9584-9c3e-765c-9010-51c97d0677eb",...}}
-GET_STATE OK sessionId= 019f9584-9c3e-765c-9010-51c97d0677eb
-```
+- `PUT /api/config/pi`（body 含 `enabled/binaryPath/cliScriptPath/defaultProvider/defaultModel/thinkingLevel/providers[+apiKey+baseURL]`）→ 200，GET 回读 `hasApiKey:true` ✅
+- `PATCH /api/groups/web:main {"engine":"pi"}` → `{"success":true}`，GET 回读 `engine:"pi"` ✅
 
-**验证的假设**：
-- A1（RPC 模式可驱动）：`pi --mode rpc` 长驻、stdin JSONL `get_state` → stdout JSONL response，协议链路通
-- A8（get_state 响应可捕获 sessionId）：`data.sessionId` 存在，可用于持久化续接
-- testPiRpc 逻辑（`src/routes/config.ts`）：spawn + stdin write + stdout readline 解析 + 15s 超时 + SIGTERM 清理，与烟雾脚本同构，行为正确
+## 7. 验收标准核对（PRD §E）
 
-**未覆盖**：`prompt` 命令的多轮事件流（`message_update`/`tool_execution_*`/`agent_settled` 翻译为 StreamEvent）——需完整 agent-runner 管线 + LLM API key 才能触发，属浏览器 E2E 范畴，已按用户指示跳过。事件映射逻辑已对照 pi 源码类型定义（`AgentSessionEvent`/`AssistantMessageEvent`/`AgentEvent`）逐项实现，待真实环境验证。
+| 编号 | 验收项 | 结果 |
+|------|--------|------|
+| EC1 | pi-engine 不含 readline 调用（`grep readline` 仅注释命中） | ✅ |
+| EC2 | 单进程多轮经 id 关联，无 stdout 抢流 | ✅（L3） |
+| EC3 | provider 错误以 `status:"error"` 透传 | ✅（L2 §3.1） |
+| EC4 | 含 baseURL 的 provider 正常出流式回复 | ✅（L2 §3.2 / L4） |
+| EC5 | 首轮后进程不退出，IPC 跟进被处理，`_close` 后退出 | ✅（L2 §3.3） |
+| EC6 | 用户无需在本机配置 pi（隔离 PI_CODING_AGENT_DIR + 全配置来自 DeepThink） | ✅ |
 
-## 6. 变更文件清单（18 改 + 4 新增 + 4 文档）
+## 8. 已知限制（PRD §F，v2 沿用 v1）
 
-**后端**：db.ts, runtime-config.ts, schemas.ts, container-runner.ts, routes/config.ts, routes/groups.ts, src/index.ts, types.ts, agent-team/team-plan.ts, routes/team.ts（预存在修复）
-**Agent-Runner**：container/agent-runner/src/{index,types}.ts + **pi-engine.ts（新）**
-**前端**：EngineSwitcher.tsx, EnginesPage.tsx, SettingsNav.tsx, SettingsPage.tsx, settings/types.ts, stores/chat.ts, web/types.ts + **PiEngineSection.tsx（新）**
-**文档**：docs/{prd,tech_solution,task_state,test_report}/pi-engine/*
+- 未桥接 DeepThink MCP 工具（send_message/schedule_task/memory_*）到 pi
+- 不支持图片输入（首版 text-only）
+- 未做 pi Extensions/Skills/Prompt Templates 的 Web 管理
 
-## 7. 已知限制（首版，PRD §3.1）
+## 9. 结论
 
-1. pi 引擎不桥接 DeepThink 内置 MCP（send_message/schedule_task/memory_*）
-2. 跨引擎切换会话上下文不连续
-3. 仅支持宿主机模式 / host-binary bind-mount
-4. provider→envvar 映射内置 20+ provider，未覆盖回退 `--api-key` CLI flag
-5. 图片输入首版不支持
-6. 浏览器 E2E 未执行（用户指示跳过）
-
-## 8. 结论
-
-- ✅ 类型检查全通过
-- ✅ 全量构建通过，pi-engine.js 产出
-- ✅ pi RPC 协议链路验证通过（testPiRpc 逻辑正确）
-- ⏭️ 浏览器 UI E2E 按用户指示跳过
-- **建议**：合并后由用户在真实环境（配置 admin 的 pi binaryPath=node、cliScriptPath=~/pi/packages/coding-agent/dist/cli.js、provider+apiKey）执行一次端到端对话验证，补充 TC-E5/E6（多轮上下文续接）。
+pi-engine v2 重新实现全部验收通过。修复了 v1 的 5 个缺陷（readline 协议违规、双重 reader 抢流、错误不透传、baseURL 不生效、进程提前退出），并以 `writePiModelsJson` 实现"LLM 服务商配置统一在 DeepThink 引擎配置界面、用户无需在本机配置 pi"的要求。端到端（含真实 DashScope/GLM provider）经全栈验证产出正确回复。

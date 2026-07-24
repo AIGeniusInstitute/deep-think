@@ -312,3 +312,55 @@ codex 写 `config.toml`、opencode 写 `opencode.jsonc` 是因为它们的 provi
 | Phase 5：构建 pi | `cd ~/pi && npm run build` 产出 dist/cli.js |
 | Phase 6：测试 | typecheck + build + E2E 走查（admin/88888888）+ 测试报告 |
 | Phase 7：合并 | 提交 + 合并 main + push |
+
+---
+
+# v2.0 重实现补遗（2026-07-25）
+
+## A. 触发原因
+
+用户反馈：v1 实现虽方向正确（spawn `pi --mode rpc` 二进制子进程），但实际不可用，要求"参考 atomcode/codex/opencode 二进制包方式重新实现"，并强调"LLM 服务商配置统一在 DeepThink 引擎配置界面，用户无需在本机单独配置 pi 的模型相关东西"。
+
+## B. v1 审计结论（重新阅读 ~/pi 源码 + docs/rpc.md 后定位）
+
+| # | 缺陷 | 位置 | 依据 |
+|---|------|------|------|
+| B1 | **readline 协议违规**：v1 用 `node:readline.createInterface` 解析 pi stdout | pi-engine.ts L44/L232/L521 | `~/pi/packages/coding-agent/docs/rpc.md` §Framing + `src/modes/rpc/jsonl.ts` 注释明确：readline 会把 JSON 字符串内合法的 U+2028/U+2029 当换行符，禁止使用；pi 自身用 LF-only 的 `attachJsonlLineReader` |
+| B2 | **双重 readline 抢流**：就绪检测与每轮 runOneTurn 各自在同一 stdout 建 readline 实例 | L521、L232 | 两个 reader 抢同一 stream，行被随机切分丢失 |
+| B3 | **错误不透传**：assistant 消息 `stopReason:"error"`+`errorMessage`（如 403/429）未捕获，以"空回复 success"返回 | runOneTurn 事件 switch 缺 `message_end` 分支 | 裸跑 pi RPC 实测：403 时事件流仍走到 agent_settled |
+| B4 | **baseURL 不生效**：DeepThink `PiProvider.baseURL`（如 DashScope `/apps/anthropic`）从未注入 pi | pi-engine.ts 仅注入 apiKey env，无 models.json | pi 内置 anthropic provider 的 baseUrl 硬编码 `api.anthropic.com`，不支持 `ANTHROPIC_BASE_URL` env 覆盖（`~/pi/packages/ai/src/providers/anthropic.ts:42`）；自定义端点必须经 `models.json` |
+| B5 | **进程提前退出**：`index.ts` 分发为 `await runPiEngine(); process.exit(0)`，v1 设好 IPC 循环后函数即返回 | v1 末尾无阻塞 await | process.exit(0) 立即触发，IPC 跟进消息/steering 永远没机会处理 |
+
+## C. v2 修复方案（外科式，仅重写 pi-engine.ts 的协议核心 + 配置生成，不破坏已正确的 db/schema/runtime-config/container-runner/UI 层）
+
+| # | 修复 | 实现 |
+|---|------|------|
+| C1 | 引入 `attachJsonlReader`（LF-only，移植自 pi `jsonl.ts`）替代 readline | 新增工具函数 |
+| C2 | 引入 `PiRpcDriver`：单例 stdout reader + `pendingRequests: Map<id, {resolve,timer}>` id 关联响应分发 + `turnHandler` 瞬态事件 handler | 就绪检测与每轮复用同一 reader，彻底消除抢流 |
+| C3 | `message_end` 事件分支：assistant `stopReason==="error"\|\|errorMessage` → `result.error`，经 `runOneTurnWrapper` emit `status:"error"` | 错误透传 |
+| C4 | 新增 `writePiModelsJson`：从 `PiConfig.providers` 生成 `models.json` 写入隔离 `PI_CODING_AGENT_DIR/models.json`（0600）。有 baseURL 的 provider → 注册自定义 provider `dt-<provider>`，`api` 按 provider 族映射（anthropic/ant-ling/zai/kimi→`anthropic-messages`，其余→`openai-completions`），`apiKey` 用 `$<ENV_KEY>` 引用（密钥留 env 不落盘）；spawn 时用 `--model dt-<provider>/<model>` 选中。无 baseURL 的 provider 仍走内置 + env key + `--provider/--model` | 统一配置，零本机配置 |
+| C5 | `runPiEngine` 末尾 `await closedPromise`（`_close`/SIGTERM 触发 cleanup 后 resolve）阻塞保活 | 进程不再提前退出 |
+
+## D. 不变项（v1 已正确，v2 保留）
+
+- `src/db.ts`：`pi_session_id` 列 + `getPiSessionId`/`setPiSessionId`/`clearPiSessionId`
+- `src/schemas.ts`：`engine` enum 含 `'pi'`；`PiProviderSchema`/`PiConfigSchema`
+- `src/runtime-config.ts`：`PiProvider`/`PiConfig`/`PublicPiConfig`/`getPiConfig`/`savePiConfig`/`toPublicPiConfig`/`resolvePiProvidersForSave`，存 `CLAUDE_CONFIG_DIR/pi.json`（DeepThink 自己的配置目录，非 `~/.pi/agent`）
+- `src/container-runner.ts`：`PI_BINARY_PATH`/`PI_CLI_SCRIPT_PATH`/`PI_WORKING_DIR`/`PI_DEFAULT_PROVIDER`/`PI_DEFAULT_MODEL`/`PI_THINKING_LEVEL`/`PI_PROVIDERS_JSON` env 注入（容器 L942-955 + 宿主机 L2114-2131）；session 分流（L2291-2306）
+- `container/agent-runner/src/index.ts`：`if (engine === 'pi')` 分发分支（L2368）
+- `web/src/components/settings/PiEngineSection.tsx`：UI 配置（binaryPath/cliScriptPath/workingDir/defaultProvider/defaultModel/thinkingLevel/providers[]）
+
+## E. 验收标准（v2 增项）
+
+- EC1：pi-engine 用 LF-only reader 解析 stdout，不出现 readline 调用（`grep readline pi-engine.ts` 无命中）
+- EC2：单进程内多轮 prompt 经 id 关联，无 stdout 抢流
+- EC3：provider 错误（403/429/5xx）以 `status:"error"` 透传，不返回空 success
+- EC4：配置含 baseURL 的 provider（如 DashScope）能正常出流式回复（生成 models.json + `--model dt-<provider>/<model>`）
+- EC5：首轮回合结束后进程不退出，IPC 跟进消息被处理；`_close` 后优雅退出
+- EC6：用户无需在本机 `~/.pi/agent` 配置任何东西（隔离 PI_CODING_AGENT_DIR + 全配置来自 DeepThink env/CLI）
+
+## F. 非目标（v2 沿用 v1）
+
+- 不桥接 DeepThink MCP 工具（send_message/schedule_task/memory_*）到 pi
+- 不支持图片输入（首版 text-only）
+- 不做 pi Extensions/Skills/Prompt Templates 的 Web 管理

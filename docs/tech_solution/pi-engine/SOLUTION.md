@@ -463,3 +463,102 @@ async function testPiRpc(cfg: PiConfig): Promise<{ ok: boolean; version?: string
 4. provider→envvar 映射表内置常见 provider，未覆盖的回退 `--api-key` CLI flag
 5. pi session 不进入 DeepThink 的 `conversations/` 归档
 6. 图片输入首版不支持
+
+---
+
+# v2.0 技术方案补遗（2026-07-25）
+
+## A. 重写的范围
+
+仅重写 `container/agent-runner/src/pi-engine.ts` 的 **stdout 协议核心 + 配置文件生成 + 生命周期阻塞** 三块。其余集成层（db/schemas/runtime-config/container-runner/routes/UI/index.ts 分发）v1 已正确，v2 保留不动（Surgical Changes 原则）。
+
+## B. 新增核心组件
+
+### B.1 `attachJsonlReader(stream, onLine)`（LF-only）
+
+移植自 `~/pi/packages/coding-agent/src/modes/rpc/jsonl.ts`。`StringDecoder` 缓冲 + `buffer.indexOf('\n')` 切分，剥尾 `\r`。**不使用 node:readline**（pi 协议明确禁止）。
+
+```ts
+function attachJsonlReader(stream, onLine) {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  const onData = (chunk) => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    while (true) { const nl = buffer.indexOf('\n'); if (nl === -1) return; onLine(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1); }
+  };
+  // ... end 处理
+  stream.on('data', onData); stream.on('end', onEnd);
+  return () => { stream.off('data', onData); stream.off('end', onEnd); };
+}
+```
+
+### B.2 `PiRpcDriver`（单例 reader + id 关联分发）
+
+```ts
+class PiRpcDriver {
+  private pending = new Map<string, {resolve, timer}>();
+  private turnHandler: ((ev: PiEvent) => void) | null = null;
+  start(onUiRequest) { attachJsonlReader(proc.stdout, line => this.handleLine(line, onUiRequest)); proc.once('close', ...); }
+  private handleLine(line, onUiRequest) {
+    const msg = JSON.parse(line);
+    if (msg.type === 'response') { /* 按 id resolve pending */ return; }
+    if (msg.type === 'extension_ui_request') { onUiRequest(msg); return; }
+    this.turnHandler?.(msg);  // AgentSessionEvent 路由到当前 turn
+  }
+  async send<T>(cmd) { /* 注入 id，写 stdin，await pending[id]（30s 超时）*/ }
+  setTurnHandler(h) { this.turnHandler = h; }
+}
+```
+
+- 就绪检测：`driver.send({type:'get_state'})` → await 响应 → 取 `data.sessionId`（复用同一 reader，无抢流）
+- 每轮：`setTurnHandler(eventRouter)` → `driver.send({type:'prompt', message})` → await `settledPromise`（agent_settled 触发）→ `setTurnHandler(null)`
+
+### B.3 `writePiModelsJson(providers, piAgentDir, thinkingLevel, log)`
+
+```
+对每个 provider:
+  if (!baseURL) → 内置 provider，仅 env 注入 key，CLI 用 --provider/--model
+  else → 注册自定义 provider dt-<provider>:
+    baseUrl, api(族映射), apiKey: "$<ENV_KEY>"(env 引用,不落盘),
+    models: [{id, name, reasoning: thinking!=='off', input:['text'], contextWindow:128000, maxTokens:8192}]
+写入 PI_CODING_AGENT_DIR/models.json (0600)
+返回 idMap: provider → 'dt-<provider>' | provider
+```
+
+spawn 时：`defaultProviderHasBaseURL ? --model dt-<defaultProvider>/<defaultModel> : --provider <defaultProvider> --model <defaultModel>`
+
+### B.4 生命周期阻塞
+
+```ts
+let resolveClosed; const closedPromise = new Promise(r => { resolveClosed = r; });
+const cleanup = async () => { ... driver.kill('SIGTERM'); writeOutput({status:'closed'}); resolveClosed(); };
+// ... watcher + fallbackTimer(unref) + SIGINT/SIGTERM handler
+await closedPromise;  // 阻塞到 _close/SIGTERM
+```
+
+## C. 事件 → DeepThink StreamEvent 映射（v2 增项）
+
+| pi 事件 | DeepThink streamEvent |
+|---|---|
+| `agent_start` | `{eventType:'init', statusText:'pi 引擎已启动'}` |
+| `message_update.assistantMessageEvent.text_delta` | `{eventType:'text_delta', text:delta}` |
+| `message_update.assistantMessageEvent.thinking_delta` | `{eventType:'thinking_delta', text:delta}` |
+| `message_update.assistantMessageEvent.toolcall_end` | `{eventType:'tool_use_start', toolName, toolInputSummary}` |
+| `tool_execution_start/update/end` | `tool_use_start`/`tool_progress`/`tool_use_end` |
+| `bash_execution_update` | `{eventType:'tool_progress', toolName:'bash', detail:delta}` |
+| `message_end`(assistant stopReason=error) | `result.error` → `status:'error'` |
+| `agent_settled` | 解析 settledPromise → emit `status:'success'` |
+
+## D. 验证（端到端 smoke）
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| 协议正确性 | 裸 pi RPC dump 全事件 | agent_start→turn_start→message_start→message_update(text_delta/thinking_delta)→message_end→turn_end→agent_end→agent_settled ✅ |
+| 错误透传 | anthropic key 403 | `pi 错误：403 forbidden` (status:error) ✅ |
+| 统一配置 happy path | DashScope+GLM via PiConfig.providers(baseURL) | 自动生成 models.json → `--model dt-anthropic/glm-5.2` → text_delta 流式 "PONG" → success ✅ |
+| 多轮 IPC | 首轮 + follow-up m2 | FIRST 成功 → 检测 m2 → SECOND 成功 ✅ |
+| 优雅关闭 | _close sentinel | cleanup → closedPromise resolve → 返回 ✅ |
+
+## E. 配置统一性说明
+
+DeepThink `PiConfig`（`pi.json`）是唯一配置源：`binaryPath`/`cliScriptPath`/`workingDir`/`defaultProvider`/`defaultModel`/`thinkingLevel`/`providers[{provider,apiKey,baseURL,model}]`。container-runner 把它们注入为 `PI_*` env；pi-engine 据此 (a) 注入 `<PROVIDER>_API_KEY` env，(b) 生成 `models.json`（自定义 baseURL），(c) 组装 `--mode rpc --model ... --thinking ... --session ...`。隔离的 `PI_CODING_AGENT_DIR`（`~/.deepthink/pi-homes/<group>`）是空目录，pi 不接触用户 `~/.pi/agent` 凭据/设置。**用户无需在本机配置 pi 任何东西。**
