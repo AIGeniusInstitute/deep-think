@@ -3,7 +3,7 @@
   "branch": "feat/pi-engine-rpc-fix",
   "base": "main (a295eff)",
   "createdAt": "2026-07-25",
-  "status": "phase3-coding-done",
+  "status": "done",
   "phases": {
     "0_worktree": { "status": "done", "note": "复用 ~/deepthink/.claude/worktrees/pi-engine，reset --hard main 后切 feat/pi-engine-rpc-fix" },
     "1_prd": { "status": "done", "path": "docs/prd/pi-engine/PRD.md", "note": "v1.0 + v2.0 补遗（审计 B1-B5 + 修复 C1-C5 + 验收 EC1-EC6）" },
@@ -34,9 +34,9 @@
       "typecheck": "pass (npx tsc --noEmit exit 0)",
       "build": "pass (npx tsc → dist/pi-engine.js)"
     },
-    "4_ui_test": { "status": "pending", "note": "待 make dev-start + 浏览器 UI 自动化 (admin/88888888)" },
-    "5_test_report": { "status": "pending", "path": "docs/test_report/pi-engine/" },
-    "6_merge": { "status": "pending" }
+    "4_ui_test": { "status": "done", "note": "dev 后端 WEB_PORT=9898 + WebSocket send_message 全栈测试：pi 回复 pong/ping（Agent output 日志）+ PUT /api/config/pi + PATCH engine=pi" },
+    "5_test_report": { "status": "done", "path": "docs/test_report/pi-engine/TEST_REPORT.md" },
+    "6_merge": { "status": "in_progress", "note": "合并 feat/pi-engine-rpc-fix 到 main 并 push" }
   },
   "smoke_verification": {
     "binary_subprocess_rpc": "pass",
