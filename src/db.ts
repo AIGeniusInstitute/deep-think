@@ -3871,6 +3871,22 @@ export function failTeamBuild(id: string, error: string): void {
   ).run(error, Date.now(), id);
 }
 
+/**
+ * List a user's team builds (history). Newest first. Reuses the existing
+ * idx_team_builds_owner index. v2 (TeamPage UI): powers the "历史任务" list so
+ * the user can reopen a past team run with its full plan (role names intact).
+ */
+export function listTeamBuilds(
+  ownerUserId: string,
+  limit = 20,
+): TeamBuildRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM team_builds WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(ownerUserId, limit) as TeamBuildRow[];
+}
+
 export function listGraphRuns(
   ownerUserId: string,
   opts: { status?: string; limit?: number; offset?: number } = {},

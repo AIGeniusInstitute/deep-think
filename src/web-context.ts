@@ -178,6 +178,9 @@ export interface WebDeps {
     groupFolder: string;
     chatJid: string;
     userLanguage?: string;
+    maxTeamSize?: number;
+    toolset?: string[];
+    executionMode?: 'auto' | 'semi-auto';
   }) => Promise<
     | { runId: string; definitionId: string; definitionVersion: number; plan: unknown; memberDefIds: Record<string, string> }
     | { error: string; detail?: string }

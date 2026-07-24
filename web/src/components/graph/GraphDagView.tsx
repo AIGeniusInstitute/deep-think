@@ -65,9 +65,26 @@ const STATUS_COLOR: Record<string, string> = {
 
 interface GraphDagViewProps {
   runId: string;
+  /**
+   * v2 (TeamPage UI): optional map nodeId → {role, title, type} from the team
+   * plan. When provided, agent nodes render the member role + title instead of
+   * the raw node_id. Missing (GraphPage call) → falls back to node_id (backward
+   * compat). AC4.1.
+   */
+  roleByNode?: Map<string, { role: string; title: string; type: string }>;
 }
 
-export function GraphDagView({ runId }: GraphDagViewProps) {
+const STATUS_LABEL_ZH: Record<string, string> = {
+  pending: '等待中',
+  running: '执行中',
+  completed: '已完成',
+  failed: '失败',
+  paused: '等待审批',
+  skipped: '已跳过',
+  cancelled: '已取消',
+};
+
+export function GraphDagView({ runId, roleByNode }: GraphDagViewProps) {
   const currentRun = useGraphStore((s) => s.currentRun);
   const nodeRuns = useGraphStore((s) => s.currentNodeRuns);
   const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
@@ -86,7 +103,14 @@ export function GraphDagView({ runId }: GraphDagViewProps) {
       const status = n.status ?? 'pending';
       const color = STATUS_COLOR[status] ?? '#94a3b8';
       const typeColor = NODE_TYPE_COLORS[n.node_type] ?? '#64748b';
-      const label = `${n.node_id}`.slice(0, 24);
+      const rn = roleByNode?.get(n.node_id);
+      const displayLabel = rn
+        ? n.node_type === 'agent'
+          ? rn.role
+          : rn.title
+        : `${n.node_id}`.slice(0, 24);
+      const subTitle = rn ? rn.title : n.node_id;
+      const statusText = STATUS_LABEL_ZH[status] ?? status;
       return {
         id: n.id,
         data: {
@@ -112,10 +136,15 @@ export function GraphDagView({ runId }: GraphDagViewProps) {
                   </span>
                 </div>
                 <div className="mt-1 max-w-[140px] truncate text-slate-800">
-                  {label}
+                  {displayLabel}
                 </div>
+                {rn && (
+                  <div className="mt-0.5 max-w-[140px] truncate text-[9px] text-slate-500">
+                    {subTitle}
+                  </div>
+                )}
                 <div className="mt-0.5 text-[9px] text-slate-500">
-                  {status} · att{n.attempt}
+                  {statusText} · att{n.attempt}
                 </div>
               </div>
             </div>
@@ -134,7 +163,7 @@ export function GraphDagView({ runId }: GraphDagViewProps) {
         animated: n.status === 'running',
       }));
     return { rfNodes, rfEdges };
-  }, [nodeRuns]);
+  }, [nodeRuns, roleByNode]);
 
   const selectedNode = nodeRuns.find((n) => n.id === selectedNodeId) ?? null;
 
