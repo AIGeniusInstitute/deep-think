@@ -9,19 +9,21 @@ interface EngineSwitcherProps {
   group: GroupInfo | undefined;
 }
 
-type EngineKey = 'claude' | 'atomcode' | 'codex' | 'opencode';
+type EngineKey = 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
 
 const ENGINES: Array<{ key: EngineKey; label: string }> = [
   { key: 'claude', label: 'Claude' },
   { key: 'atomcode', label: 'AtomCode' },
   { key: 'codex', label: 'Codex' },
   { key: 'opencode', label: 'OpenCode' },
+  { key: 'pi', label: 'pi' },
 ];
 
 interface EngineAvailability {
   atomcode?: boolean;
   codex?: boolean;
   opencode?: boolean;
+  pi?: boolean;
 }
 
 export function EngineSwitcher({ groupJid, group }: EngineSwitcherProps) {
@@ -35,12 +37,14 @@ export function EngineSwitcher({ groupJid, group }: EngineSwitcherProps) {
       api.get<{ enabled?: boolean }>('/api/config/atomcode').catch(() => null),
       api.get<{ enabled?: boolean }>('/api/config/codex').catch(() => null),
       api.get<{ enabled?: boolean }>('/api/config/opencode').catch(() => null),
-    ]).then(([a, c, o]) => {
+      api.get<{ enabled?: boolean }>('/api/config/pi').catch(() => null),
+    ]).then(([a, c, o, p]) => {
       if (cancelled) return;
       setAvailability({
         atomcode: a?.enabled === true,
         codex: c?.enabled === true,
         opencode: o?.enabled === true,
+        pi: p?.enabled === true,
       });
     });
     return () => { cancelled = true; };

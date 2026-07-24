@@ -4523,3 +4523,173 @@ export function resolveOpencodeProvidersForSave(
     })
     .filter((p): p is OpencodeProvider => typeof p.apiKey === 'string' && p.apiKey.length > 0);
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// pi engine config
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface PiProvider {
+  /** pi-ai provider 名，如 anthropic/openai/deepseek/gemini/qwen/zai/moonshot/xai/groq */
+  provider: string;
+  apiKey: string;
+  /** 可选自定义端点；空字符串表示用 pi-ai 内置端点 */
+  baseURL: string;
+  model: string;
+}
+
+export interface PiConfig {
+  enabled: boolean;
+  /** 启动命令，默认 'node'（pi 是 Node 包，非独立二进制） */
+  binaryPath: string;
+  /** pi cli.js 脚本路径（构建产物 packages/coding-agent/dist/cli.js）；空则 binaryPath 视为 pi bin */
+  cliScriptPath: string;
+  /** 工作目录，默认 /workspace/group */
+  workingDir: string;
+  /** 默认 provider 名，如 anthropic */
+  defaultProvider: string;
+  /** 默认 model id，如 claude-sonnet-4-6 */
+  defaultModel: string;
+  /** thinking 等级：off/minimal/low/medium/high/xhigh/max */
+  thinkingLevel: string;
+  /** LLM providers config (provider/apiKey/baseURL/model). */
+  providers: PiProvider[];
+  updatedAt: string | null;
+}
+
+/** pi 配置的公开表示（apiKey 脱敏为 hasApiKey 标志位） */
+export interface PublicPiConfig extends Omit<PiConfig, 'providers'> {
+  providers: Array<Omit<PiProvider, 'apiKey'> & { hasApiKey: boolean }>;
+}
+
+const PI_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'pi.json');
+
+const DEFAULT_PI_CONFIG: PiConfig = {
+  enabled: false,
+  binaryPath: 'node',
+  cliScriptPath: '',
+  workingDir: '/workspace/group',
+  defaultProvider: 'anthropic',
+  defaultModel: 'claude-sonnet-4-6',
+  thinkingLevel: 'off',
+  providers: [],
+  updatedAt: null,
+};
+
+function sanitizePiProviders(raw: unknown): PiProvider[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PiProvider[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const p = item as Partial<PiProvider>;
+    const provider = typeof p.provider === 'string' ? p.provider.trim() : '';
+    const apiKey = typeof p.apiKey === 'string' ? p.apiKey : '';
+    const baseURL = typeof p.baseURL === 'string' ? p.baseURL.trim() : '';
+    const model = typeof p.model === 'string' ? p.model.trim() : '';
+    if (!provider || !apiKey || !model) continue;
+    out.push({ provider, apiKey, baseURL, model });
+  }
+  return out;
+}
+
+export function getPiConfig(): PiConfig {
+  try {
+    if (!fs.existsSync(PI_CONFIG_FILE)) {
+      return { ...DEFAULT_PI_CONFIG };
+    }
+    const raw = fs.readFileSync(PI_CONFIG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<PiConfig>;
+    return {
+      ...DEFAULT_PI_CONFIG,
+      ...parsed,
+      binaryPath: typeof parsed.binaryPath === 'string' && parsed.binaryPath ? parsed.binaryPath : 'node',
+      cliScriptPath: typeof parsed.cliScriptPath === 'string' ? parsed.cliScriptPath : '',
+      workingDir:
+        typeof parsed.workingDir === 'string' && parsed.workingDir
+          ? parsed.workingDir
+          : '/workspace/group',
+      defaultProvider:
+        typeof parsed.defaultProvider === 'string' && parsed.defaultProvider
+          ? parsed.defaultProvider
+          : 'anthropic',
+      defaultModel:
+        typeof parsed.defaultModel === 'string' && parsed.defaultModel
+          ? parsed.defaultModel
+          : 'claude-sonnet-4-6',
+      thinkingLevel:
+        typeof parsed.thinkingLevel === 'string' && parsed.thinkingLevel
+          ? parsed.thinkingLevel
+          : 'off',
+      providers: sanitizePiProviders(parsed.providers),
+      enabled: !!parsed.enabled,
+      updatedAt: parsed.updatedAt ?? null,
+    };
+  } catch (err) {
+    logger.warn({ err }, 'getPiConfig: failed to read, using defaults');
+    return { ...DEFAULT_PI_CONFIG };
+  }
+}
+
+export function savePiConfig(cfg: Partial<PiConfig>): PiConfig {
+  const current = getPiConfig();
+  const merged: PiConfig = {
+    enabled: !!cfg.enabled,
+    binaryPath:
+      typeof cfg.binaryPath === 'string' && cfg.binaryPath ? cfg.binaryPath : current.binaryPath,
+    cliScriptPath:
+      typeof cfg.cliScriptPath === 'string' ? cfg.cliScriptPath : current.cliScriptPath,
+    workingDir:
+      typeof cfg.workingDir === 'string' && cfg.workingDir ? cfg.workingDir : current.workingDir,
+    defaultProvider:
+      typeof cfg.defaultProvider === 'string' && cfg.defaultProvider
+        ? cfg.defaultProvider
+        : current.defaultProvider,
+    defaultModel:
+      typeof cfg.defaultModel === 'string' && cfg.defaultModel
+        ? cfg.defaultModel
+        : current.defaultModel,
+    thinkingLevel:
+      typeof cfg.thinkingLevel === 'string' && cfg.thinkingLevel
+        ? cfg.thinkingLevel
+        : current.thinkingLevel,
+    providers: Array.isArray(cfg.providers) ? sanitizePiProviders(cfg.providers) : current.providers,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  writeSecretFile(PI_CONFIG_FILE, JSON.stringify(merged, null, 2) + '\n');
+  return merged;
+}
+
+/** 脱敏版用于 API 响应：apiKey 替换为 hasApiKey 标志位 */
+export function toPublicPiConfig(cfg: PiConfig): PublicPiConfig {
+  const { providers, ...rest } = cfg;
+  return {
+    ...rest,
+    providers: providers.map((p) => {
+      const { apiKey, ...restP } = p;
+      return { ...restP, hasApiKey: apiKey.length > 0 };
+    }),
+  };
+}
+
+/**
+ * PUT /api/config/pi 保存时解析 provider 列表：公开 GET 响应不返回 apiKey，
+ * 前端回存时 apiKey 缺省/被遮蔽（****）的 provider 按 provider 名从 current
+ * 恢复原值；仍无 apiKey 的 provider（未填完的新条目）被丢弃——与
+ * sanitizePiProviders 的行为一致。
+ */
+export function resolvePiProvidersForSave(
+  input: Array<{ provider: string; apiKey?: string; baseURL?: string; model: string }>,
+  current: PiProvider[],
+): PiProvider[] {
+  const currentByKey = new Map(current.map((p) => [p.provider, p.apiKey]));
+  return input
+    .map((p) => {
+      const masked = !p.apiKey || p.apiKey.startsWith('****');
+      if (masked) {
+        const existing = currentByKey.get(p.provider);
+        if (existing) return { ...p, apiKey: existing };
+      }
+      return p;
+    })
+    .filter((p): p is PiProvider => typeof p.apiKey === 'string' && p.apiKey.length > 0);
+}

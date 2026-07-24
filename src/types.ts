@@ -72,13 +72,13 @@ export interface RegisteredGroup {
   binding_mode?: ImBindingMode; // IM 绑定模式（默认 single_context）
   feishu_chat_mode?: string; // 飞书群模式：group/topic/p2p 等
   feishu_group_message_type?: string; // 飞书群消息形式：chat/thread
-  engine?: 'claude' | 'atomcode' | 'codex' | 'opencode'; // Agent 执行引擎（默认 'claude')
+  engine?: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi'; // Agent 执行引擎（默认 'claude')
   agentDefId?: string | null; // 群组绑定的 Agent 定义 ID
 }
 
 // ─── Agent PaaS Types ────────────────────────────────────
 
-export type AgentEngine = 'claude' | 'atomcode' | 'codex' | 'opencode';
+export type AgentEngine = 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
 export type ResourceType = 'mcp_server' | 'skill' | 'knowledge_base';
 export type MarketplaceItemType =
   | 'agent_template'

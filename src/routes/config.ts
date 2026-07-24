@@ -3387,9 +3387,15 @@ import {
   saveOpencodeConfig,
   toPublicOpencodeConfig,
   resolveOpencodeProvidersForSave,
+  getPiConfig,
+  savePiConfig,
+  toPublicPiConfig,
+  resolvePiProvidersForSave,
+  type PiConfig,
 } from '../runtime-config.js';
-import { CodexConfigSchema, OpencodeConfigSchema } from '../schemas.js';
+import { CodexConfigSchema, OpencodeConfigSchema, PiConfigSchema } from '../schemas.js';
 import { spawn } from 'child_process';
+import * as readline from 'node:readline';
 
 /** GET /api/config/codex — get Codex config (admin) */
 configRoutes.get('/codex', authMiddleware, systemConfigMiddleware, (c) => {
@@ -3526,6 +3532,101 @@ configRoutes.post('/opencode/test', authMiddleware, systemConfigMiddleware, asyn
     return c.json(result);
   } catch (err) {
     return c.json({ ok: false, version: '', error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── pi Engine Config ─────────────────────────────────────────
+
+/** GET /api/config/pi — get pi config (admin, apiKey masked) */
+configRoutes.get('/pi', authMiddleware, systemConfigMiddleware, (c) => {
+  const cfg = getPiConfig();
+  return c.json(toPublicPiConfig(cfg));
+});
+
+/** PUT /api/config/pi — save pi config (admin) */
+configRoutes.put('/pi', authMiddleware, systemConfigMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const validation = PiConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json({ error: 'Invalid config', details: validation.error.flatten() }, 400);
+  }
+  const data = validation.data;
+  const current = getPiConfig();
+  // providers: apiKey 缺省/被遮蔽的按 provider 名从 current 恢复，仍无 key 的丢弃
+  const providers = Array.isArray(data.providers)
+    ? resolvePiProvidersForSave(data.providers, current.providers)
+    : undefined;
+  const saved = savePiConfig({ ...data, providers });
+  const actor = (c.get('user') as AuthUser).username;
+  logger.info({ actor, enabled: saved.enabled, providerCount: saved.providers.length }, 'pi config updated');
+  return c.json(toPublicPiConfig(saved));
+});
+
+/**
+ * Spawn `pi --mode rpc`, send get_state command, await response.
+ * Returns { ok, version?, error? }. 15s timeout.
+ */
+async function testPiRpc(cfg: PiConfig): Promise<{ ok: boolean; version?: string; error?: string }> {
+  const args = cfg.cliScriptPath ? [cfg.cliScriptPath, '--mode', 'rpc'] : ['--mode', 'rpc'];
+  return new Promise((resolve) => {
+    let proc: import('child_process').ChildProcess;
+    try {
+      proc = spawn(cfg.binaryPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      resolve({ ok: false, error: 'timeout (15s)' });
+    }, 15_000);
+    if (!proc.stdout) {
+      clearTimeout(timer);
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      resolve({ ok: false, error: 'pi stdout unavailable' });
+      return;
+    }
+    const rl = readline.createInterface({ input: proc.stdout });
+    let resolved = false;
+    const finish = (result: { ok: boolean; version?: string; error?: string }) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      resolve(result);
+    };
+    rl.on('line', (line) => {
+      if (resolved) return;
+      let msg: { type?: string; command?: string; success?: boolean; data?: { version?: string } };
+      try { msg = JSON.parse(line); } catch { return; }
+      if (msg.type === 'response' && msg.command === 'get_state') {
+        finish({ ok: !!msg.success, version: msg.data?.version });
+      }
+    });
+    proc.on('error', (err) => finish({ ok: false, error: err.message }));
+    proc.on('close', (code) => {
+      if (!resolved) finish({ ok: false, error: `pi exited with code ${code}` });
+    });
+    // Spawn 后立即发 get_state 命令
+    try {
+      proc.stdin?.write(JSON.stringify({ id: 't', type: 'get_state' }) + '\n');
+    } catch (err) {
+      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
+/** POST /api/config/pi/test — spawn `pi --mode rpc`, send get_state, check response */
+configRoutes.post('/pi/test', authMiddleware, systemConfigMiddleware, async (c) => {
+  const cfg = getPiConfig();
+  if (!cfg.binaryPath) {
+    return c.json({ ok: false, error: 'pi 启动命令（binaryPath）未配置' }, 200);
+  }
+  try {
+    const result = await testPiRpc(cfg);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 });
 

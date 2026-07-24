@@ -120,9 +120,9 @@ teamRoutes.post('/runs', async (c) => {
   // 开始轮询 GET /api/team/runs/:buildId；buildTeam 同步前缀的 21s 阻塞由轮询的
   // 单次失败重试（pollBuild catch → 下一轮）吸收，不影响终态回写。
   // 成功回写 plan+runId，失败回写 error；进程级 unhandledRejection 已有 logger 兜底。
+  const buildTeam = webDeps.buildTeam;
   setImmediate(() => {
-    webDeps
-      .buildTeam(input)
+    buildTeam(input)
       .then((result) => {
         if ('error' in result) {
           failTeamBuild(buildId, `${result.error}${result.detail ? `：${result.detail}` : ''}`);

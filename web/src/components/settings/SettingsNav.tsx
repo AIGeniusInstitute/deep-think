@@ -37,6 +37,7 @@ const systemItems: NavItem[] = [
   { key: 'atomcode', label: 'AtomCode 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
   { key: 'codex', label: 'Codex 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
   { key: 'opencode', label: 'OpenCode 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
+  { key: 'pi', label: 'pi 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
   { key: 'embedding', label: 'Embedding 配置', icon: <Cpu className="w-4 h-4" />, group: 'system' },
 ];
 

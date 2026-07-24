@@ -323,7 +323,7 @@ interface ChatState {
   createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
-  switchEngine: (jid: string, engine: 'claude' | 'atomcode' | 'codex' | 'opencode') => Promise<void>;
+  switchEngine: (jid: string, engine: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi') => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
   handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string, source?: string) => void;
@@ -1770,7 +1770,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  switchEngine: async (jid: string, engine: 'claude' | 'atomcode' | 'codex' | 'opencode') => {
+  switchEngine: async (jid: string, engine: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi') => {
     try {
       await api.patch<{ success: boolean }>(`/api/groups/${encodeURIComponent(jid)}`, { engine });
       set((s) => {

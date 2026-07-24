@@ -1337,6 +1337,7 @@ export function initDatabase(): void {
   ensureColumn('sessions', 'sandbox_session_id', 'TEXT');
   ensureColumn('sessions', 'codex_thread_id', 'TEXT');
   ensureColumn('sessions', 'opencode_session_id', 'TEXT');
+  ensureColumn('sessions', 'pi_session_id', 'TEXT');
   ensureColumn('users', 'agent_quota', 'INTEGER NOT NULL DEFAULT 10');
   ensureColumn('messages', 'token_usage', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
@@ -4942,6 +4943,49 @@ export function clearOpencodeSessionId(
   ).run(groupFolder, effectiveAgentId);
 }
 
+/**
+ * pi engine session helpers. pi session IDs (from RPC agent_start /
+ * session_info_changed events) are stored in a separate column
+ * (pi_session_id) to avoid colliding with other engines' session IDs.
+ */
+export function getPiSessionId(
+  groupFolder: string,
+  agentId?: string | null,
+): string | undefined {
+  const effectiveAgentId = agentId || '';
+  const row = db
+    .prepare(
+      'SELECT pi_session_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
+    .get(groupFolder, effectiveAgentId) as
+    | { pi_session_id: string | null }
+    | undefined;
+  return row?.pi_session_id ?? undefined;
+}
+
+export function setPiSessionId(
+  groupFolder: string,
+  sessionId: string,
+  agentId?: string | null,
+): void {
+  const effectiveAgentId = agentId || '';
+  db.prepare(
+    `INSERT INTO sessions (group_folder, session_id, agent_id, pi_session_id)
+     VALUES (?, '', ?, ?)
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET pi_session_id = excluded.pi_session_id`,
+  ).run(groupFolder, effectiveAgentId, sessionId);
+}
+
+export function clearPiSessionId(
+  groupFolder: string,
+  agentId?: string | null,
+): void {
+  const effectiveAgentId = agentId || '';
+  db.prepare(
+    `UPDATE sessions SET pi_session_id = NULL WHERE group_folder = ? AND agent_id = ?`,
+  ).run(groupFolder, effectiveAgentId);
+}
+
 export function deleteAllSessionsForFolder(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
@@ -5115,8 +5159,8 @@ function parseGroupRow(
     feishu_group_message_type: row.feishu_group_message_type ?? undefined,
     sender_allowlist: senderAllowlist,
     engine:
-      row.engine === 'atomcode' || row.engine === 'codex' || row.engine === 'opencode'
-        ? (row.engine as 'atomcode' | 'codex' | 'opencode')
+      row.engine === 'atomcode' || row.engine === 'codex' || row.engine === 'opencode' || row.engine === 'pi'
+        ? (row.engine as 'atomcode' | 'codex' | 'opencode' | 'pi')
         : 'claude',
     agentDefId: row.agent_def_id ?? null,
   };
@@ -9429,7 +9473,7 @@ export interface AgentSnapshot {
   description: string;
   system_prompt: string;
   model: string | null;
-  engine: 'claude' | 'atomcode' | 'codex' | 'opencode';
+  engine: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
   avatar_emoji: string | null;
   avatar_color: string | null;
   max_turns: number | null;
@@ -9452,8 +9496,8 @@ export function saveAgentVersionSnapshot(
     system_prompt: existing.system_prompt,
     model: existing.model,
     engine:
-      existing.engine === 'atomcode' || existing.engine === 'codex' || existing.engine === 'opencode'
-        ? (existing.engine as 'atomcode' | 'codex' | 'opencode')
+      existing.engine === 'atomcode' || existing.engine === 'codex' || existing.engine === 'opencode' || existing.engine === 'pi'
+        ? (existing.engine as 'atomcode' | 'codex' | 'opencode' | 'pi')
         : 'claude',
     avatar_emoji: existing.avatar_emoji,
     avatar_color: existing.avatar_color,
