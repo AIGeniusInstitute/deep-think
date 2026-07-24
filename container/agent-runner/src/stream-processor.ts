@@ -385,6 +385,10 @@ export class StreamEventProcessor {
         isNested: effectiveIsNested,
         skillName: extractSkillName(block.name, block.input),
         toolInputSummary: summarizeToolInput(block.input),
+        // Persist the raw tool input to trace_tool_calls.input_json so the
+        // execution-view trace panel can show what the agent invoked (not just
+        // a summary). chat-trace-persist.ts:63 keys on `event.toolInput`.
+        toolInput: block.input as Record<string, unknown>,
       },
     });
 

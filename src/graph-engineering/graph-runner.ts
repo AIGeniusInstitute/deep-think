@@ -35,6 +35,7 @@ import {
   type ContainerOutput,
 } from '../container-runner.js';
 import { parseReviewResult } from '../loop-orchestrator.js';
+import { persistTraceNodeFromStreamEvent } from '../chat-trace-persist.js';
 import { runScript } from '../script-runner.js';
 import { scoreAssertion } from '../harness-eval.js';
 import type { ExecutionMode, RegisteredGroup } from '../types.js';
@@ -319,7 +320,7 @@ async function runAgentNode(
     graphNodeId: node.id,
   };
 
-  await runAgent(
+  const agentResult = await runAgent(
     group,
     input,
     (proc, identifier, selectedProviderId) =>
@@ -334,6 +335,12 @@ async function runAgentNode(
       ),
     async (streamed: ContainerOutput) => {
       if (streamed.status === 'stream' && streamed.streamEvent) {
+        // Persist trace nodes + tool-call I/O to chat_trace_nodes /
+        // trace_tool_calls (linked to this graph_run_id via the graphRunId
+        // stamped by agent-runner's trace-node-allocator). Mirrors the IM path
+        // at src/index.ts:3678; without this the execution-view trace panel
+        // shows nothing for graph agent runs even though output_summary exists.
+        persistTraceNodeFromStreamEvent(ctx.chatJid, streamed.streamEvent);
         deps.broadcastStreamEvent?.(ctx.chatJid, streamed.streamEvent);
         const u = (streamed.streamEvent as { usage?: { inputTokens: number; outputTokens: number; costUSD: number } }).usage;
         if (u) {
@@ -345,6 +352,23 @@ async function runAgentNode(
       if (streamed.result) output = streamed.result;
     },
   );
+
+  // Container exit status → node outcome. Previously this return value was
+  // discarded and the node was unconditionally marked 'completed', so a
+  // timed-out / errored / closed (host-killed) container still surfaced as a
+  // completed node with empty output, breaking downstream gates and masking
+  // the real failure. Map non-success terminal states to 'failed'.
+  if (agentResult.status === 'error' || agentResult.status === 'closed') {
+    return {
+      status: 'failed',
+      output,
+      statePatch: { [`node_${node.id}_output`]: output.slice(0, 4000) },
+      inputTokens,
+      outputTokens,
+      costUsd,
+      error: agentResult.error ?? `agent node ${node.id} ${agentResult.status}`,
+    };
+  }
 
   // Heuristic state patch: expose the agent output so downstream nodes can read it.
   const statePatch: StatePatch = { [`node_${node.id}_output`]: output.slice(0, 4000) };

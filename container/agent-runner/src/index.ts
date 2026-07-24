@@ -80,6 +80,14 @@ const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事件丢失）
 
+// In-query liveness watchdog. After the SDK handshake (system/init), if no
+// stream event / assistant / tool / result message arrives for this long, the
+// query is considered stalled (SDK produced no events post-handshake) and is
+// interrupted so the container exits instead of hanging until containerTimeout
+// (30 min). Gated to graph agent runs (containerInput.graphRunId set) — IM
+// chat runs may legitimately block on human input (AskUserQuestion etc.).
+const INACTIVITY_TIMEOUT_MS = 600_000; // 10 min
+
 
 let needsMemoryFlush = false;
 let hadCompaction = false;
@@ -1257,7 +1265,7 @@ async function runQuery(
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
   sourceKindOverride?: ContainerOutput['sourceKind'],
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; pipedMessagesDuringQuery: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string; sourceJid?: string }>; suspectTruncatedTail?: string }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; stalledDuringQuery?: boolean; sessionResumeFailed?: boolean; pipedMessagesDuringQuery: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string; sourceJid?: string }>; suspectTruncatedTail?: string }> {
   const stream = new MessageStream();
   // Track messages piped into this query.  When the query is interrupted,
   // these messages would otherwise be lost (consumed by the aborted query).
@@ -1340,6 +1348,12 @@ async function runQuery(
   // before force-closing the stream.
   let resultReceivedAt: number | null = null;
   const POST_RESULT_TIMEOUT_MS = 5_000;
+  // In-query inactivity watchdog state. lastStreamActivityAt is null until
+  // system/init arms it; once armed, pollIpcDuringQuery checks the gap and
+  // fires INACTIVITY_TIMEOUT_MS of total silence (only for graph agent runs).
+  let lastStreamActivityAt: number | null = null;
+  let stalledDuringQuery = false;
+  const watchdogEnabled = !!containerInput.graphRunId;
   // queryRef is set just before the for-await loop so pollIpcDuringQuery can call interrupt().
   // SDK 0.3.203+ 的 interrupt() 返回 Promise<SDKControlInterruptResponse | undefined>，
   // 这里只关心 thenable，故放宽为 Promise<unknown>。
@@ -1457,6 +1471,25 @@ async function runQuery(
     // ready yet and streamInput() will throw "ProcessTransport is not ready for writing".
     // IPC files remain on disk; we'll drain them once sdkTransportReady is set.
     if (!sdkTransportReady) {
+      return;
+    }
+
+    // ── In-query inactivity watchdog（仅 graph agent 节点）──
+    // SDK 握手后若 INACTIVITY_TIMEOUT_MS 内无任何流式消息，判定 query 卡死：
+    // 中止 query + 标记 stalled，让容器以 error 退出（而非干等 30min containerTimeout）。
+    // 仅对 graph 运行生效（containerInput.graphRunId 非空），IM 会话可能合法阻塞在人机交互。
+    if (
+      watchdogEnabled &&
+      !stalledDuringQuery &&
+      Date.now() - (lastStreamActivityAt as number) > INACTIVITY_TIMEOUT_MS
+    ) {
+      const idleSec = Math.round((Date.now() - (lastStreamActivityAt as number)) / 1000);
+      log(`Inactivity watchdog fired (${idleSec}s no stream activity), interrupting stalled query`);
+      stalledDuringQuery = true;
+      interruptQueryForShutdown('Inactivity watchdog');
+      stream.end();
+      ipcPolling = false;
+      ipcQueryWatcher.close();
       return;
     }
 
@@ -1727,6 +1760,11 @@ async function runQuery(
       ipcPolling = false;
     }
     for await (const message of q) {
+    // Any message from the SDK counts as stream activity for the inactivity
+    // watchdog (replays/synthetic messages included — they still prove the
+    // transport is alive). Reset before processing so the watchdog sees the
+    // latest activity timestamp.
+    lastStreamActivityAt = Date.now();
     // 流式事件处理
     if (message.type === 'stream_event') {
       // 重放消息是完整消息、不产生 partial stream_event——见到 stream_event
@@ -1964,12 +2002,12 @@ async function runQuery(
           });
         }
         processor.resetFullTextAccumulator();
-        return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery, pipedMessagesDuringQuery };
+        return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
       }
       if (textResult && isUnrecoverableTranscriptError(textResult)) {
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
-        return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery, pipedMessagesDuringQuery };
+        return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
       }
 
       // processResult 的调用保留其副作用（flush 流式缓冲、重置 fullTextAccumulator），
@@ -2127,7 +2165,7 @@ async function runQuery(
   processor.cleanup();
 
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, pipedMessagesDuringQuery, suspectTruncatedTail };
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery, suspectTruncatedTail };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -2146,13 +2184,13 @@ async function runQuery(
           finalizationReason: 'error',
         });
       }
-      return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery, pipedMessagesDuringQuery };
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
     }
 
     // 检测不可恢复的转录错误
     if (isUnrecoverableTranscriptError(errorMessage)) {
       log(`Unrecoverable transcript error: ${errorMessage}`);
-      return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery, pipedMessagesDuringQuery };
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
     }
 
     // 中断导致的 SDK 错误（error_during_execution 等）：正常返回，不抛出
@@ -2162,7 +2200,7 @@ async function runQuery(
       // 缓冲尾巴（未达 flush 阈值、定时器未触发）会永久丢失，导致 interrupt_partial 缺尾。
       // cleanup() 幂等安全（seenTextualResult 时丢尾避重复，否则 flushBuffers）。
       processor.cleanup();
-      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, pipedMessagesDuringQuery };
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
     }
 
     // Shutdown 触发的 interrupt（_close/_drain/post-result-timeout）：interruptQueryForShutdown()
@@ -2175,7 +2213,7 @@ async function runQuery(
       // 同 interruptedDuringQuery：补 cleanup() 刷新残留缓冲尾巴，避免 shutdown
       // 中断时未达阈值的最后一小段文本丢失。
       processor.cleanup();
-      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, pipedMessagesDuringQuery };
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
     }
 
     // SDK 在 yield result 后可能再抛异常（如检测到 result text 含错误内容），
@@ -2187,7 +2225,7 @@ async function runQuery(
       if (err instanceof Error && err.stack) {
         log(`runQuery post-result error stack:\n${err.stack}`);
       }
-      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, pipedMessagesDuringQuery };
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery };
     }
 
     // 其他错误：记录完整堆栈后继续抛出
@@ -2571,6 +2609,22 @@ async function main(): Promise<void> {
         break;
       }
 
+      // Inactivity watchdog fired (graph agent runs only): the SDK stalled with
+      // no stream events post-handshake. Exit with an error so the host's
+      // runContainerAgent resolves via the close handler and the graph node is
+      // marked failed (instead of hanging until the 30-min containerTimeout).
+      if (queryResult.stalledDuringQuery) {
+        const errMsg = `agent query stalled: no stream activity for ${Math.round(INACTIVITY_TIMEOUT_MS / 1000)}s after handshake`;
+        log(`Inactivity watchdog triggered, exiting: ${errMsg}`);
+        writeOutput({
+          status: 'error',
+          result: null,
+          error: `inactivity_watchdog: ${errMsg}`,
+          newSessionId: sessionId,
+        });
+        forceExitWithSafetyNet(1);
+      }
+
       // 中断后：跳过 memory flush 和 session update
       if (queryResult.interruptedDuringQuery) {
         // 中断后清除 resumeAt：被中断的 assistant 消息可能未完整提交到 session 历史。
@@ -2868,6 +2922,21 @@ async function main(): Promise<void> {
       }
 
       log('Query ended, waiting for next IPC message...');
+
+      // Graph agent nodes are single-shot: containerInput.graphRunId is set
+      // by runAgentNode (graph-runner.ts) and means this container exists
+      // only to execute ONE query for ONE graph node. The host's graph path
+      // never writes a _close/_drain sentinel (unlike the chat GroupQueue),
+      // so entering waitForIpcMessage() here would block forever on
+      // fs.watch(IPC_INPUT_DIR) — the container sleeps (STAT=Sl, %CPU=0),
+      // runContainerAgent's promise never resolves (no close event), and the
+      // graph_node_runs row stays 'running' until the 30-min containerTimeout
+      // fires (or never, if stream output keeps resetting it). Exit now so
+      // the container closes, the promise resolves, and the node is回写.
+      if (containerInput.graphRunId) {
+        log(`Graph single-shot mode (graphRunId=${containerInput.graphRunId}), exiting after query — not entering waitForIpcMessage`);
+        break;
+      }
 
       // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
