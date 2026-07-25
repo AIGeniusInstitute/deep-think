@@ -31,8 +31,8 @@ import { PiEngineSection } from '../components/settings/PiEngineSection';
 import { EmbeddingSettingsSection } from '../components/settings/EmbeddingSettingsSection';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'embedding'];
-const SYSTEM_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'atomcode', 'codex', 'opencode', 'embedding'];
+const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'pi', 'embedding'];
+const SYSTEM_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'atomcode', 'codex', 'opencode', 'pi', 'embedding'];
 const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
 
 export function SettingsPage() {
@@ -84,6 +84,7 @@ export function SettingsPage() {
       tabs.push({ key: 'atomcode', label: 'AtomCode' });
       tabs.push({ key: 'codex', label: 'Codex' });
       tabs.push({ key: 'opencode', label: 'OpenCode' });
+      tabs.push({ key: 'pi', label: 'pi' });
       tabs.push({ key: 'embedding', label: 'Embedding' });
     }
     tabs.push({ key: 'groups', label: '会话' });
