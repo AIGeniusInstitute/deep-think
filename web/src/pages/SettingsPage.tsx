@@ -28,11 +28,12 @@ import { AtomcodeEngineSection } from '../components/settings/AtomcodeEngineSect
 import { CodexEngineSection } from '../components/settings/CodexEngineSection';
 import { OpencodeEngineSection } from '../components/settings/OpencodeEngineSection';
 import { PiEngineSection } from '../components/settings/PiEngineSection';
+import { AutonomySection } from '../components/settings/AutonomySection';
 import { EmbeddingSettingsSection } from '../components/settings/EmbeddingSettingsSection';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'pi', 'embedding'];
-const SYSTEM_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'atomcode', 'codex', 'opencode', 'pi', 'embedding'];
+const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'pi', 'embedding', 'autonomy'];
+const SYSTEM_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'atomcode', 'codex', 'opencode', 'pi', 'autonomy', 'embedding'];
 const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
 
 export function SettingsPage() {
@@ -85,6 +86,7 @@ export function SettingsPage() {
       tabs.push({ key: 'codex', label: 'Codex' });
       tabs.push({ key: 'opencode', label: 'OpenCode' });
       tabs.push({ key: 'pi', label: 'pi' });
+      tabs.push({ key: 'autonomy', label: '自主性' });
       tabs.push({ key: 'embedding', label: 'Embedding' });
     }
     tabs.push({ key: 'groups', label: '会话' });
@@ -139,6 +141,7 @@ export function SettingsPage() {
     codex: 'Codex 引擎',
     opencode: 'OpenCode 引擎',
     pi: 'pi 引擎',
+    autonomy: '自主性中枢',
     embedding: 'Embedding 配置',
   };
 
@@ -239,6 +242,7 @@ export function SettingsPage() {
                   {activeTab === 'codex' && <CodexEngineSection />}
                   {activeTab === 'opencode' && <OpencodeEngineSection />}
                   {activeTab === 'pi' && <PiEngineSection />}
+                  {activeTab === 'autonomy' && <AutonomySection />}
                   {activeTab === 'embedding' && <EmbeddingSettingsSection />}
                 </CardContent>
               </Card>

@@ -6,6 +6,6 @@ import { defineConfig } from 'vitest/config';
 // .gitignore, so we must exclude explicitly.
 export default defineConfig({
   test: {
-    exclude: ['**/node_modules/**', '**/dist/**', 'data/**', '.claude/**'],
+    exclude: ['**/node_modules/**', '**/dist/**', 'data/**', '.claude/**', '.worktrees/**'],
   },
 });

@@ -1996,7 +1996,55 @@ export function initDatabase(): void {
     'CREATE INDEX IF NOT EXISTS idx_chat_trace_graph ON chat_trace_nodes(graph_run_id, graph_node_id)',
   );
 
-  const SCHEMA_VERSION = '53';
+  // v53 → v54: Autonomy Layer — 7-capability registry + quantified metrics +
+  // cross-session lessons + adaptation signals. All IF NOT EXISTS, no changes
+  // to existing tables. See docs/tech_solution/autonomy-system/SOLUTION.md §2.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS autonomy_capabilities (
+      capability TEXT PRIMARY KEY,
+      domain TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_event_at INTEGER,
+      metrics_summary_json TEXT,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS autonomy_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability TEXT NOT NULL,
+      metric_name TEXT NOT NULL,
+      numerator INTEGER NOT NULL DEFAULT 0,
+      denominator INTEGER NOT NULL DEFAULT 0,
+      run_id TEXT,
+      graph_run_id TEXT,
+      ts INTEGER NOT NULL,
+      details_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_am_cap_metric ON autonomy_metrics(capability, metric_name, ts);
+
+    CREATE TABLE IF NOT EXISTS autonomy_lessons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability TEXT NOT NULL,
+      lesson_text TEXT NOT NULL,
+      derived_from_run_ids TEXT,
+      applied_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS autonomy_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      signal_type TEXT NOT NULL,
+      payload_json TEXT,
+      target_run_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      applied_at INTEGER
+    );
+  `);
+
+  const SCHEMA_VERSION = '54';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
