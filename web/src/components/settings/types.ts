@@ -130,7 +130,7 @@ export interface CachedOAuthUsage {
   error?: string;
 }
 
-export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'plugins' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor' | 'language' | 'atomcode' | 'codex' | 'opencode' | 'pi' | 'embedding';
+export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'plugins' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor' | 'language' | 'atomcode' | 'codex' | 'opencode' | 'pi' | 'embedding' | 'autonomy';
 
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {

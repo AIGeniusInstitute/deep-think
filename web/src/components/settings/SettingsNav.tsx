@@ -18,6 +18,7 @@ import {
   Gauge,
   Globe,
   Cpu,
+  Activity,
 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type { SettingsTab } from './types';
@@ -38,6 +39,7 @@ const systemItems: NavItem[] = [
   { key: 'codex', label: 'Codex 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
   { key: 'opencode', label: 'OpenCode 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
   { key: 'pi', label: 'pi 引擎', icon: <Server className="w-4 h-4" />, group: 'system' },
+  { key: 'autonomy', label: '自主性中枢', icon: <Activity className="w-4 h-4" />, group: 'system' },
   { key: 'embedding', label: 'Embedding 配置', icon: <Cpu className="w-4 h-4" />, group: 'system' },
 ];
 

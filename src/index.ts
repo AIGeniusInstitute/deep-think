@@ -186,6 +186,7 @@ import { bootAutonomyRegistry } from './autonomy/autonomy-registry.js';
 import { startAutonomyMetricsCollector } from './autonomy/autonomy-metrics.js';
 import { startLearningCollector } from './autonomy/autonomy-learning.js';
 import { startAdaptationLoop } from './autonomy/autonomy-adapt.js';
+import { startHealCollector } from './autonomy/autonomy-heal.js';
 import {
   executeGraph,
   buildRunContext,
@@ -11728,6 +11729,7 @@ async function main(): Promise<void> {
     startAutonomyMetricsCollector();
     startLearningCollector();
     startAdaptationLoop();
+    startHealCollector();
   } catch (err) {
     logger.error({ err }, 'Autonomy boot failed');
   }
