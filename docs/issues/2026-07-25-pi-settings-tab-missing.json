@@ -1,0 +1,48 @@
+{
+  "date": "2026-07-25",
+  "slug": "pi-settings-tab-missing",
+  "severity": "high",
+  "affected_engine": "pi",
+  "1_user_phenomenon": "用户在浏览器访问 http://127.0.0.1:5173/settings?tab=pi，期望看到 pi 引擎配置页（启用开关 / binaryPath / cliScriptPath / Provider 等），实际只看到一个标题为「模型服务商」的纯 Provider 配置页，没有「启用 pi 引擎」开关，也没有 pi 二进制包路径输入框。make dev-start 启动后现象一致。",
+  "2_problem": "SettingsPage.tsx 的 activeTab 解析逻辑在 URL ?tab=pi 时未能把 activeTab 置为 'pi'，而是回退到默认值 'claude'，导致渲染的是 ClaudeProviderSection（其导航 label 正是「模型服务商」），而非 PiEngineSection。PiEngineSection 组件本身字段完整（enabled/binaryPath/cliScriptPath/providers 等齐全），只是没被渲染出来。",
+  "3_root_cause": "接入 pi 引擎时，在 SettingsNav.tsx:40 加了 { key: 'pi', label: 'pi 引擎' } 导航项、在 SettingsPage.tsx:240 加了 {activeTab === 'pi' && <PiEngineSection />} 渲染分支、types.ts:133 的 SettingsTab 联合类型也含 'pi'，但遗漏了三处 tab 白名单数组：\n(1) SettingsPage.tsx:34 VALID_TABS 未加 'pi' —— 这是 activeTab 能否命中 'pi' 的关键开关（第 58 行 `if (raw && VALID_TABS.includes(raw))` 不通过则回退 defaultTab）；\n(2) SettingsPage.tsx:35 SYSTEM_TABS 未加 'pi' —— 用于权限校验，admin 用户不受影响但非 admin system-config 角色无法访问；\n(3) SettingsPage.tsx:84-87 mobileTabs 未加 pi —— 移动端横向 tab 栏缺 pi 入口。\n由于 admin 用户的 defaultTab='claude'（第 53 行），?tab=pi 失效后回退到 claude → 渲染 ClaudeProviderSection（label「模型服务商」），完美对应用户看到的「只有一个模型服务商配置」现象。",
+  "4_repro": [
+    "1. make dev-start 启动 dev 后端 + Vite 前端（5173）",
+    "2. 浏览器登录 admin/88888888",
+    "3. 访问 http://127.0.0.1:5173/settings?tab=pi",
+    "4. 观察页面：标题为「模型服务商」，无启用开关、无 binaryPath/cliScriptPath 输入框 —— 即渲染了 ClaudeProviderSection 而非 PiEngineSection",
+    "5. 对照访问 /settings?tab=codex 可正常看到 Codex 引擎配置页（含启用开关+二进制路径），证明同形引擎配置页本身可用，问题仅在 pi 的 tab 白名单遗漏"
+  ],
+  "5_diagnosis": [
+    "# 确认根因（无需登录，纯前端逻辑）",
+    "grep -n \"VALID_TABS\\|SYSTEM_TABS\" ~/deepthink/web/src/pages/SettingsPage.tsx",
+    "# 修复前输出不含 'pi'；VALID_TABS.includes('pi') === false → activeTab 回退 defaultTab",
+    "",
+    "# 确认组件与导航项已就绪（排除组件缺失可能）",
+    "grep -n \"pi\" ~/deepthink/web/src/components/settings/SettingsNav.tsx   # 有 { key: 'pi', label: 'pi 引擎' }",
+    "grep -n \"PiEngineSection\\|tab === 'pi'\" ~/deepthink/web/src/pages/SettingsPage.tsx   # 有 import 与渲染分支",
+    "grep -n \"SettingsTab\" ~/deepthink/web/src/components/settings/types.ts   # 联合类型含 'pi'",
+    "",
+    "# 运行时验证（修复后）",
+    "curl -s http://127.0.0.1:5173/src/pages/SettingsPage.tsx | grep VALID_TABS   # 转译后数组含 'pi'",
+    "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5173/src/components/settings/PiEngineSection.tsx   # 200",
+    "cd ~/deepthink/web && npx tsc --noEmit   # exit 0"
+  ],
+  "6_fix": {
+    "rationale": "纯白名单遗漏，surgical 补 'pi' 到三个数组即可，与 atomcode/codex/opencode 同形同位置。不触碰组件代码、不触碰后端、不触碰路由。",
+    "file": "web/src/pages/SettingsPage.tsx",
+    "diff": "--- a/web/src/pages/SettingsPage.tsx\n+++ b/web/src/pages/SettingsPage.tsx\n@@ -31 +31 @@\n-const VALID_TABS: SettingsTab[] = [..., 'opencode', 'embedding'];\n+const VALID_TABS: SettingsTab[] = [..., 'opencode', 'pi', 'embedding'];\n-const SYSTEM_TABS: SettingsTab[] = [..., 'opencode', 'embedding'];\n+const SYSTEM_TABS: SettingsTab[] = [..., 'opencode', 'pi', 'embedding'];\n@@ -86,0 +87 @@\n+      tabs.push({ key: 'pi', label: 'pi' });\n   (位于 opencode 与 embedding 之间，与 SettingsNav 顺序一致)",
+    "verification": {
+      "typecheck": "pass (npx tsc --noEmit exit 0)",
+      "vite_hmr": "pass (curl /src/pages/SettingsPage.tsx 转译后 VALID_TABS/SYSTEM_TABS 含 'pi')",
+      "piengine_section_module": "pass (curl 200)",
+      "browser_full_page_screenshot": "skipped (sandbox_browser_navigate 连续 30s 超时，浏览器沙箱不可用；以模块级运行时证据 + 确定性逻辑替代)"
+    }
+  },
+  "7_stuck_state": null,
+  "8_lessons": [
+    "新增引擎 tab 时，必须同步四处：(1) types.ts 的 SettingsTab 联合类型 (2) SettingsPage.tsx VALID_TABS (3) SettingsPage.tsx SYSTEM_TABS（若属系统配置类）(4) SettingsPage.tsx mobileTabs (5) SettingsNav.tsx 导航项 (6) SettingsPage.tsx 渲染分支。缺一即静默回退到默认 tab，现象隐蔽（页面不报错，只是显示错页面）。",
+    "tab 白名单遗漏是「静默失败」型 bug：URL ?tab=xxx 不命中 VALID_TABS 时回退 defaultTab，不会报错也不会空白，极易误判为「功能未实现」。诊断时应优先 curl Vite 模块源码 + 核对白名单数组，而非假设组件未实现。",
+    "预防：可加一条 SettingsPage 单元测试，遍历 SettingsNav 所有导航项 key，断言每个 key 都在 VALID_TABS 内，防止再遗漏。"
+  ]
+}
