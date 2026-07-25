@@ -22,6 +22,7 @@
  */
 
 import { logger } from '../logger.js';
+import { emitAutonomyEvent } from '../autonomy/autonomy-bus.js';
 import { sdkQuery } from '../sdk-query.js';
 import {
   createAgentDefinition,
@@ -287,6 +288,15 @@ export async function buildTeam(
   let plan: TeamPlan;
   try {
     plan = await decompose(input);
+    // Autonomy Layer — decision generated autonomously (no human instruction).
+    // See docs/tech_solution/autonomy-system/SOLUTION.md §4 (decision independence).
+    emitAutonomyEvent({
+      capability: 'decision',
+      domain: input.chatJid,
+      type: 'decision.generated',
+      payload: { human_triggered: false, members: plan.members.length },
+      ts: Date.now(),
+    });
   } catch (err) {
     return { error: 'decomposition failed', detail: (err as Error).message };
   }

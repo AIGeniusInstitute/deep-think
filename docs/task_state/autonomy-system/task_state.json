@@ -1,0 +1,33 @@
+{
+  "task": "DeepThink 自主 AI Agent 系统升级",
+  "branch": "feat/autonomy-system",
+  "worktree": "~/deepthink/.worktrees/autonomy",
+  "started_at": "2026-07-26T02:16+08:00",
+  "current_phase": "P0-e2e",
+  "phases": [
+    {
+      "name": "P0",
+      "work_packages": ["WP1 中枢", "WP2 度量", "WP6 验收骨架"],
+      "status": "in_progress",
+      "steps": [
+        {"id": "PRD", "status": "done", "path": "docs/prd/autonomy-system/PRD.md"},
+        {"id": "tech_solution", "status": "done", "path": "docs/tech_solution/autonomy-system/SOLUTION.md"},
+        {"id": "schema_migration", "status": "done", "note": "SCHEMA_VERSION 53→54, 4 tables IF NOT EXISTS"},
+        {"id": "autonomy_types_bus", "status": "done", "note": "src/autonomy/autonomy-types.ts + autonomy-bus.ts"},
+        {"id": "autonomy_registry_repo", "status": "done", "note": "autonomy-registry.ts"},
+        {"id": "autonomy_metrics", "status": "done", "note": "autonomy-metrics.ts + 8 event handlers"},
+        {"id": "autonomy_routes", "status": "done", "note": "src/routes/autonomy.ts, mounted /api/autonomy"},
+        {"id": "instrumentation", "status": "done_partial", "note": "execution 4 处(graph-orchestrator) + decision 1 处(team-builder); perception/learning/adaptation/monitoring 埋点放 P1/P2"},
+        {"id": "unit_tests", "status": "done", "note": "tests/units/autonomy.test.ts 15/15 passed"},
+        {"id": "typecheck_regression", "status": "done", "note": "tsc --noEmit EXIT=0; 全量 1309 passed/1 failed(基线既有 prompt-loader)/4 skipped; 零新增回归"},
+        {"id": "e2e_skeleton", "status": "pending", "note": "Playwright + dev 服务"}
+      ]
+    },
+    {"name": "P1", "work_packages": ["WP3 学习闭环", "WP4 主动适应"], "status": "pending"},
+    {"name": "P2", "work_packages": ["WP5 自愈+仪表盘", "WP6 场景扩充"], "status": "pending"}
+  ],
+  "baseline_tests": {"note": "基线既有失败: tests/prompt-loader.test.ts (platform prompt 含 WebFetch, 与本需求无关, main 也失败)"},
+  "schema_version": {"baseline": 53, "target": 54, "status": "done"},
+  "blockers": [],
+  "env_notes": ["worktree 共享主仓库 node_modules(better-sqlite3 用 v22 编译, 需 PATH 指向 v22.23.1)", "worktree web/node_modules 软链到主仓库 web/node_modules", "vitest.config.ts exclude 加 .worktrees/** 防跨 worktree 污染"]
+}

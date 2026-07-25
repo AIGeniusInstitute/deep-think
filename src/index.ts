@@ -182,6 +182,8 @@ import {
   type RecentMessageLite,
 } from './supervisor-agent.js';
 import { bootRecoverGraphRuns } from './graph-engineering/graph-recovery.js';
+import { bootAutonomyRegistry } from './autonomy/autonomy-registry.js';
+import { startAutonomyMetricsCollector } from './autonomy/autonomy-metrics.js';
 import {
   executeGraph,
   buildRunContext,
@@ -11716,6 +11718,14 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     logger.error({ err }, 'Graph boot recovery failed');
+  }
+  // Autonomy Layer boot: register 7 capabilities + wire metrics collector to
+  // the bus. Failures are non-fatal (instrumentation is side-effect only).
+  try {
+    bootAutonomyRegistry();
+    startAutonomyMetricsCollector();
+  } catch (err) {
+    logger.error({ err }, 'Autonomy boot failed');
   }
   startStreamingBuffer();
   startMessageLoop();

@@ -76,6 +76,7 @@ import paasShareRoutes from './routes/paas-share.js';
 import chatTraceRoutes from './routes/chat-trace.js';
 import harnessRoutes from './routes/harness.js';
 import supervisorRoutes from './routes/supervisor.js';
+import autonomyRoutes from './routes/autonomy.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
@@ -286,6 +287,7 @@ app.route('/api/paas/embedding-config', paasEmbeddingRoutes);
 app.route('/api/paas/share', paasShareRoutes);
 app.route('/api/harness', harnessRoutes);
 app.route('/api/supervisor', supervisorRoutes);
+app.route('/api/autonomy', autonomyRoutes);
 app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
 app.route('/api/groups', workspaceConfigRoutes); // Workspace config under /api/groups/:jid/workspace-config
 app.route('/api/groups', chatTraceRoutes); // Chat trace DAG under /api/groups/:jid/trace/*

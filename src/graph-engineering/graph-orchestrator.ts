@@ -29,6 +29,7 @@ import {
   updateGraphRunStatus,
 } from '../db.js';
 import { logger } from '../logger.js';
+import { emitAutonomyEvent } from '../autonomy/autonomy-bus.js';
 import {
   allCompleted,
   branchEdgeCoverage,
@@ -132,6 +133,19 @@ function persistState(runId: string, state: GraphState): void {
  * Execute a graph run to completion (or until paused/cancelled/failed).
  * Idempotent on resume: skips nodes already in 'completed'.
  */
+function emitExecutionOutcome(ctx: GraphRunContext, success: boolean, reason?: string): void {
+  // Autonomy Layer instrumentation — side-effect only, never breaks control flow.
+  // See docs/tech_solution/autonomy-system/SOLUTION.md §4 (execution success rate).
+  emitAutonomyEvent({
+    capability: 'execution',
+    domain: ctx.graphRunId,
+    type: 'execution.completed',
+    payload: { success, definition_id: ctx.definition.id, reason },
+    ts: Date.now(),
+    graphRunId: ctx.graphRunId,
+  });
+}
+
 export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promise<void> {
   const def = ctx.definition;
   const coverageErrors = branchEdgeCoverage(def);
@@ -161,6 +175,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
       if (allCompleted(def, completed)) {
         updateGraphRunStatus(ctx.graphRunId, 'completed', { endedAt: new Date().toISOString() });
         logger.info({ graphRunId: ctx.graphRunId }, 'Graph run completed');
+        emitExecutionOutcome(ctx, true);
         return;
       }
 
@@ -176,6 +191,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
             cancelReason: 'deadlock: no ready nodes and none running',
           });
           logger.error({ graphRunId: ctx.graphRunId }, 'Graph deadlocked');
+          emitExecutionOutcome(ctx, false, 'deadlock');
           return;
         }
         // Something still running — wait for it to settle.
@@ -229,6 +245,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
           persistState(ctx.graphRunId, ctx.state);
           logger.error({ graphRunId: ctx.graphRunId, nodeId: node.id, err: outcome.error },
             'Graph run failed at node');
+          emitExecutionOutcome(ctx, false, `node ${node.id} failed`);
           return;
         }
       }
@@ -242,6 +259,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
       cancelReason: `orchestrator crash: ${errMsg}`,
     });
     persistState(ctx.graphRunId, ctx.state);
+    emitExecutionOutcome(ctx, false, `orchestrator crash: ${errMsg}`);
   }
 }
 
