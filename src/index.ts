@@ -184,6 +184,8 @@ import {
 import { bootRecoverGraphRuns } from './graph-engineering/graph-recovery.js';
 import { bootAutonomyRegistry } from './autonomy/autonomy-registry.js';
 import { startAutonomyMetricsCollector } from './autonomy/autonomy-metrics.js';
+import { startLearningCollector } from './autonomy/autonomy-learning.js';
+import { startAdaptationLoop } from './autonomy/autonomy-adapt.js';
 import {
   executeGraph,
   buildRunContext,
@@ -11724,6 +11726,8 @@ async function main(): Promise<void> {
   try {
     bootAutonomyRegistry();
     startAutonomyMetricsCollector();
+    startLearningCollector();
+    startAdaptationLoop();
   } catch (err) {
     logger.error({ err }, 'Autonomy boot failed');
   }

@@ -14,6 +14,8 @@ import {
   aggregateMetric,
   aggregateAllMetricsForCapability,
 } from '../autonomy/autonomy-metrics.js';
+import { searchLessons } from '../autonomy/autonomy-learning.js';
+import { listSignals, processPendingSignals } from '../autonomy/autonomy-adapt.js';
 import { getDb } from '../db.js';
 import type { Capability } from '../autonomy/autonomy-types.js';
 
@@ -119,6 +121,24 @@ autonomyRoutes.patch('/capabilities/:capability', async (c) => {
   if (!status) return c.json({ error: 'Invalid status' }, 400);
   setCapabilityStatus(cap, status);
   return c.json({ capability: cap, status });
+});
+
+/** GET /api/autonomy/lessons?capability=&keyword= — cross-session lessons (PRD §F3.2). */
+autonomyRoutes.get('/lessons', (c) => {
+  const capability = c.req.query('capability') || undefined;
+  const keyword = c.req.query('keyword') || undefined;
+  return c.json({ lessons: searchLessons(capability, keyword) });
+});
+
+/** GET /api/autonomy/signals — list adaptation signals (admin observability). */
+autonomyRoutes.get('/signals', (c) => {
+  return c.json({ signals: listSignals() });
+});
+
+/** POST /api/autonomy/signals/process — drain pending signals now (admin; for E2E determinism). */
+autonomyRoutes.post('/signals/process', (c) => {
+  const processed = processPendingSignals();
+  return c.json({ processed });
 });
 
 export default autonomyRoutes;

@@ -3,37 +3,40 @@
   "branch": "feat/autonomy-system",
   "worktree": "~/deepthink/.worktrees/autonomy",
   "started_at": "2026-07-26T02:16+08:00",
-  "current_phase": "P1-coding",
+  "current_phase": "P2-coding",
   "phases": [
     {
       "name": "P0",
-      "work_packages": ["WP1 中枢", "WP2 度量", "WP6 验收骨架"],
       "status": "done",
-      "exit_criteria": {
-        "typecheck": "PASS (tsc --noEmit EXIT=0)",
-        "unit_tests": "PASS (autonomy 15/15)",
-        "regression": "零新增回归 (1309 passed / 1 failed=基线 prompt-loader / 4 skipped)",
-        "e2e": "PASS (11/11 — 登录 + 7 能力 + 4 API + 信号注入 + 400 路径)",
-        "runtime_boot": "PASS (autonomy-registry booted + metrics collector started, /api/autonomy/* 路由 401 鉴权 OK)"
-      },
-      "files": ["src/autonomy/autonomy-{types,bus,registry,metrics}.ts", "src/routes/autonomy.ts", "src/db.ts(schema 54)", "src/index.ts(boot)", "src/web.ts(mount)", "src/graph-engineering/graph-orchestrator.ts(4 埋点)", "src/agent-team/team-builder.ts(1 埋点)", "tests/units/autonomy.test.ts", "tests/e2e/autonomy.mjs", "vitest.config.ts"]
+      "exit_criteria": {"typecheck": "PASS", "unit_tests": "15/15", "regression": "零新增", "e2e": "11/11", "boot": "PASS"}
     },
     {
       "name": "P1",
-      "work_packages": ["WP3 学习接入主循环", "WP4 主动适应"],
-      "status": "in_progress",
-      "steps": [
-        {"id": "WP3_trace_to_eval", "status": "pending", "note": "graph_run 完成 → 触发评估 → verdict → promote/lesson"},
-        {"id": "WP3_lessons", "status": "pending", "note": "promote 生成 lesson, 后续 task 检索复用"},
-        {"id": "WP4_signal_replan", "status": "pending", "note": "信号驱动 repointGraphRunDefinition + resume"},
-        {"id": "WP4_goal_reprioritize", "status": "pending"},
-        {"id": "WP3_WP4_unit_tests", "status": "pending"},
-        {"id": "WP3_WP4_e2e", "status": "pending"}
-      ]
+      "status": "done",
+      "work_packages": ["WP3 学习闭环", "WP4 主动适应"],
+      "exit_criteria": {
+        "typecheck": "PASS",
+        "unit_tests": "10/10 (autonomy-p1)",
+        "regression": "零新增 (1319 passed / 1 基线 / 4 skipped)",
+        "e2e": "18/18 (信号→process→applied→adaptation_speed_ms 指标 + lessons 端点)",
+        "boot": "PASS (learning collector + adapt loop 5s tick)"
+      },
+      "files": ["src/autonomy/autonomy-learning.ts", "src/autonomy/autonomy-adapt.ts", "src/index.ts(boot)", "src/routes/autonomy.ts(lessons+signals 端点)", "tests/units/autonomy-p1.test.ts", "tests/e2e/autonomy.mjs(P1 场景)"],
+      "scope_note": "WP3 沉淀 lesson + 检索复用 (未接 harness 变体 promote, Simplicity First); WP4 P1 立信号→度量闭环, 真实 LLM re-plan 留 P2"
     },
-    {"name": "P2", "work_packages": ["WP5 自愈+仪表盘", "WP6 场景扩充"], "status": "pending"}
+    {
+      "name": "P2",
+      "status": "in_progress",
+      "work_packages": ["WP5 自愈+仪表盘", "WP6 场景扩充"],
+      "steps": [
+        {"id": "autonomy_heal", "status": "pending", "note": "self-restart + 预测预警 + monitoring.predicted/self_healed 事件"},
+        {"id": "AutonomyPage", "status": "pending", "note": "7 能力卡片 + SVG 趋势图"},
+        {"id": "e2e_monitoring_scenario", "status": "pending", "note": "注入错误率趋势 → 预警 + 自愈指标"},
+        {"id": "test_report", "status": "pending"},
+        {"id": "merge_main_push", "status": "pending"}
+      ]
+    }
   ],
-  "baseline_failures": [{"test": "tests/prompt-loader.test.ts > platform prompt patches do not duplicate user rules", "note": "既有基线失败, main 仓库也失败, prompt 含 WebFetch, 与本需求无关"}],
-  "schema_version": {"baseline": 53, "target": 54, "status": "done"},
-  "env_notes": ["dev env: WEB_PORT=49281/PORT=9999 由 DeepThink 桌面应用注入, 需 env -u 清除后设 WEB_PORT=9898", "后端 worktree tsx 在 9898, 前端主仓库 vite 5173 (代理 /api→9898)", "playwright chromium 已装 (v1234 headless shell)", "better-sqlite3 需 v22 PATH"]
+  "baseline_failures": [{"test": "tests/prompt-loader.test.ts", "note": "既有基线失败, main 也失败, 与本需求无关"}],
+  "schema_version": {"baseline": 53, "target": 54, "status": "done"}
 }

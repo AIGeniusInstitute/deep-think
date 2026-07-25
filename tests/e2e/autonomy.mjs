@@ -83,6 +83,26 @@ try {
   check('POST /api/autonomy/signals 200', sig.status === 200, `status=${sig.status}`);
   check('signal returns id', typeof sig.body?.id !== 'undefined', JSON.stringify(sig.body));
 
+  // P1 WP4 — signal → process → applied → adaptation_speed metric (PRD §F4.1)
+  const proc = await api('/api/autonomy/signals/process', { method: 'POST', body: '{}' });
+  check('POST /api/autonomy/signals/process 200', proc.status === 200, `status=${proc.status}`);
+  check('processed >= 1', (proc.body?.processed ?? 0) >= 1, JSON.stringify(proc.body));
+
+  const sigs = await api('/api/autonomy/signals');
+  check('GET /api/autonomy/signals 200', sigs.status === 200, `status=${sigs.status}`);
+  const sigList = sigs.body?.signals || [];
+  check('signal flipped to applied', sigList.some((s) => s.status === 'applied'), JSON.stringify(sigList).slice(0, 120));
+
+  const adaptMetric = await api('/api/autonomy/metrics?capability=adaptation&metric=adaptation_speed_ms');
+  check('adaptation_speed_ms metric collected (denominator≥1)',
+    (adaptMetric.body?.metrics?.[0]?.denominator ?? 0) >= 1,
+    JSON.stringify(adaptMetric.body).slice(0, 120));
+
+  // P1 WP3 — lessons endpoint (PRD §F3.2; empty without a real graph run)
+  const lessons = await api('/api/autonomy/lessons');
+  check('GET /api/autonomy/lessons 200', lessons.status === 200, `status=${lessons.status}`);
+  check('lessons returns array', Array.isArray(lessons.body?.lessons), JSON.stringify(lessons.body).slice(0, 80));
+
   // Non-admin capability: none here (admin logged in). Negative path: invalid capability.
   const bad = await api('/api/autonomy/metrics?capability=bogus');
   check('invalid capability → 400', bad.status === 400, `status=${bad.status}`);
