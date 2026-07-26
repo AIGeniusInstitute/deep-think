@@ -6,7 +6,7 @@
        _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale \
        _start-pm2 _start-direct \
        admin-create admin-passwd admin-set \
-       desktop-install desktop-build-deps desktop-build desktop-fetch-node \
+       desktop-install web-install desktop-build-deps desktop-build desktop-fetch-node \
        desktop-rebuild-natives desktop-dev desktop-pack-mac desktop-pack-mac-x64 \
        desktop-pack-mac-all desktop-pack-win desktop-pack-linux
 
@@ -608,7 +608,14 @@ export ELECTRON_MIRROR ELECTRON_BUILDER_BINARIES_MIRROR
 desktop-install: ## 安装桌面版子项目依赖
 	cd $(DESKTOP_DIR) && npm install --no-audit --no-fund $(NPM_FLAGS)
 
-desktop-build-deps: build sync-types ## 编译桌面版所需的所有产物（后端 + 前端 + agent-runner）
+web-install: ## 安装 web/ 子项目依赖（仅在 package.json 变化或 node_modules 缺失时装）
+	@if [ ! -d web/node_modules ] || [ web/package.json -nt web/node_modules ]; then \
+		echo "▶ web/node_modules 缺失或过期，执行 npm install..."; \
+		cd web && npm install --no-audit --no-fund $(NPM_FLAGS); \
+	fi
+	@touch web/node_modules
+
+desktop-build-deps: build sync-types web-install ## 编译桌面版所需的所有产物（后端 + 前端 + agent-runner）
 	cd container/agent-runner && npm install --no-audit --no-fund $(NPM_FLAGS)
 	cd container/agent-runner && npm run build $(NPM_FLAGS)
 
