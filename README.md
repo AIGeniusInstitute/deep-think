@@ -1018,7 +1018,7 @@ Additionally, the `shared/` directory holds cross-project shared type definition
 
 - [Gitcode](https://gitcode.com/AIGeniusInstitute/deepthink)
 
-- [Github](https://jason-chen-2017.github.io/Jason-Chen-2017/)
+- [Github](https://github.com/AIGeniusInstitue)
 
 - [光剑图书馆: 全球免费开放的电子图书馆 World Free eBook](https://universsky.github.io/)
 

@@ -138,7 +138,7 @@ DeepThink는 네 개의 독립적인 Node.js 프로젝트로 구성됩니다:
 
 - [AI光剑的博客](https://blog.csdn.net/universsky2015)
 
-- [Github](https://jason-chen-2017.github.io/Jason-Chen-2017/)
+- [Github](https://github.com/AIGeniusInstitue)
 
 - [光剑图书馆: 全球免费开放的电子图书馆 World Free eBook](https://universsky.github.io/)
 
