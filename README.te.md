@@ -40,6 +40,7 @@ DeepThink, ఎంటర్‌ప్రైజ్-గ్రేడ్ స్వయ�
 
 - **నేటివ్ Claude Code పవర్డ్** — Claude Agent SDK ఆధారంగా, అంతర్గత Claude Code CLI runtime తో, దాని మొత్తం సామర్థ్యాలను వారసత్వంగా పొందుతుంది
 - **Harness & Loop Engineering** — వెర్షన్డ్ harness మ్యానిఫెస్ట్‌లు (system prompt / subagents / tools / skills) snapshot / diff / eval / promote / rollback తో, మరియు per-iteration సమీక్ష మరియు వైఫల్య పునఃఇంజెక్షన్‌తో సుదీర్ఘ స్వయంచాలక టాస్క్ లూప్‌లు
+- **Autonomy Layer మరియు Autonomous Mode** *(v1.1.0)* — అడ్డ-కత్తరించిన Autonomy Layer ఆగు 7 సామర్థ్యాలను (perception / cognition / decision / execution / learning / adaptation / monitoring) metrics collection మరియు E2E acceptance తో ఏకీకృతం చేస్తుంది; అలాగే పూర్తి Autonomous Mode ఆగ్ని మానవ మార్గదర్శకత్వం లేకుండా ఒక టాస్క్‌ను end-to-end పూర్తి చేయడానికి అనుమతిస్తుంది, మూడు defense layers (CLAUDE.md రాజ్యాంగ అధిభౌతిక / Supervisor స్పష్టీకరణ బైపాస్ / RLHF మలుపు-ముగింపు మర్యాద) మరియు నాలుగు hard brakes (విధ్వంసక కమాండ్‌లు / మలుపు పరిమితి / టోకెన్ పరిమితి / లూప్ గుర్తింపు) కవర్ చేస్తుంది
 - **Agent-as-a-Service (PaaS)** — DB-ఆధారిత Agent నిర్వచనాలను టెనెంట్ల మధ్య సృష్టించు, వెర్షన్, మౌంట్, షేర్, ఇన్‌స్టాల్ చేయు — per-user కోటాలు, admin సమీక్ష, ప్రచురించగల టెంప్లేట్ మార్కెట్‌ప్లేస్
 - **బహు-వినియోగదారు ఐసోలేషన్** — per-user వర్క్‌స్పేస్‌లు, per-user IM ఛానెళ్లు, RBAC అనుమతి వ్యవస్థ, ఆహ్వాన కోడ్ నమోదు, ఆడిట్ లాగ్‌లు
 - **ఎనిమిది-ఛానెల్ యునిఫైడ్ రూటింగ్** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp, మరియు Web ఇంటర్‌ఫేస్ — అన్నీ ఏకరీతిగా రూట్ అవుతాయి

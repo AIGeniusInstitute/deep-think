@@ -45,6 +45,7 @@ DeepThink，开源企业级自主 Agent 超级智能体自进化平台，是从 
 
 - **原生 Claude Code 驱动** —— 基于 Claude Agent SDK，底层为完整的 Claude Code CLI 运行时，继承其全部能力
 - **Harness & Loop Engineering** —— 版本化 harness 清单（system prompt / subagents / tools / skills），支持 snapshot / diff / eval / promote / rollback，以及长时运行的自主任务循环，每次迭代可审查并重新注入失败原因
+- **Autonomy Layer 与 Autonomous Mode** *(v1.1.0)* —— 跨层的 Autonomy Layer 统一了 7 大能力（perception / cognition / decision / execution / learning / adaptation / monitoring），配套 metrics collection 与 E2E acceptance；外加完整的 Autonomous Mode，让 Agent 无需人类手把手即可 end-to-end 完成任务，覆盖 three defense layers（CLAUDE.md 宪法性覆盖 / Supervisor clarify 绕过 / RLHF 末端礼貌）与 four hard brakes（破坏性命令 / turn 限制 / token 限制 / 循环检测）
 - **Agent-as-a-Service（PaaS）** —— 跨租户创建、版本化、挂载、共享并安装数据库支撑的 Agent 定义，具备 per-user 配额、管理员审核和可发布的模板市场
 - **多用户隔离** —— Per-user 工作区、Per-user IM 通道、RBAC 权限体系、邀请码注册、审计日志，每个用户拥有独立的执行环境
 - **八端消息统一路由** —— 飞书（流式卡片 + Reaction）、Telegram Bot API、QQ Bot API v2、钉钉 Stream、微信 iLink、Discord Gateway、WhatsApp（Baileys）和 Web 界面——统一路由
@@ -126,6 +127,37 @@ DeepThink 支持可插拔的代码 Agent 引擎和多个 API 提供商，用于�
 ### Loop Engineering
 
 长时运行的自主任务循环，在你离开后仍持续工作。支持六种循环模式 —— `goal`、`loop`、`schedule`、`proactive`、`adaptive` 和 `skill_evolution`。每次迭代由 SDK 审查，失败原因被重新注入到下一次迭代中，闭合自进化回路。循环由斜杠命令驱动，并实时发出 `loop_start` / `loop_iteration_start` / `loop_iteration_end` / `loop_goal_check` / `loop_review_result` / `loop_end` 流式事件。
+
+
+### Autonomy Layer & Autonomous Mode *(v1.1.0)*
+
+一次两件套升级，让 DeepThink 从"工具使用者驱动的 Loop Engineering"跃迁到"完全自包含的自主 Agent 系统"。
+
+**Autonomy Layer** —— 一层横切能力层，将 7 大能力（perception / cognition / decision / execution / learning / adaptation / monitoring）统一为一个可度量、可验证的闭环系统。建立在既有的 self-evolving / loop / supervisor / super-agent / graph 模块之上，新增 event bus、capability registry、metrics collection（8 个指标维度）以及 Playwright E2E acceptance 测试套件。
+
+- **能力注册表（capability registry）** —— `GET /api/autonomy/capabilities` 按规范顺序返回 7 个 canonical capability
+- **指标采集（metrics collection）** —— 每个能力的指标（proactivity_ratio / decision_independence / execution success / learning latency / adaptation_speed / prediction accuracy / self-heal rate）经 event bus 流入 metrics 表，通过 `aggregateMetric` 聚合，由 `GET /api/autonomy/metrics` 暴露
+- **信号 → 自适应闭环** —— `POST /api/autonomy/signals` + `POST /api/autonomy/signals/process` 把信号驱动到落地的适配，并采集 `adaptation_speed_ms`
+- **学习闭环** —— `graph_run` 结果沉淀为 lessons；`GET /api/autonomy/lessons` 取出以供重新注入
+- **自愈 & 预测** —— 连续错误会触发 `monitoring.predicted` + `self_healed` 事件；仪表盘展示 health、signals 与 lessons
+- **Schema 迁移** —— SCHEMA_VERSION 53 → 54（4 张表，幂等 `IF NOT EXISTS`）
+
+> 7 能力采集闭环已全链路打通（signal → event → metrics 表 → aggregateMetric → API → E2E 断言）。要达到目标头条指标（≥95% proactivity、≥90% success 等）还需累积真实流量——骨架已就位，量化门槛已明确。
+
+**Autonomous Mode** —— 一个 per-group 的持续推进开关：一旦 Agent 进入任务，便 end-to-end 完成，无需人类手把手。三层 defense layers 覆盖天然的摩擦点，四道 hard brakes 保障自主性安全。
+
+- **Defense layer 1 —— CLAUDE.md 宪法性覆盖** —— 向 agent-runner 注入一段 `Autonomous Override`，包含 6 条规则：不主动询问用户、禁用 `AskUserQuestion`、填写 `<assumption>`、循环检测、hard brakes 以及任务无法完成时的处置策略
+- **Defense layer 2 —— Supervisor clarify 绕过** —— 开启自主模式时 `supervisor.ts parseDecision` 将 `clarify` 降级为 `delegate`，丢弃问题（`reason='autonomous_downgrade'`）；任何显式 `instruction` 都会被保留
+- **Defense layer 3 —— RLHF 末端礼貌** —— agent-runner 主循环检测末端询问行为（强信号：`AskUserQuestion` 工具调用；弱信号：`ASKING_PATTERNS`）并自动继续而不中断
+- **Hard brake 1 —— 破坏性命令检测** —— 14 个正向模式（`rm -rf /`、`git push --force`、`git reset --hard`、`DROP TABLE/DATABASE`、`TRUNCATE`、无 `WHERE` 的 `DELETE FROM`、`mkfs.*`、`dd to /dev/`、fork bomb…）配合 10 个负向模式避免误报（`rm -rf ./build`、`git push --force-with-lease`、带守卫的 `DELETE … WHERE`）
+- **Hard brake 2 —— turn 限制** —— 达到最大轮次后强制停止
+- **Hard brake 3 —— token 限制** —— 达到 token 预算后强制停止
+- **Hard brake 4 —— 循环检测** —— 滑动窗口检查最近 3 轮是否完全相同（取前 5000 字符的哈希，确定性），命中则中止
+- **per-group 配置 + per-message 覆盖**（`true` / `false` / `null`）；`messages.autonomous` 和 `scheduled_tasks.autonomous` 列持久化该标记
+- **APIs** —— `GET / PUT /api/config/autonomous`、`GET /api/config/autonomous/all`
+- **UI** —— `AutonomousToggle` 开关、`AutonomousStopButton` 硬刹车按钮、`CreateTaskForm` 复选框、4 个新 StreamEvents（`autonomous_started` / `autonomous_continued` / `autonomous_aborted` / `autonomous_brake`）、持久化横幅 + 火箭 emoji 角标，让"Agent 全自主驾驶"的状态在长任务全程可见
+
+> 已验证：Autonomy 31 单元测试 + 18 E2E，Autonomous Mode 49 单元测试 + 20 E2E（14 mode + 6 brake），1325 测试基线零新增回归。详见 `docs/test_report/autonomy-system/REPORT.md` 和 `docs/test_report/feat-autonomous-mode/TEST_REPORT.md`。
 
 
 ### Agent-as-a-Service（PaaS）
@@ -648,6 +680,7 @@ flowchart TD
 | **引擎** | Claude Code · AtomCode · Codex · OpenCode（可插拔，守护进程管理） |
 | **PaaS** | 数据库支撑的 Agent 定义 · 模板市场 · per-user 配额 · 管理员审核 |
 | **Harness / Loop** | 版本化 harness 清单 · 自主任务循环 · 每次迭代 SDK 审查 |
+| **Autonomy** | Autonomy Layer（event bus + capability registry + 7-capability metrics）· Autonomous Mode（3 defense layers + 4 hard brakes）· Playwright E2E acceptance |
 | **沙箱** | Docker + seccomp + cgroups · Chromium CDP 浏览器自动化 |
 | **容器** | Docker (node:22-slim) · Chromium · agent-browser · Python · Go · 40+ 预装工具 |
 | **安全** | bcrypt (12 轮) · AES-256-GCM · HMAC Cookie · RBAC · 路径遍历防护 · 挂载白名单 · 跨组 ACL |

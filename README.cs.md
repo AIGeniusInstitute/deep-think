@@ -40,6 +40,7 @@ DeepThink, platforma pro samo-vyvíjející se superinteligenci autonomního Age
 
 - **Nativní Claude Code jádro** — postaveno na Claude Agent SDK, pod palubou je plný Claude Code CLI runtime, dědí všechny jeho schopnosti
 - **Harness & Loop Engineering** — verzované harness manifesty (system prompt / subagenti / nástroje / skills) se snapshot / diff / eval / promote / rollback, plus dlouho běžící autonomní smyčky úloh s revizí po každé iteraci a reinjekcí selhání
+- **Autonomy Layer a Autonomous Mode** *(v1.1.0)* — Průřezová Autonomy Layer sjednocuje 7 capabilities (perception / cognition / decision / execution / learning / adaptation / monitoring) s metrics collection a E2E acceptance; plus plný Autonomous Mode, který umožňuje Agentovi dokončit úkol end-to-end bez lidského vedení, pokrývá three defense layers (CLAUDE.md ústavní přepsání / Supervisor obejití upřesnění / RLHF slušnost konce kola) a four hard brakes (destruktivní příkazy / limit kol / limit tokenů / detekce smyčky)
 - **Agent-as-a-Service (PaaS)** — vytváření, verzování, mountování, sdílení a instalace DB-backed Agent definic napříč tenanty, s per-user kvótami, schválením adminem a publikovatelným tržištěm šablon
 - **Izolace více uživatelů** — uživatelské workspaces, per-user IM kanály, RBAC oprávnění, registrace přes pozvánkové kódy, audit log
 - **Osmikanálové sjednocené směrování** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp a webové rozhraní — vše směrováno jednotně

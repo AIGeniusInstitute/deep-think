@@ -40,6 +40,7 @@ DeepThink, நிறுவன நிலை தன்னாட்சி Agent ச
 
 - **உள்ளமை Claude Code இயந்திரம்** — Claude Agent SDK அடிப்படையில், உள் runtime முழுமையான Claude Code CLI, அனைத்து திறன்களையும் பெறுகிறது
 - **Harness & Loop Engineering** — பதிப்பிடப்பட்ட harness manifests (system prompt / subagents / tools / skills), snapshot / diff / eval / promote / பின்னடவலுடன், ஒவ்வொரு மறுசெய்கை மதிப்பாய்வு மற்றும் தோல்வி மறு-செலுத்தலுடன் நீண்ட நேர தன்னாட்சி பணிச் சுழற்சிகள்
+- **Autonomy Layer மற்றும் Autonomous Mode** *(v1.1.0)* — குறுக்கு-வெட்டு Autonomy Layer ஆனது 7 திறன்களையும் (perception / cognition / decision / execution / learning / adaptation / monitoring) metrics collection மற்றும் E2E acceptance உடன் ஒருங்கிணைக்கிறது; மேலும் முழுமையான Autonomous Mode ஆசகரை மனித வழிகாட்டல் இல்லாமல் ஒரு பணியை end-to-end முடிக்க அனுமதிக்கிறது, மூன்று defense layers (CLAUDE.md அரசியலமைப்பு மேலெழுதல் / Supervisor தெளிவுபடுத்தல் பைபாஸ் / RLHF முறை-முடிவு பண்பு) மற்றும் நான்கு hard brakes (அழிவுறும் கட்டளைகள் / முறை வரம்பு / டோக்கன் வரம்பு / வளைய கண்டறிதல்) ஆகியவற்றை உள்ளடக்குகிறது
 - **Agent-as-a-Service (PaaS)** — DB-அடிப்படையிலான Agent வரையறைகளை உருவாக்கி, பதிப்பிட்டு, ஏற்றி, பகிர்ந்து, நிறுவ — பயனர் ஒதுக்கீடு, நிர்வாக மதிப்பாய்வு, வெளியிடக்கூடிய டெம்ப்ளேட் சந்தையுடன்
 - **பல-பயனர் தனிமைப்படுத்தல்** — ஒரு பயனருக்கு ஒரு workspace, ஒரு பயனருக்கு ஒரு IM சேனல், RBAC அனுமதி அமைப்பு, அழைப்புக் குறியீடு பதிவு, தணிக்கை பதிவு
 - **எட்டு-சேனல் ஒருங்கிணைந்த தடம்** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp, வலை இடைமுகம் — அனைத்தும் சீராக தடம்புடிக்கப்படுகின்றன

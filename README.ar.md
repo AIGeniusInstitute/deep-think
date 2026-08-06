@@ -42,6 +42,7 @@ DeepThink، منصة تطوّر ذاتي لذكاء فائق Agent المؤسس�
 
 - **مدفوع بـ Claude Code أصلاً** — مبني على Claude Agent SDK، تحته runtime كامل لـ Claude Code CLI، يرث جميع قدراته
 - **هندسة Harness و Loop** — بيانات هارنس مُصدَّقة (system prompt / subagents / tools / skills) مع snapshot / diff / eval / promote / rollback، بالإضافة إلى حلقات مهام ذاتية طويلة الأمد مع مراجعة لكل تكرار وإعادة حقن الفشل
+- **Autonomy Layer و Autonomous Mode** *(v1.1.0)* — Autonomy Layer متعددة الجوانب توحّد القدرات السبع (perception / cognition / decision / execution / learning / adaptation / monitoring) مع metrics collection و E2E acceptance؛ بالإضافة إلى Autonomous Mode كامل يتيح للوكيل إكمال المهمة من البداية إلى النهاية دون تدخل بشري مباشر، يغطي three defense layers (CLAUDE.md تجاوز دستوري / Supervisor تجاوز التوضيح / RLHF لباقة نهاية الدور) و four hard brakes (أوامر مدمرة / حد الأدوار / حد الـ token / كشف التكرار)
 - **الوكيل كخدمة (PaaS)** — إنشاء وإصدار وتركيب ومشاركة وتثبيت تعريفات الوكيل المدعومة بقاعدة بيانات عبر المستأجرين، مع حصص لكل مستخدم ومراجعة المسؤول وسوق قوالب قابل للنشر
 - **عزل متعدد المستخدمين** — مساحة عمل لكل مستخدم، قنوات مراسلة فورية لكل مستخدم، نظام صلاحيات RBAC، تسجيل بكود دعوة، سجلات تدقيق
 - **توجيه موحد لثماني قنوات** — Feishu، Telegram، QQ، DingTalk، WeChat، Discord، WhatsApp، وواجهة Web — جميعها موجهة بشكل موحد

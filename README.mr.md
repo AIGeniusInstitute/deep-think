@@ -40,6 +40,7 @@ DeepThink, एंटरप्राइज-ग्रेड स्वायत्�
 
 - **नेटिव्ह Claude Code आधारित** — Claude Agent SDK वर बनलेले, आतील संपूर्ण Claude Code CLI runtime सह, सर्व क्षमता वारसात मिळतात
 - **Harness आणि Loop Engineering** — व्हर्शन्ड harness manifests (system prompt / subagents / tools / skills) स्नॅपशॉट / diff / eval / promote / rollback सह, तसेच दीर्घकाळ चालणाऱ्या स्वायत्त कार्य लूप्स प्रति-पुनरावृत्ती review आणि अपयश पुनः-इंजेक्शनसह
+- **Autonomy Layer आणि Autonomous Mode** *(v1.1.0)* — एक क्रॉस-कटिंग Autonomy Layer ७ क्षमता (perception / cognition / decision / execution / learning / adaptation / monitoring) metrics collection आणि E2E acceptance सह एकत्रित करते; तसेच एक पूर्ण Autonomous Mode जो Agent ला मानवी हस्तक्षेप न घेता एखादे कार्य end-to-end पूर्ण करू देतो, जे three defense layers (CLAUDE.md संविधानिक ओव्हरराइड / Supervisor स्पष्टीकरण बायपास / RLHF अंतिम-टर्न शिष्टाचार) आणि four hard brakes (विनाशकारी कमांड्स / टर्न मर्यादा / टोकन मर्यादा / लूप शोध) ला कव्हर करतो
 - **Agent-as-a-Service (PaaS)** — DB-आधारित Agent व्याख्या तयार करा, व्हर्शन करा, माउंट करा, शेअर करा आणि टेनंट्सवर स्थापित करा, प्रति-वापरकर्ता कोटा, admin review आणि प्रकाशित करण्यायोग्य टेम्पलेट मार्केटप्लेससह
 - **बहु-वापरकर्ता विलगीकरण** — प्रति-वापरकर्ता workspace, प्रति-वापरकर्ता IM चॅनेल, RBAC परवानगी प्रणाली, आमंत्रण-कोड नोंदणी, ऑडिट लॉग
 - **आठ-चॅनेल एकताने राउटिंग** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp आणि वेब इंटरफेस — सर्व एकसारखे राउट होतात

@@ -40,6 +40,7 @@ DeepThink, แพลตฟอร์มสุดยอดปัญญาประ
 
 - **เอนจิน Claude Code แบบ native** — สร้างบน Claude Agent SDK, runtime ภายในคือ Claude Code CLI แบบเต็ม สืบทอดความสามารถทังหมด
 - **Harness & Loop Engineering** — harness manifests แบบมีเวอร์ชัน (system prompt / subagents / tools / skills) พร้อม snapshot / diff / eval / promote / rollback และลูปงานอิสระระยะยาวที่มีการ review ต่อรอบและ re-inject ความล้มเหลว
+- **Autonomy Layer และ Autonomous Mode** *(v1.1.0)* — Autonomy Layer แบบตัดผ่านจะรวม 7 ความสามารถ (perception / cognition / decision / execution / learning / adaptation / monitoring) เข้ากับ metrics collection และ E2E acceptance; บวก Autonomous Mode แบบเต็มที่ช่วยให้ Agent ทำงานจนสมบูรณ์ end-to-end โดยไม่ต้องมีมนุษย์คอยกำกับ ครอบคลุม three defense layers (CLAUDE.md การแทนที่ตามรัฐธรรมนูญ / Supervisor การข้ามการขอความกระจ่าง / RLHF มารยาทตอนท้ายเทิร์น) และ four hard brakes (คำสั่งที่ทำลาย / ขีดจำกัดเทิร์น / ขีดจำกัดโทเค็น / การตรวจจับลูป)
 - **Agent-as-a-Service (PaaS)** — สร้าง, กำหนดเวอร์ชัน, mount, แชร์ และติดตั้งนิยาม Agent ที่เก็บใน DB ข้าม tenant พร้อมโควตาต่อผู้ใช้, การตรวจสอบของ admin และตลาดแม่แบบที่เผยแพร่ได้
 - **การแยกผู้ใช้หลายคน** — workspace ต่อผู้ใช้, ช่อง IM ต่อผู้ใช้, ระบบสิทธิ์ RBAC, การลงทะเบียนด้วยรหัสเชิญ และ audit log
 - **routing แปดช่องแบบรวม** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp และอินเทอร์เฟซเว็บ — ทังหมด route แบบเหมือนกัน

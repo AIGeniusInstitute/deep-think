@@ -42,6 +42,7 @@ DeepThink، ایک انٹرپرائز گریڈ خودمختار Agent سیلف-�
 
 - **نیٹیو Claude Code پر مبنی** — Claude Agent SDK پر مبنی، بنیادی رن ٹائم مکمل Claude Code CLI ہے، اس کی تمام صلاحیتوں کا وارث
 - **Harness اور Loop Engineering** — ورژن شدہ Harness مینیفیسٹس (سسٹم پرامپٹ / سب ایجنٹس / ٹولز / اسکلز) snapshot / diff / eval / promote / rollback کے ساتھ، اور فی iteration ریویو اور ناکامی کے دوبارہ انجکشن کے ساتھ لمبے چلنے والے خودمختار ٹاسک لوپس
+- **Autonomy Layer اور Autonomous Mode** *(v1.1.0)* — ایک کراس-کٹنگ Autonomy Layer 7 صلاحیتوں (perception / cognition / decision / execution / learning / adaptation / monitoring) کو metrics collection اور E2E acceptance کے ساتھ متحد کرتی ہے؛ مزید براں ایک مکمل Autonomous Mode جو Agent کو انسانی رہنمائی کے بغیر کوئی ٹاسک end-to-end مکمل کرنے دیتا ہے، three defense layers (CLAUDE.md آئینی اووررائڈ / Supervisor وضاحت بائی پاس / RLHF آخری-ٹرن مزاج) اور four hard brakes (تباہ کن احکامات / ٹرن حد / ٹوکن حد / لوپ سراغ) کو ڈھکتا ہے
 - **Agent-as-a-Service (PaaS)** — DB میں محفوظ Agent تعریفوں کو ٹیننٹس کے درمیان بنائیں، ورژن کریں، ماؤنٹ کریں، شیئر کریں، انسٹال کریں، فی یوزر کوٹہ، ایڈمن ریویو، اور اشاعتی ٹیمپلیٹ مارکیٹ پلیس کے ساتھ
 - **ملٹی یوزر آئسولیشن** — فی یوزر ورک اسپیس، فی یوزر IM چینلز، RBAC اجازت کا نظام، دعوت نامہ کوڈ رجسٹریشن، آڈٹ لاگ
 - **اٹھ چینلز کی متحدہ روٹنگ** — Feishu، Telegram، QQ، DingTalk، WeChat، Discord، WhatsApp، اور Web انٹرفیس — سب یکساں طور پر روٹ ہوتے ہیں

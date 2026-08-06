@@ -40,6 +40,7 @@ DeepThink, kurumsal düzeyde özerk Agent kendi-evrilen süper-zeka platformu; H
 
 - **Yerel Claude Code tabanlı** — Claude Agent SDK üzerine inşa edilmiştir, altında tam Claude Code CLI runtime'ı yer alır ve tüm yeteneklerini miras alır
 - **Harness & Loop Engineering** — Sürümlü harness manifestleri (sistem promptu / sub-agent'lar / araçlar / yetenekler) ile snapshot / diff / eval / promote / geri alma; ayrıca her yinelemede inceleme ve hata enjeksiyonu içeren uzun süreli özerk görev döngüleri
+- **Autonomy Layer ve Autonomous Mode** *(v1.1.0)* — Enine kesen bir Autonomy Layer, 7 yetenekleri (perception / cognition / decision / execution / learning / adaptation / monitoring) metrics collection ve E2E acceptance ile birleştirir; artı Agent'in bir görevi insan elçiliği olmadan end-to-end tamamlamasını sağlayan tam bir Autonomous Mode, three defense layers (CLAUDE.md anayasal geçersiz kılma / Supervisor açıklama baypası / RLHF tur-sonu nezaketi) ve four hard brakes (yıkıcı komutlar / tur sınırı / token sınırı / döngü algılama) kapsar
 - **Agent-as-a-Service (PaaS)** — Veritabanı destekli Agent tanımlarını kiracılar arasında oluşturma, sürümlendirme, mount etme, paylaşma ve kurma; kullanıcı başına kota, admin incelemesi ve yayınlanabilir şablon pazarı
 - **Çok kullanıcılı izolasyon** — Kullanıcı başına workspace, kullanıcı başına IM kanalları, RBAC yetki sistemi, davet kodu kaydı ve denetim günlükleri
 - **Sekiz kanal birleşik yönlendirme** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp ve web arayüzü — hepsi tek tip yönlendirilir

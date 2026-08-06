@@ -40,6 +40,7 @@ DeepThink, nền tảng siêu trí tuệ tự tiến hóa Agent tự chủ cấp
 
 - **Engine Claude Code gốc** — Xây trên Claude Agent SDK, runtime bên dưới là toàn bộ Claude Code CLI, kế thừa mọi năng lực
 - **Harness & Loop Engineering** — Manifest harness có versioning (system prompt / subagents / tools / skills) với snapshot / diff / eval / promote / rollback, cùng vòng lặp tác vụ tự chủ dài hạn có review từng vòng và re-inject khi thất bại
+- **Autonomy Layer và Autonomous Mode** *(v1.1.0)* — Một Autonomy Layer xuyên suốt hợp nhất 7 năng lực (perception / cognition / decision / execution / learning / adaptation / monitoring) với metrics collection và E2E acceptance; plus một Autonomous Mode trọn vẹn cho phép Agent hoàn thành tác vụ end-to-end không cần con người kèm cặp, bao phủ three defense layers (CLAUDE.md ghi đè hiến chương / Supervisor bỏ qua làm rõ / RLHF lịch sự cuối lượt) và four hard brakes (lệnh phá hủy / giới hạn lượt / giới hạn token / phát hiện vòng lặp)
 - **Agent-as-a-Service (PaaS)** — Tạo, version, mount, chia sẻ và cài đặt các định nghĩa Agent lưu DB giữa các tenant, với quota per-user, review admin, và marketplace template có thể publish
 - **Cách ly đa người dùng** — Workspace per-user, kênh IM per-user, hệ thống quyền RBAC, đăng ký bằng mã mời, nhật ký kiểm toán
 - **Định tuyến tám kênh thống nhất** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp, và giao diện web — đều được định tuyến đồng nhất

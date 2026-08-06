@@ -40,6 +40,7 @@ DeepThink, platform evolusi-diri superinteligensi Agent otonom kelas enterprise,
 
 - **Ditenagai Claude Code native** — Berbasis Claude Agent SDK, runtime di bawahnya adalah CLI Claude Code lengkap, mewarisi semua kapabilitasnya
 - **Harness & Loop Engineering** — Manifes harness berversi (system prompt / subagents / tools / skills) dengan snapshot / diff / eval / promote / rollback, plus loop tugas otonom berjalan lama dengan tinjauan per iterasi dan reinjeksi kegagalan
+- **Autonomy Layer dan Autonomous Mode** *(v1.1.0)* — Autonomy Layer lintas-sistem menyatukan 7 kapabilitas (perception / cognition / decision / execution / learning / adaptation / monitoring) dengan metrics collection dan E2E acceptance; plus Autonomous Mode penuh yang memungkinkan Agent menyelesaikan tugas end-to-end tanpa bimbingan manusia, mencakup three defense layers (CLAUDE.md pengesampingan konstitusional / Supervisor penembusan klarifikasi / RLHF kesopanan akhir giliran) dan four hard brakes (perintah destruktif / batas giliran / batas token / deteksi loop)
 - **Agent-as-a-Service (PaaS)** — Buat, versi, mount, bagikan, dan pasang definisi Agent berbasis DB lintas tenant, dengan kuota per pengguna, tinjauan admin, dan marketplace template yang dapat dipublikasikan
 - **Isolasi multi-pengguna** — Workspace per pengguna, kanal IM per pengguna, sistem izin RBAC, pendaftaran kode undangan, log audit
 - **Routing terpadu delapan kanal** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp, dan antarmuka Web — semuanya dirutekan seragam

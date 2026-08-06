@@ -40,6 +40,7 @@ DeepThink、エンタープライズグレードの自律型 Agent 自己進化�
 
 - **ネイティブ Claude Code 駆動** — Claude Agent SDK ベース、内部ランタイムは完全な Claude Code CLI、全能力を継承
 - **Harness & Loop Engineering** — バージョン管理されたハーネスマニフェスト（システムプロンプト / サブエージェント / ツール / スキル）でスナップショット / 差分 / 評価 / 昇格 / ロールバック、反復ごとのレビューと失敗再注入を伴う長時間自律タスクループ
+- **Autonomy Layer & Autonomous Mode** *(v1.1.0)* — 横断的な Autonomy Layer が 7 つの能力（perception / cognition / decision / execution / learning / adaptation / monitoring）を metrics collection と E2E acceptance で統合。さらに完全な Autonomous Mode により、Agent は人間の介入なしにタスクを end-to-end で完遂できる。3 つの defense layers（CLAUDE.md 憲法的オーバーライド / Supervisor 明確化バイパス / RLHF ターン終了礼儀）と 4 つの hard brakes（破壊的コマンド / ターン制限 / トークン制限 / ループ検出）を網羅
 - **Agent-as-a-Service (PaaS)** — DB 支えの Agent 定義をテナントをまたぎ作成・バージョン管理・マウント・共有・インストール、ユーザー別クォータ、管理者レビュー、公開可能なテンプレートマーケットプレース
 - **マルチユーザー分離** — ユーザーごとのワークスペース、ユーザーごとの IM チャンネル、RBAC 権限体系、招待コード登録、監査ログ
 - **8 チャンネル統合ルーティング** — Feishu、Telegram、QQ、DingTalk、WeChat、Discord、WhatsApp、Web インターフェースを一様にルーティング

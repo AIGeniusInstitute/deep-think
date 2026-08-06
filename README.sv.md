@@ -40,6 +40,7 @@ DeepThink, en företagsklassad plattform för själv-evolverande superintelligen
 
 - **Inbyggd Claude Code-motor** — Bygger på Claude Agent SDK med hela Claude Code CLI-runtimen under, ärver alla dess förmågor
 - **Harness & Loop Engineering** — Versionerade harness-manifest (system-prompt / subagenter / verktyg / skills) med snapshot / diff / eval / promote / rollback, plus långkörande autonoma uppgiftsloopar med per-iteration-granskning och återinjektion av fel
+- **Autonomy Layer och Autonomous Mode** *(v1.1.0)* — En tvärgående Autonomy Layer förenar de 7 kapabiliteterna (perception / cognition / decision / execution / learning / adaptation / monitoring) med metrics collection och E2E acceptance; plus ett fullständigt Autonomous Mode som låter Agenten slutföra en uppgift end-to-end utan mänsklig handledning, täcker three defense layers (CLAUDE.md konstitutionell åsidosättning / Supervisor förbipassage av förtydligande / RLHF artighet vid slut av tur) och four hard brakes (destruktiva kommandon / tur-gräns / token-gräns / loop-detektering)
 - **Agent-as-a-Service (PaaS)** — Skapa, versionera, montera, dela och installera databasbaserade Agent-definitioner över tenants, med per-user-kvoter, admin-granskning och en publicerbar mallmarknadsplats
 - **Flervän isolering** — Workspace per användare, IM-kanaler per användare, RBAC-rättighetssystem, inbjudningskod-registrering, revisionslogg
 - **Åtta-kanals enhetlig routing** — Feishu, Telegram, QQ, DingTalk, WeChat, Discord, WhatsApp och webbgränssnittet — alla enhetligt dirigerade
