@@ -28,6 +28,7 @@ export const TaskPatchSchema = z.object({
     .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']))
     .nullable()
     .optional(),
+  autonomous: z.boolean().optional(),
 });
 
 // Cron 表达式校验：5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）
@@ -58,6 +59,9 @@ export const TaskCreateSchema = z
       .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']))
       .nullable()
       .optional(),
+    /** 全托管模式：定时任务触发时按全托管执行（agent 不主动停下询问用户）。
+     *  仅对 execution_type='agent' 有效；script 类型忽略。 */
+    autonomous: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
     const execType = data.execution_type || 'agent';
@@ -143,6 +147,11 @@ export const MessageCreateSchema = z
     chatJid: z.string().min(1).max(512),
     content: z.string().max(MAX_MESSAGE_CONTENT_LENGTH).optional().default(''),
     attachments: z.array(MessageAttachmentSchema).max(10).optional(),
+    /** 全托管模式（per-message 覆盖 per-group 配置）。
+     *  true: 本次消息触发全托管执行，agent 中途不停下询问用户。
+     *  false/undefined: 走默认监督者模式（若 per-group autonomous=true 则仍为全托管）。
+     *  null: 显式关闭本消息的全托管（即使 group 级开启，本条消息按监督者模式执行）。 */
+    autonomous: z.boolean().nullable().optional(),
   })
   .superRefine((data, ctx) => {
     const hasContent = data.content.trim().length > 0;
@@ -243,6 +252,9 @@ export const GroupPatchSchema = z.object({
   execution_mode: z.enum(['container', 'host']).optional(),
   engine: z.enum(['claude', 'atomcode', 'codex', 'opencode', 'pi']).optional(),
   agent_def_id: z.string().max(200).nullable().optional(),
+  /** 全托管模式开关：true 时该 group 的所有后续消息按全托管执行
+   *  （agent 不主动停下询问用户，硬刹车自动触发）。 */
+  autonomous: z.boolean().optional(),
 });
 
 export const AgentDefinitionCreateSchema = z.object({

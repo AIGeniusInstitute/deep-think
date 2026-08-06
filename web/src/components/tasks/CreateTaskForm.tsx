@@ -30,6 +30,7 @@ interface CreateTaskFormProps {
     notifyChannels: string[] | null;
     chatJid?: string;
     contextMode?: 'group' | 'isolated';
+    autonomous?: boolean;
   }) => Promise<void>;
   onClose: () => void;
   isAdmin?: boolean;
@@ -64,6 +65,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   const [chatJid, setChatJid] = useState<string>('');
   const [contextMode, setContextMode] = useState<'group' | 'isolated'>('group');
   const [executionModeExplicit, setExecutionModeExplicit] = useState<boolean>(false);
+  const [autonomous, setAutonomous] = useState<boolean>(false);
   const connectedChannels = useConnectedChannels();
 
   const groupNames = useTasksStore((s) => s.groupNames);
@@ -144,6 +146,26 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
           ? '任务复用源工作区的会话、记忆和 skills，prompt 作为新消息注入'
           : '每次执行创建新的 task-xxxx 工作区，fresh session，与源工作区隔离'}
       </p>
+    </div>
+  );
+
+  const renderAutonomous = () => (
+    <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+      <input
+        type="checkbox"
+        id="task-autonomous"
+        checked={autonomous}
+        onChange={(e) => setAutonomous(e.target.checked)}
+        className="mt-0.5 cursor-pointer"
+      />
+      <div className="flex-1">
+        <label htmlFor="task-autonomous" className="text-sm font-medium text-foreground cursor-pointer">
+          全托管模式（autonomous）
+        </label>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          开启后 Agent 不会在中途停下来询问用户，连续推进直到任务完成或触发硬刹车（轮次/token/循环/破坏性命令）
+        </p>
+      </div>
     </div>
   );
 
@@ -242,6 +264,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
         notifyChannels,
         chatJid: chatJid || undefined,
         contextMode: !isScript ? contextMode : undefined,
+        autonomous: !isScript ? autonomous : undefined,
       });
       // The store swallows API errors into state.error; surface it as a toast
       // so the user sees why the submit failed. TasksPage keeps the form open
@@ -450,6 +473,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
 
             {renderTargetWorkspace()}
             {!isScript && renderContextMode()}
+            {!isScript && renderAutonomous()}
 
             {/* Script Command */}
             {isScript && (

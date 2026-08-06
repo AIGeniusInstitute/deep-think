@@ -195,6 +195,10 @@ export interface NewMessage {
   source_kind?: MessageSourceKind | null;
   finalization_reason?: MessageFinalizationReason | null;
   task_id?: string | null;
+  /** Per-message autonomous flag set via Web "全托管" button. 0 = off, 1 = on.
+   *  At cold-start, this overrides the per-group config to enable autonomous
+   *  mode for the run triggered by this message. */
+  autonomous?: number | null;
 }
 
 export type MessageSourceKind =
@@ -255,6 +259,9 @@ export interface ScheduledTask {
   loop_kind?: 'loop' | 'schedule' | 'proactive' | null;
   /** Reference to loop_runs.id when loop_kind='proactive'. Null otherwise. */
   loop_run_id?: string | null;
+  /** 全托管模式：触发时按全托管执行（agent 不主动停下询问用户）。
+   *  仅对 execution_type='agent' 有效。 */
+  autonomous?: boolean;
 }
 
 export interface TaskRunLog {

@@ -397,6 +397,14 @@ export interface SupervisorCheckDeps {
   ) => Promise<void> | void;
   enqueueMessageCheck: (chatJid: string) => Promise<void> | void;
   notifyUser?: (chatJid: string, text: string) => Promise<void> | void;
+  /** Returns true if this chat is in 全托管 (autonomous) mode.
+   *  When true, escalate action does NOT store a prompt message or re-enqueue
+   *  — instead it logs and emits an autonomous.brake_triggered event,
+   *  letting the agent-runner's end-of-turn auto-continue take over. */
+  isAutonomousChat?: (chatJid: string) => Promise<boolean>;
+  /** Emit an autonomy-bus event. Used to signal autonomous.brake_triggered
+   *  when escalate fires in autonomous mode. */
+  emitAutonomyEvent?: (event: { type: string; [k: string]: unknown }) => void;
   now?: () => number;
 }
 
@@ -563,20 +571,54 @@ export async function runSupervisionCheck(
 
     // Side effects by action.
     if (parsed.action === 'redirect' || parsed.action === 'escalate') {
-      const prefix =
-        parsed.action === 'escalate' ? '【Supervisor 提问】' : '【Supervisor 指令】';
-      const text = `${prefix}${parsed.conclusion}${parsed.next_action_hint ? `\n${parsed.next_action_hint}` : ''}`;
+      // Autonomous mode bypass: when the chat is in 全托管 mode, escalate
+      // (which normally stores a prompt message asking the user) is suppressed
+      // — agent-runner's end-of-turn auto-continue handles continuation, and
+      // we emit an autonomous.brake_triggered event for observability. The
+      // user is never prompted mid-task.
+      let autonomousChat = false;
       try {
-        await deps.storePromptMessage(
-          session.chat_jid,
-          '__supervisor__',
-          'Supervisor',
-          text,
+        autonomousChat = deps.isAutonomousChat
+          ? await deps.isAutonomousChat(session.chat_jid)
+          : false;
+      } catch {
+        // best-effort
+      }
+      if (autonomousChat && parsed.action === 'escalate') {
+        logger.warn(
+          { sessionId, chatJid: session.chat_jid, conclusion: parsed.conclusion },
+          'Supervisor escalate suppressed in autonomous mode (no user prompt)',
         );
-        await deps.enqueueMessageCheck(session.chat_jid);
-        fedBack = true;
-      } catch (err) {
-        logger.error({ err, sessionId }, 'Supervisor feed-back failed');
+        try {
+          deps.emitAutonomyEvent?.({
+            type: 'autonomous.brake_triggered',
+            capability: 'execution',
+            chatJid: session.chat_jid,
+            sessionId,
+            reason: 'supervisor_escalate',
+            conclusion: parsed.conclusion,
+          });
+        } catch {
+          // best-effort
+        }
+        // Do NOT store prompt message, do NOT enqueue. Fall through to next
+        // check scheduling — agent-runner is responsible for continuation.
+      } else {
+        const prefix =
+          parsed.action === 'escalate' ? '【Supervisor 提问】' : '【Supervisor 指令】';
+        const text = `${prefix}${parsed.conclusion}${parsed.next_action_hint ? `\n${parsed.next_action_hint}` : ''}`;
+        try {
+          await deps.storePromptMessage(
+            session.chat_jid,
+            '__supervisor__',
+            'Supervisor',
+            text,
+          );
+          await deps.enqueueMessageCheck(session.chat_jid);
+          fedBack = true;
+        } catch (err) {
+          logger.error({ err, sessionId }, 'Supervisor feed-back failed');
+        }
       }
     } else if (parsed.action === 'complete') {
       sessionUpdates.status = 'completed';

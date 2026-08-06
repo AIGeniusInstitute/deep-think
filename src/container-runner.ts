@@ -321,6 +321,14 @@ export interface ContainerInput {
     intervalSteps: number;
     goalSnippet: string;
   };
+  /** 全托管模式开关：true 时 agent 在单次任务执行期间不主动停下询问用户。
+   *  Supervisor clarify 被禁用、端回合检测到提问信号时自动注入续接消息、
+   *  硬刹车（轮次/token/循环/破坏性命令）触发时强制退出。 */
+  autonomous?: boolean;
+  /** 全托管硬刹车上限：轮次计数到 maxTurns 即停止。默认 50。 */
+  maxTurns?: number;
+  /** 全托管硬刹车上限：累计 token 用量到 maxTokens 即停止。默认 1,000,000。 */
+  maxTokens?: number;
 }
 
 export interface ContainerOutput {
@@ -1187,21 +1195,29 @@ function loadGroupAgentDefinition(
 function writeAgentProjectClaudeMd(
   group: RegisteredGroup,
   agentDef: ContainerInput['agentDefinition'],
+  autonomous?: boolean,
 ): void {
-  if (!agentDef?.systemPrompt) return;
+  // Autonomous override: even without agentDef.systemPrompt, write a CLAUDE.md
+  // when autonomous=true so the autonomous directive is loaded as project memory.
+  if (!agentDef?.systemPrompt && !autonomous) return;
   // Super Agent Team: graph agent nodes run in the shared owner folder but
   // carry their own systemPrompt via the <agent-definition> tag (injected by
   // agent-runner index.ts:1487). Skip the CLAUDE.md write so we don't clobber
   // the owner's group CLAUDE.md with a single member's identity (which would
   // also leak across parallel/serial team members). Agent Studio groups (no
   // marker) keep the existing write-to-project-CLAUDE.md behavior.
-  if ((group as unknown as { _graphAgentNode?: boolean })._graphAgentNode) {
+  // Autonomous override still applies (we DO want to write CLAUDE.md for
+  // autonomous even on graph nodes — the directive must reach every agent).
+  if (
+    (group as unknown as { _graphAgentNode?: boolean })._graphAgentNode &&
+    !autonomous
+  ) {
     return;
   }
   const groupDir = path.join(GROUPS_DIR, group.folder);
   mkdirForContainer(groupDir);
   const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
-  const content = buildAgentProjectClaudeMdContent(agentDef);
+  const content = buildAgentProjectClaudeMdContent(agentDef, autonomous);
   try {
     const tmp = `${claudeMdPath}.tmp`;
     fs.writeFileSync(tmp, content, 'utf8');
@@ -1211,27 +1227,52 @@ function writeAgentProjectClaudeMd(
   }
 }
 
-function buildAgentProjectClaudeMdContent(
-  agentDef: NonNullable<ContainerInput['agentDefinition']>,
+export function buildAgentProjectClaudeMdContent(
+  agentDef: NonNullable<ContainerInput['agentDefinition']> | null | undefined,
+  autonomous?: boolean,
 ): string {
-  return [
-    '# Agent Identity（由 Agent Studio 注入）',
-    '',
-    agentDef.systemPrompt ?? '',
-    '',
-    '---',
-    '',
-    '## Identity Override（系统注入，请勿修改）',
-    '',
-    '本工作区正在运行用户在 Agent Studio 配置的自定义 Agent。该 Agent 的身份与行为由上方 `system_prompt` 定义，',
-    '**优先级高于** `~/.claude/CLAUDE.md` 中的 "你是 DeepThink" / "品牌口径" 等身份断言。',
-    '',
-    '当用户问 "你是谁"、"你是做什么的"、"who are you" 等身份类问题时，**必须按上方 system_prompt 定义的角色身份作答**，',
-    '不得回答 "DeepThink" 或平台默认身份，即使其他 memory 文件要求如此。',
-    '',
-    '如需记录会话记忆，请使用 `MEMORY.md` 或其他文件，不要修改或删除上方身份段落。',
-    '',
-  ].join('\n');
+  const parts: string[] = [];
+  if (agentDef?.systemPrompt) {
+    parts.push(
+      '# Agent Identity（由 Agent Studio 注入）',
+      '',
+      agentDef.systemPrompt,
+      '',
+      '---',
+      '',
+      '## Identity Override（系统注入，请勿修改）',
+      '',
+      '本工作区正在运行用户在 Agent Studio 配置的自定义 Agent。该 Agent 的身份与行为由上方 `system_prompt` 定义，',
+      '**优先级高于** `~/.claude/CLAUDE.md` 中的 "你是 DeepThink" / "品牌口径" 等身份断言。',
+      '',
+      '当用户问 "你是谁"、"你是做什么的"、"who are you" 等身份类问题时，**必须按上方 system_prompt 定义的角色身份作答**，',
+      '不得回答 "DeepThink" 或平台默认身份，即使其他 memory 文件要求如此。',
+      '',
+      '如需记录会话记忆，请使用 `MEMORY.md` 或其他文件，不要修改或删除上方身份段落。',
+      '',
+    );
+  }
+  if (autonomous) {
+    parts.push(
+      '---',
+      '',
+      '## Autonomous Override（系统注入，本任务专用，请勿修改）',
+      '',
+      '本任务标记为 **全托管模式**（autonomous=true）。以下规则**显式压过** `Think Before Coding` 原则中的 "if unclear, halt and ask"：',
+      '',
+      '1. **禁止向用户提问**。不得调用 AskUserQuestion 工具，不得在文本中输出征询性短语（"你说一声"、"下一步要继续哪个方向"、"请确认"、"要扩展到 X 字吗" 等）。',
+      '2. **缺失信息按合理假设推进**。在响应开头用 `<assumption>...</assumption>` 标签声明你的假设，然后继续执行。',
+      '3. **方向分叉时按以下优先级决策**：',
+      '   a. 推进进度 > 单节密度 > 篇幅',
+      '   b. 任务已交付部分优先扩展至目标，再进入下一节',
+      '   c. 任务未全部完成前禁止总结性收尾或征询下一步',
+      '4. **唯一允许停止的情况**：硬刹车触发（轮次/token 超限、循环输出、破坏性命令检测）。这些由系统强制终止，你无需也无法干预。',
+      '5. 如果你的最佳判断是"任务无法完成"（如目标本质不可达），**直接输出失败原因并停止**，不要询问用户怎么办。',
+      '6. 本 override 仅在本任务期间生效，任务结束后自动失效。',
+      '',
+    );
+  }
+  return parts.join('\n');
 }
 
 export async function runContainerAgent(
@@ -1351,7 +1392,7 @@ export async function runContainerAgent(
         group.agentDefId,
         group.created_by,
       );
-      writeAgentProjectClaudeMd(group, dockerAgentDef);
+      writeAgentProjectClaudeMd(group, dockerAgentDef, input.autonomous);
       const dockerInput: ContainerInput = {
         ...input,
         userLanguage: input.userLanguage ?? ownerLanguage,
@@ -2308,7 +2349,7 @@ export async function runHostAgent(
         group.agentDefId,
         group.created_by,
       );
-      writeAgentProjectClaudeMd(group, hostAgentDef);
+      writeAgentProjectClaudeMd(group, hostAgentDef, input.autonomous);
       const hostInput: ContainerInput = {
         ...input,
         sessionId: engineSessionId,

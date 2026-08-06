@@ -382,6 +382,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
     attachments,
     authUser.id,
     authUser.display_name || authUser.username,
+    { autonomous: validation.data.autonomous ?? undefined },
   );
   if (!result.ok) return c.json({ error: result.error }, result.status);
   return c.json({
@@ -399,6 +400,7 @@ async function handleWebUserMessage(
   attachments?: Array<{ type: 'image'; data: string; mimeType?: string }>,
   userId = 'web-user',
   displayName = 'Web',
+  opts?: { autonomous?: boolean | null },
 ): Promise<
   | {
       ok: true;
@@ -483,10 +485,34 @@ async function handleWebUserMessage(
     // reply == null → command unrecognized, fall through to agent as prompt
   }
 
+  // Compute autonomous mode for this run:
+  // 1. Per-message override (body.autonomous true/false/null) takes precedence
+  // 2. Otherwise fall back to per-group config (isChatAutonomousEnabled)
+  // Note: opts.autonomous === null explicitly disables autonomous for this
+  // message even if the group has it enabled.
+  let autonomousForRun: boolean = false;
+  if (opts?.autonomous === true) {
+    autonomousForRun = true;
+  } else if (opts?.autonomous === false || opts?.autonomous === null) {
+    autonomousForRun = false;
+  } else {
+    try {
+      const { isChatAutonomousEnabled } = await import('./supervisor.js');
+      autonomousForRun = await isChatAutonomousEnabled(chatJid);
+    } catch {
+      // supervisor module not loaded — leave as false
+    }
+  }
+
   // Supervisor pre-dispatch: if the group has Supervisor enabled, route the
   // user message through the Supervisor SubAgent first. The Supervisor can
   // intercept with a clarifying question (stored as a supervisor message,
   // agent not run). delegate/auto fall through to normal agent queue.
+  //
+  // Autonomous override: when autonomousForRun is true, Supervisor clarify is
+  // bypassed — we pass { autonomous: true } into runSupervisorPreDispatch
+  // so the LLM is forbidden to pick clarify, and even if it does, parseDecision
+  // downgrades it to delegate. The user is never prompted mid-task.
   //
   // (The full review/retry loop is deferred — this MVP implements the
   // intent-parsing interception, which is the highest-value half.)
@@ -501,8 +527,12 @@ async function handleWebUserMessage(
     if (supervisorEnabled) {
       const owner = group.created_by ? getUserById(group.created_by) : null;
       const userLanguage = owner?.language ?? 'zh-CN';
-      const decision = await deps.runSupervisorPreDispatch(content, userLanguage);
-      if (decision?.action === 'clarify' && decision.question) {
+      const decision = await deps.runSupervisorPreDispatch(content, userLanguage, {
+        autonomous: autonomousForRun,
+      });
+      // Autonomous bypass: even if Supervisor returned clarify, ignore it
+      // (parseDecision already downgraded to delegate, but double-guard here).
+      if (!autonomousForRun && decision?.action === 'clarify' && decision.question) {
         const supMsgId = crypto.randomUUID();
         const supTs = new Date().toISOString();
         const supText = `🧭 Supervisor 提问：\n\n${decision.question}`;
@@ -602,7 +632,7 @@ async function handleWebUserMessage(
     content,
     timestamp,
     false,
-    { attachments: attachmentsStr },
+    { attachments: attachmentsStr, meta: { autonomous: autonomousForRun || undefined } },
   );
 
   broadcastNewMessage(chatJid, {
@@ -860,6 +890,7 @@ async function handleAgentConversationMessage(
   userId: string,
   displayName: string,
   attachments?: Array<{ type: 'image'; data: string; mimeType?: string }>,
+  opts?: { autonomous?: boolean | null },
 ): Promise<void> {
   if (!deps) return;
 
@@ -899,7 +930,7 @@ async function handleAgentConversationMessage(
     content,
     timestamp,
     false,
-    { attachments: attachmentsStr },
+    { attachments: attachmentsStr, meta: { autonomous: opts?.autonomous === true ? true : (opts?.autonomous === false || opts?.autonomous === null ? false : undefined) } },
   );
   updateAgentContextInfo(agentId, { last_active_at: timestamp });
 
@@ -1391,6 +1422,7 @@ function setupWebSocket(server: any): WebSocketServer {
             chatJid: msg.chatJid,
             content: msg.content,
             attachments: msg.attachments,
+            autonomous: (msg as { autonomous?: boolean | null }).autonomous ?? undefined,
           });
           if (!wsValidation.success) {
             sendWsError('消息格式无效', msg.chatJid);
@@ -1400,7 +1432,7 @@ function setupWebSocket(server: any): WebSocketServer {
             );
             return;
           }
-          const { chatJid, content, attachments } = wsValidation.data;
+          const { chatJid, content, attachments, autonomous: wsAutonomous } = wsValidation.data;
           const agentId = (msg as { agentId?: string }).agentId;
 
           // 群组访问权限检查
@@ -1553,6 +1585,7 @@ function setupWebSocket(server: any): WebSocketServer {
               session.user_id,
               session.display_name || session.username,
               attachments,
+              { autonomous: wsAutonomous ?? undefined },
             );
             return;
           }
@@ -1563,6 +1596,7 @@ function setupWebSocket(server: any): WebSocketServer {
             attachments,
             session.user_id,
             session.display_name || session.username,
+            { autonomous: wsAutonomous ?? undefined },
           );
           if (!result.ok) {
             logger.warn(

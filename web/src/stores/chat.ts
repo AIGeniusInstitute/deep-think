@@ -1187,6 +1187,49 @@ function applyStreamEvent(
     case 'init':
       // Internal signal, no UI handling needed.
       break;
+    case 'autonomous_started': {
+      const a = event.autonomous;
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🚀 全托管模式已启动（上限 ${a?.maxTurns ?? 50} 轮 / ${((a?.maxTokens ?? 1_000_000) / 1000).toFixed(0)}k tokens）`,
+      );
+      break;
+    }
+    case 'autonomous_continued': {
+      const a = event.autonomous;
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🔄 全托管自动续接（第 ${a?.turnCount ?? '?'} 轮）：${a?.message ?? '检测到 Agent 试图询问，已自动续接'}`,
+      );
+      break;
+    }
+    case 'autonomous_aborted': {
+      const a = event.autonomous;
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🛑 全托管已中止（${a?.reason ?? 'user_stop'}，已运行 ${a?.turnCount ?? '?'} 轮）`,
+      );
+      break;
+    }
+    case 'autonomous_brake': {
+      const a = event.autonomous;
+      const reasonMap: Record<string, string> = {
+        destructive_command: '检测到破坏性命令',
+        turn_limit: '达到轮次上限',
+        token_limit: '达到 token 上限',
+        loop_detected: '检测到输出循环',
+      };
+      const reasonText = reasonMap[a?.reason ?? ''] ?? a?.reason ?? 'unknown';
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🛑 全托管硬刹车触发：${reasonText}（已运行 ${a?.turnCount ?? '?'} 轮${a?.message ? `，${a.message}` : ''}）`,
+      );
+      break;
+    }
   }
 }
 

@@ -8430,6 +8430,21 @@ async function processAgentConversation(
       });
     };
 
+    // Determine autonomous mode for this run:
+    // - Per-message override (last user message row carries autonomous=1) takes precedence
+    // - Otherwise fall back to per-group config (isChatAutonomousEnabled)
+    let autonomousForRun = false;
+    if (lastProcessed?.autonomous === 1) {
+      autonomousForRun = true;
+    } else {
+      try {
+        const { isChatAutonomousEnabled } = await import('./supervisor.js');
+        autonomousForRun = await isChatAutonomousEnabled(chatJid);
+      } catch {
+        // supervisor module not loaded → leave as false
+      }
+    }
+
     const containerInput: ContainerInput = {
       prompt,
       sessionId,
@@ -8442,6 +8457,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
+      autonomous: autonomousForRun || undefined,
     };
 
     // Write tasks/groups snapshots
@@ -11257,10 +11273,10 @@ async function main(): Promise<void> {
         return { reply: `命令执行失败: ${(err as Error).message}` };
       }
     },
-    runSupervisorPreDispatch: async (userMessage, userLanguage) => {
+    runSupervisorPreDispatch: async (userMessage, userLanguage, opts) => {
       try {
         const { runSupervisorPreDispatch } = await import('./supervisor.js');
-        return runSupervisorPreDispatch(userMessage, userLanguage);
+        return runSupervisorPreDispatch(userMessage, userLanguage, opts);
       } catch (err) {
         logger.error({ err }, 'runSupervisorPreDispatch wiring failed');
         return null;

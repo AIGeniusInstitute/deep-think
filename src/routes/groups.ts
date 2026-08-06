@@ -125,9 +125,11 @@ interface GroupPayloadItem {
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
   engine?: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
   agent_def_id?: string | null;
+  /** 全托管模式：true 时该 group 的消息按全托管执行 */
+  autonomous?: boolean;
 }
 
-function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
+async function buildGroupsPayload(user: AuthUser): Promise<Record<string, GroupPayloadItem>> {
   const groups = getAllRegisteredGroups();
   const chats = new Map(getAllChats().map((chat) => [chat.jid, chat]));
   const isAdmin = hasHostExecutionPermission(user);
@@ -188,6 +190,16 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   // Fetch user's pinned groups
   const pins = getUserPinnedGroups(user.id);
 
+  // Batch-fetch autonomous flags for all visible groups (single read from
+  // supervisor-enabled.json, used to populate GroupPayloadItem.autonomous).
+  let autonomousByJid: Record<string, boolean> = {};
+  try {
+    const { getAllAutonomousEnabled } = await import('../supervisor-config.js');
+    autonomousByJid = await getAllAutonomousEnabled();
+  } catch {
+    // supervisor-config not loaded — leave empty (all groups report autonomous=false)
+  }
+
   // Cache member info per folder (avoid repeated queries)
   const memberCache = new Map<
     string,
@@ -242,6 +254,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       activation_mode: group.activation_mode ?? 'auto',
       conversation_source: group.conversation_source ?? 'manual',
       conversation_nav_mode: group.conversation_nav_mode ?? 'horizontal',
+      autonomous: autonomousByJid[jid] ?? false,
     };
   }
 
@@ -298,9 +311,9 @@ function toPublicContainerEnvForUser(
 // --- Routes ---
 
 // GET /api/groups - 获取群组列表
-groupRoutes.get('/', authMiddleware, (c) => {
+groupRoutes.get('/', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
-  const groups = buildGroupsPayload(user);
+  const groups = await buildGroupsPayload(user);
   return c.json({ groups });
 });
 
@@ -650,6 +663,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode,
     engine,
     agent_def_id,
+    autonomous,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -660,7 +674,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     execution_mode === undefined &&
     engine === undefined &&
-    agent_def_id === undefined
+    agent_def_id === undefined &&
+    autonomous === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -688,7 +703,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     execution_mode === undefined &&
     engine === undefined &&
-    agent_def_id === undefined;
+    agent_def_id === undefined &&
+    autonomous === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -758,6 +774,17 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     setRegisteredGroup(jid, updated);
     if (name) updateChatName(jid, name);
     deps.getRegisteredGroups()[jid] = updated;
+  }
+
+  // 全托管模式配置：单独写入 supervisor-enabled.json，不污染 registered_groups
+  if (autonomous !== undefined) {
+    try {
+      const { setAutonomousEnabled } = await import('../supervisor-config.js');
+      await setAutonomousEnabled(jid, autonomous);
+    } catch (err) {
+      // best-effort: don't fail the whole PATCH if supervisor config is missing
+      console.warn('Failed to set autonomous flag:', err);
+    }
   }
 
   return c.json({ success: true, pinned_at });

@@ -101,8 +101,8 @@ function stmts() {
       storeMessageInsert: db.prepare(
         `INSERT OR REPLACE INTO messages (
           id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me,
-          attachments, token_usage, turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, task_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          attachments, token_usage, turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, task_id, autonomous
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       insertUsageInsert: db.prepare(
         `INSERT INTO usage_records (id, user_id, group_folder, agent_id, message_id, model,
@@ -148,7 +148,7 @@ function stmts() {
          )`,
       ),
       getMessagesSince: db.prepare(
-        `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id
+        `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id, autonomous
          FROM messages
          WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND is_from_me = 0
          ORDER BY timestamp ASC, id ASC`,
@@ -166,7 +166,7 @@ function getNewMessagesStmt(jidCount: number): any {
   if (!s) {
     const placeholders = Array(jidCount).fill('?').join(',');
     s = db.prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id, autonomous
        FROM messages
        WHERE (timestamp > ? OR (timestamp = ? AND id > ?))
          AND chat_jid IN (${placeholders})
@@ -201,6 +201,10 @@ interface StoredMessageMeta {
   sourceKind?: MessageSourceKind | null;
   finalizationReason?: MessageFinalizationReason | null;
   taskId?: string | null;
+  /** Per-message autonomous flag: true when the user sent this message via the
+   *  Web "全托管" button (per-message override). At cold-start, this overrides
+   *  the per-group config to set containerInput.autonomous = true. */
+  autonomous?: boolean | null;
 }
 
 function hasColumn(tableName: string, columnName: string): boolean {
@@ -335,6 +339,7 @@ export function initDatabase(): void {
       sdk_message_uuid TEXT,
       source_kind TEXT,
       finalization_reason TEXT,
+      autonomous INTEGER DEFAULT 0,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -357,7 +362,8 @@ export function initDatabase(): void {
       status TEXT DEFAULT 'active',
       created_at TEXT NOT NULL,
       created_by TEXT,
-      notify_channels TEXT
+      notify_channels TEXT,
+      autonomous INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -1298,6 +1304,7 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'execution_mode', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_jid', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_folder', 'TEXT');
+  ensureColumn('scheduled_tasks', 'autonomous', "INTEGER NOT NULL DEFAULT 0");
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
@@ -1346,6 +1353,7 @@ export function initDatabase(): void {
   ensureColumn('messages', 'source_kind', 'TEXT');
   ensureColumn('messages', 'finalization_reason', 'TEXT');
   ensureColumn('messages', 'task_id', 'TEXT');
+  ensureColumn('messages', 'autonomous', "INTEGER NOT NULL DEFAULT 0");
   ensureColumn('loop_trace_nodes', 'edited_at', 'TEXT');
   ensureColumn('agents', 'source_kind', 'TEXT');
   ensureColumn('agents', 'thread_id', 'TEXT');
@@ -2250,6 +2258,7 @@ export function storeMessageDirect(
     meta?.sourceKind ?? null,
     meta?.finalizationReason ?? null,
     meta?.taskId ?? null,
+    meta?.autonomous ? 1 : 0,
   );
   return effectiveMsgId;
 }
@@ -2775,8 +2784,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, next_run, status, created_at, created_by, notify_channels, loop_kind, loop_run_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, next_run, status, created_at, created_by, notify_channels, loop_kind, loop_run_id, autonomous)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -2798,6 +2807,7 @@ export function createTask(
     task.notify_channels != null ? JSON.stringify(task.notify_channels) : null,
     task.loop_kind ?? null,
     task.loop_run_id ?? null,
+    task.autonomous ? 1 : 0,
   );
 }
 
@@ -2817,6 +2827,12 @@ function mapTaskRow(row: unknown): ScheduledTask {
   if (r.execution_mode === undefined) r.execution_mode = null;
   if (r.workspace_jid === undefined) r.workspace_jid = null;
   if (r.workspace_folder === undefined) r.workspace_folder = null;
+  // Normalize autonomous: DB stores INTEGER (0/1), expose as boolean
+  if (r.autonomous !== undefined) {
+    r.autonomous = r.autonomous === 1 || r.autonomous === true;
+  } else {
+    r.autonomous = false;
+  }
   // Defensive: legacy BLOB cells in TEXT-affinity columns come back as Buffer.
   r.prompt = toUtf8String(r.prompt);
   if (r.script_command !== undefined) r.script_command = toUtf8StringOrNull(r.script_command);
@@ -2861,6 +2877,7 @@ export function updateTask(
       | 'notify_channels'
       | 'chat_jid'
       | 'group_folder'
+      | 'autonomous'
     >
   >,
 ): void {
@@ -2918,6 +2935,10 @@ export function updateTask(
   if (updates.group_folder !== undefined) {
     fields.push('group_folder = ?');
     values.push(updates.group_folder);
+  }
+  if (updates.autonomous !== undefined) {
+    fields.push('autonomous = ?');
+    values.push(updates.autonomous ? 1 : 0);
   }
 
   if (fields.length === 0) return;
