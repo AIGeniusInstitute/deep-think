@@ -628,6 +628,7 @@ async function runTaskInner(
         isAdminHome,
         isScheduledTask: true,
         taskRunId: options?.taskRunId,
+        autonomous: task.execution_type !== 'script' && task.autonomous === true,
       },
       (proc, identifier, selectedProviderId) =>
         deps.onProcess(

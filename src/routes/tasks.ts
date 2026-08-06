@@ -227,6 +227,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     created_at: now,
     created_by: authUser.id,
     notify_channels: notify_channels ?? null,
+    autonomous: execType === 'agent' ? (validation.data.autonomous ?? false) : false,
   });
 
   return c.json({ success: true, taskId });

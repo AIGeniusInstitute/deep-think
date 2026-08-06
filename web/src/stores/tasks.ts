@@ -21,6 +21,7 @@ export interface ScheduledTask {
   execution_mode?: 'host' | 'container' | null;
   workspace_jid?: string | null;
   workspace_folder?: string | null;
+  autonomous?: boolean;
 }
 
 export interface TaskRunLog {
@@ -51,6 +52,7 @@ interface TasksState {
     notifyChannels?: string[] | null,
     chatJid?: string,
     contextMode?: 'group' | 'isolated',
+    autonomous?: boolean,
   ) => Promise<void>;
   updateTaskStatus: (id: string, status: 'active' | 'paused') => Promise<void>;
   updateTask: (id: string, fields: Record<string, unknown>) => Promise<void>;
@@ -102,6 +104,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     notifyChannels?: string[] | null,
     chatJid?: string,
     contextMode?: 'group' | 'isolated',
+    autonomous?: boolean,
   ) => {
     try {
       const normalizedScheduleValue =
@@ -131,6 +134,9 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       }
       if (contextMode) {
         body.context_mode = contextMode;
+      }
+      if (autonomous !== undefined && executionType !== 'script') {
+        body.autonomous = autonomous;
       }
       await api.post('/api/tasks', body);
       set({ error: null });

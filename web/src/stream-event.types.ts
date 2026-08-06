@@ -23,7 +23,8 @@ export type StreamEventType =
   | 'loop_start' | 'loop_iteration_start' | 'loop_iteration_end'
   | 'loop_goal_check' | 'loop_review_result' | 'loop_end'
   | 'human_approval_request' | 'human_approval_result'
-  | 'reminder_injected';
+  | 'reminder_injected'
+  | 'autonomous_started' | 'autonomous_continued' | 'autonomous_aborted' | 'autonomous_brake';
 
 export type StreamAgentScope = 'main' | 'task' | 'subagent' | 'system';
 export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
@@ -232,5 +233,17 @@ export interface StreamEvent {
     optionId?: string;
     note?: string;
     byUserId?: string;
+  };
+  /** Autonomous mode metadata. Present on autonomous_* events emitted by the
+   *  agent-runner's autonomous block: started (entering autonomous run),
+   *  continued (auto-injected next turn after end-of-turn detection),
+   *  aborted (user pressed stop), brake (hard brake fired). */
+  autonomous?: {
+    reason?: 'user_stop' | 'turn_limit' | 'token_limit' | 'loop_detected' | 'destructive_command' | 'task_complete';
+    turnCount?: number;
+    maxTurns?: number;
+    totalTokens?: number;
+    maxTokens?: number;
+    message?: string;
   };
 }

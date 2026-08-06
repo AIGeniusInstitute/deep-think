@@ -31,6 +31,8 @@ import { getWorkspaceLastAgent, setWorkspaceLastAgent } from '../../utils/worksp
 import { SloganRotator, isDefaultHomeName } from './SloganRotator';
 import { LoopModeSwitcher, LoopForm, type LoopMode } from './LoopModeSwitcher';
 import { SupervisorToggle } from './SupervisorToggle';
+import { AutonomousToggle } from './AutonomousToggle';
+import { AutonomousStopButton } from './AutonomousStopButton';
 import { EngineSwitcher } from './EngineSwitcher';
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
 const MAIN_BINDING = '__main__' as const;
@@ -593,6 +595,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         </div>
         {/* Desktop: toggle Supervisor */}
         <SupervisorToggle chatJid={groupJid} />
+        {/* Desktop: autonomous mode toggle + urgent stop */}
+        <AutonomousToggle chatJid={groupJid} />
+        <AutonomousStopButton chatJid={groupJid} />
         {/* Desktop: engine switcher */}
         <EngineSwitcher groupJid={groupJid} group={group} />
         {/* Desktop: toggle theme (light → dark → system) */}

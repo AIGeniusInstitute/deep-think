@@ -20,6 +20,49 @@ const SDK_TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'killed']);
 /** Tools with specialized input_json_delta handling — generic accumulation is skipped for these. */
 const SPECIAL_TOOLS = ['Skill', 'Task', 'Agent', 'AskUserQuestion', 'TodoWrite'];
 
+/**
+ * Destructive command patterns (autonomous-mode hard brake).
+ * When the agent calls Bash with input matching one of these, the main loop
+ * exits the process to prevent catastrophic damage. Conservative defaults —
+ * the agent's CLAUDE.md override already lists the same prohibitions, this is
+ * the system-level backstop.
+ */
+export const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
+  /rm\s+-rf\s+\/(\s|$)/,                              // rm -rf /
+  /git\s+push\s+(-f|--force)(\s|$)/,                 // git push --force (allow --force-with-lease)
+  /git\s+reset\s+--hard(\s|$)/,                      // git reset --hard
+  /git\s+checkout\s+--\s+\.\s*$/,                    // git checkout -- .
+  /DROP\s+TABLE/i,                                   // SQL DROP TABLE
+  /DROP\s+DATABASE/i,                                // SQL DROP DATABASE
+  /TRUNCATE\s+TABLE/i,                               // SQL TRUNCATE
+  /DELETE\s+FROM\s+\w+\s*;(\s|$)/i,                  // unguarded DELETE
+  /\bmkfs\./,                                         // mkfs.* (format filesystem)
+  /\bdd\s+if=.*of=\/dev\//,                          // dd to raw device
+  /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:/,                  // fork bomb :(){ :|:& };:
+];
+
+/**
+ * Asking-pattern regexes (autonomous-mode end-of-turn detection).
+ * Weak signal — 2+ simultaneous matches required to trigger auto-continue.
+ * AskUserQuestion tool call is the strong signal (single match sufficient).
+ */
+export const ASKING_PATTERNS: readonly RegExp[] = [
+  /\?\s*$/,                // ends with half-width ?
+  /？\s*$/,                // ends with full-width ？
+  /你说一声/,
+  /你说/,
+  /要继续/,
+  /可以继续/,
+  /要扩展/,
+  /要哪个方向/,
+  /请确认/,
+  /请告诉我/,
+  /要我开始/,
+  /是否继续/,
+  /要不要/,
+  /请回复/,
+];
+
 type EmitFn = (output: ContainerOutput) => void;
 type LogFn = (message: string) => void;
 
@@ -405,11 +448,27 @@ export class StreamEventProcessor {
 
     // Track AskUserQuestion tool
     if (block.name === 'AskUserQuestion' && block.id) {
+      this.lastTurnAskedUser = true; // strong signal: SDK-question-tool called
       if (typeof blockIndex === 'number') {
         this.pendingAskUserInput.set(blockIndex, {
           toolUseId: block.id, inputJson: '', resolved: false,
           parentToolUseId, isNested,
         });
+      }
+    }
+
+    // Track destructive Bash command (autonomous-mode hard brake). When the
+    // agent calls Bash with input matching DESTRUCTIVE_PATTERNS, record the
+    // matched pattern; the main loop's hard-brake check will exit the process.
+    if (block.name === 'Bash' && block.input) {
+      const cmd = typeof (block.input as { command?: unknown }).command === 'string'
+        ? (block.input as { command: string }).command
+        : '';
+      if (cmd) {
+        const match = DESTRUCTIVE_PATTERNS.find((re) => re.test(cmd));
+        if (match) {
+          this.lastTurnDestructiveCmd = cmd.slice(0, 500);
+        }
       }
     }
 
@@ -1397,6 +1456,54 @@ export class StreamEventProcessor {
   /** Reset the full text accumulator (e.g., on context overflow). */
   resetFullTextAccumulator(): void {
     this.fullTextAccumulator = '';
+  }
+
+  // ─── Autonomous-mode signals ───
+  // Strong signal: AskUserQuestion tool was called this turn.
+  private lastTurnAskedUser = false;
+  // Strong signal: a Bash tool was called this turn with input matching
+  // DESTRUCTIVE_PATTERNS. Read by main loop's hard-brake check.
+  private lastTurnDestructiveCmd: string | null = null;
+  // Token usage accumulator (sum of input + output across all turns in this run).
+  private totalTokenUsage = 0;
+
+  /** Returns true if the last turn called AskUserQuestion OR ended with
+   *  text matching the asking-pattern regex (>=2 simultaneous matches). */
+  get lastTurnAskedUserFlag(): boolean {
+    return this.lastTurnAskedUser;
+  }
+
+  /** Read and reset the AskUserQuestion flag (call after each turn boundary). */
+  resetTurnAskedFlag(): void {
+    this.lastTurnAskedUser = false;
+  }
+
+  /** Returns the destructive Bash command that triggered this turn, if any.
+   *  Reset at each turn boundary. */
+  get lastTurnDestructiveCommand(): string | null {
+    return this.lastTurnDestructiveCmd;
+  }
+
+  resetDestructiveCommandFlag(): void {
+    this.lastTurnDestructiveCmd = null;
+  }
+
+  /** Read the full text accumulated this turn, then reset accumulator. */
+  consumeTurnFullText(): string {
+    const text = this.fullTextAccumulator;
+    this.fullTextAccumulator = '';
+    return text;
+  }
+
+  /** Get the cumulative token usage counter (does not reset). */
+  getTotalTokenUsage(): number {
+    return this.totalTokenUsage;
+  }
+
+  /** Add to the cumulative token usage counter (called on usage events). */
+  addTokenUsage(inputTokens: number, outputTokens: number): void {
+    if (Number.isFinite(inputTokens)) this.totalTokenUsage += inputTokens;
+    if (Number.isFinite(outputTokens)) this.totalTokenUsage += outputTokens;
   }
 
   /**

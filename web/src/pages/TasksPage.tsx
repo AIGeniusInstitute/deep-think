@@ -38,6 +38,7 @@ export function TasksPage() {
     notifyChannels: string[] | null;
     chatJid?: string;
     contextMode?: 'group' | 'isolated';
+    autonomous?: boolean;
   }) => {
     await createTask(
       data.prompt,
@@ -49,6 +50,7 @@ export function TasksPage() {
       data.notifyChannels,
       data.chatJid,
       data.contextMode,
+      data.autonomous,
     );
     // Only close the form when the store reports no error — failures surface
     // as a toast inside CreateTaskForm and the form stays open for retry.

@@ -224,6 +224,7 @@ export interface WebDeps {
   runSupervisorPreDispatch?: (
     userMessage: string,
     userLanguage: string,
+    opts?: { autonomous?: boolean },
   ) => Promise<
     | {
         action: 'clarify' | 'delegate' | 'auto' | 'delegate_team' | 'accept' | 'retry';

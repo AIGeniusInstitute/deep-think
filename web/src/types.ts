@@ -23,6 +23,7 @@ export interface GroupInfo {
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
   engine?: 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
   agent_def_id?: string | null;
+  autonomous?: boolean;
 }
 
 export interface AgentInfo {

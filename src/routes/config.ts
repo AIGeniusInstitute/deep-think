@@ -3098,6 +3098,9 @@ configRoutes.post(
 import {
   isSupervisorEnabled,
   setSupervisorEnabled,
+  isAutonomousEnabled,
+  setAutonomousEnabled,
+  getAllAutonomousEnabled,
 } from '../supervisor-config.js';
 
 /** GET /api/config/supervisor?chat_jid=xxx — get supervisor enabled state */
@@ -3129,6 +3132,48 @@ configRoutes.put('/supervisor', authMiddleware, async (c) => {
   await setSupervisorEnabled(chatJid, enabled);
   logger.info({ chatJid, enabled, userId: user.id }, 'Supervisor toggle updated');
   return c.json({ chat_jid: chatJid, enabled });
+});
+
+// ─── Autonomous (全托管) mode toggle (per-group) ───────────────
+// GET /api/config/autonomous?chat_jid=xxx — get autonomous enabled state
+// PUT /api/config/autonomous — body: { chat_jid, enabled }
+// GET /api/config/autonomous/all — list all groups with autonomous enabled
+configRoutes.get('/autonomous', authMiddleware, async (c) => {
+  const chatJid = c.req.query('chat_jid');
+  if (!chatJid) return c.json({ error: 'chat_jid required' }, 400);
+  const group = getRegisteredGroup(chatJid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const user = c.get('user') as import('../types.js').AuthUser;
+  if (!canAccessGroup(user, { ...group, jid: chatJid })) {
+    return c.json({ error: 'Access denied' }, 403);
+  }
+  const enabled = await isAutonomousEnabled(chatJid);
+  return c.json({ chat_jid: chatJid, enabled });
+});
+
+configRoutes.put('/autonomous', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const chatJid = body.chat_jid;
+  const enabled = !!body.enabled;
+  if (!chatJid) return c.json({ error: 'chat_jid required' }, 400);
+  const group = getRegisteredGroup(chatJid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const user = c.get('user') as import('../types.js').AuthUser;
+  if (!canModifyGroup(user, { ...group, jid: chatJid })) {
+    return c.json({ error: 'Only the workspace owner can toggle autonomous mode' }, 403);
+  }
+  await setAutonomousEnabled(chatJid, enabled);
+  logger.info({ chatJid, enabled, userId: user.id }, 'Autonomous toggle updated');
+  return c.json({ chat_jid: chatJid, enabled });
+});
+
+configRoutes.get('/autonomous/all', authMiddleware, async (c) => {
+  const user = c.get('user') as import('../types.js').AuthUser;
+  if (user.role !== 'admin') {
+    return c.json({ error: 'Admin only' }, 403);
+  }
+  const all = await getAllAutonomousEnabled();
+  return c.json({ groups: all });
 });
 
 // ─── AtomCode Engine Config & Provider Management ─────────────

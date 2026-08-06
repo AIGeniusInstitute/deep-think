@@ -95,6 +95,14 @@ export interface ContainerInput {
     intervalSteps: number;
     goalSnippet: string;
   };
+  /** 全托管模式开关：true 时 agent 在单次任务执行期间不主动停下询问用户。
+   *  Supervisor clarify 被禁用、端回合检测到提问信号时自动注入续接消息、
+   *  硬刹车（轮次/token/循环/破坏性命令）触发时强制退出。 */
+  autonomous?: boolean;
+  /** 全托管硬刹车上限：轮次计数到 maxTurns 即停止。默认 50。 */
+  maxTurns?: number;
+  /** 全托管硬刹车上限：累计 token 用量到 maxTokens 即停止。默认 1,000,000。 */
+  maxTokens?: number;
 }
 
 export interface ContainerOutput {
@@ -106,7 +114,7 @@ export interface ContainerOutput {
   turnId?: string;
   sessionId?: string;
   sdkMessageUuid?: string;
-  sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'overflow_partial' | 'compact_partial' | 'legacy' | 'auto_continue' | 'truncation_continue';
+  sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'overflow_partial' | 'compact_partial' | 'legacy' | 'auto_continue' | 'truncation_continue' | 'autonomous_continue' | 'autonomous_brake';
   /** 'truncated'：上游断流截断的 partial（usage 双零指纹，runner 会自动续写） */
   finalizationReason?: 'completed' | 'interrupted' | 'error' | 'truncated';
   /** 本 result 发出时仍未 settle 的后台任务数（异步 Agent / backgrounded Bash）。

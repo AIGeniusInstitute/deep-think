@@ -1265,7 +1265,7 @@ async function runQuery(
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
   sourceKindOverride?: ContainerOutput['sourceKind'],
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; stalledDuringQuery?: boolean; sessionResumeFailed?: boolean; pipedMessagesDuringQuery: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string; sourceJid?: string }>; suspectTruncatedTail?: string }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; stalledDuringQuery?: boolean; sessionResumeFailed?: boolean; pipedMessagesDuringQuery: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }>; taskId?: string; sourceJid?: string }>; suspectTruncatedTail?: string; autonomousSignals?: { lastTurnAskedUser: boolean; lastTurnDestructiveCmd: string | null; turnFullText: string; totalTokens: number } }> {
   const stream = new MessageStream();
   // Track messages piped into this query.  When the query is interrupted,
   // these messages would otherwise be lost (consumed by the aborted query).
@@ -1563,6 +1563,22 @@ async function runQuery(
       name: 'response-language.md',
       text: buildLanguageDirective(containerInput.userLanguage),
     },
+    ...(containerInput.autonomous
+      ? [{
+          name: 'autonomous-mode.md',
+          text: [
+            '<autonomous-mode>',
+            '本任务为 **全托管模式**。以下规则为系统级硬约束，优先级高于其他任何提示（包括 CLAUDE.md 的 Think Before Coding）。',
+            '1. 禁止调用 AskUserQuestion 工具。',
+            '2. 禁止在文本中输出征询性短语（"你说一声"、"下一步要继续哪个方向"、"请确认"、"要扩展到 X 字吗" 等）。',
+            '3. 缺失信息按合理假设推进，在响应开头用 <assumption> 标签声明假设。',
+            '4. 方向分叉优先级：推进进度 > 单节密度 > 篇幅；任务未全部完成前禁止总结性收尾。',
+            '5. 系统会自动检测你的端回合输出并自动续接，你无需也不应停下来等待用户输入。',
+            '6. 硬刹车（轮次/token 超限、循环输出、破坏性命令）会强制终止你，无法规避。',
+            '</autonomous-mode>',
+          ].join('\n'),
+        }]
+      : []),
   ];
   const systemPromptAppend = promptPieces.map((piece) => piece.text).join('\n');
   const promptAudit = buildPromptAudit(promptPieces);
@@ -2022,6 +2038,10 @@ async function runQuery(
       // 这正是"卡片显示已完成但后台还在跑"的可见性 bug 的根源。
       const resultMsg = message as Record<string, unknown>;
       const sdkUsage = resultMsg.usage as Record<string, number> | undefined;
+      // Autonomous mode: accumulate token usage for hard-brake check
+      if (containerInput.autonomous && sdkUsage) {
+        processor.addTokenUsage(sdkUsage.input_tokens || 0, sdkUsage.output_tokens || 0);
+      }
       const suspectTruncated =
         emitOutput && !!finalText && isSuspectTruncatedStreamResult(sdkUsage, finalText.length);
       const pendingBgTasks = emitOutput ? processor.getPendingSdkTaskCount() : 0;
@@ -2165,7 +2185,22 @@ async function runQuery(
   processor.cleanup();
 
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interruptedDuringQuery: ${interruptedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, stalledDuringQuery, pipedMessagesDuringQuery, suspectTruncatedTail };
+  return {
+    newSessionId,
+    lastAssistantUuid,
+    closedDuringQuery,
+    interruptedDuringQuery,
+    stalledDuringQuery,
+    pipedMessagesDuringQuery,
+    suspectTruncatedTail,
+    // Autonomous-mode signals (captured from processor state before cleanup)
+    autonomousSignals: {
+      lastTurnAskedUser: processor.lastTurnAskedUserFlag,
+      lastTurnDestructiveCmd: processor.lastTurnDestructiveCommand,
+      turnFullText: processor.consumeTurnFullText(),
+      totalTokens: processor.getTotalTokenUsage(),
+    },
+  };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -2507,6 +2542,14 @@ async function main(): Promise<void> {
   const MAX_OVERFLOW_RETRIES = 3;
   let consecutiveCompactions = 0;
   const MAX_CONSECUTIVE_COMPACTIONS = 3;
+
+  // ─── Autonomous-mode state (in-memory, per-run) ───
+  // Turn counter increments after each runQuery() call; output hash history
+  // for loop detection (last 5 turns, 3-consecutive-identical triggers brake).
+  let autonomousTurnCount = 0;
+  const autonomousOutputHashes: string[] = [];
+  const AUTONOMOUS_LOOP_WINDOW = 5; // keep last 5 hashes
+  const AUTONOMOUS_LOOP_THRESHOLD = 3; // 3 consecutive identical → brake
   // 暂存的会话历史上下文：当 auto-continue 阶段发生 sessionResumeFailed 时，
   // 历史无法直接拼到 auto-continue prompt（因为 fall-through 等下一条 IPC 消息后才重启 query），
   // 需要在下一轮主循环 query 之前消费它，避免新会话完全丢失上下文。
@@ -2956,6 +2999,206 @@ async function main(): Promise<void> {
       if (containerInput.graphRunId) {
         log(`Graph single-shot mode (graphRunId=${containerInput.graphRunId}), exiting after query — not entering waitForIpcMessage`);
         break;
+      }
+
+      // ─── Autonomous mode: hard brakes + auto-continue (no waiting for user) ───
+      if (containerInput.autonomous && queryResult.autonomousSignals) {
+        if (autonomousTurnCount === 0) {
+          writeOutput({
+            status: 'stream',
+            result: null,
+            streamEvent: {
+              eventType: 'autonomous_started',
+              displayLevel: 'primary',
+              statusText: 'autonomous_started',
+              autonomous: {
+                maxTurns: containerInput.maxTurns ?? 50,
+                maxTokens: containerInput.maxTokens ?? 1_000_000,
+              },
+            },
+          });
+        }
+        autonomousTurnCount++;
+        const signals = queryResult.autonomousSignals;
+        const turnText = signals.turnFullText || '';
+        // Hash the turn's text output for loop detection.
+        const crypto = await import('node:crypto');
+        const turnHash = crypto.createHash('sha256').update(turnText.slice(0, 5000)).digest('hex').slice(0, 16);
+        autonomousOutputHashes.push(turnHash);
+        if (autonomousOutputHashes.length > AUTONOMOUS_LOOP_WINDOW) {
+          autonomousOutputHashes.shift();
+        }
+
+        // Hard brake 1: destructive Bash command detected this turn.
+        const destructiveCmd = signals.lastTurnDestructiveCmd;
+        if (destructiveCmd) {
+          log(`Hard brake: destructive_command detected: ${destructiveCmd.slice(0, 200)}`);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `autonomous_brake: destructive_command`,
+            newSessionId: sessionId,
+            sourceKind: 'autonomous_brake',
+            streamEvent: {
+              eventType: 'autonomous_brake',
+              displayLevel: 'primary',
+              statusText: 'autonomous_brake',
+              autonomous: {
+                reason: 'destructive_command',
+                turnCount: autonomousTurnCount,
+                message: destructiveCmd.slice(0, 200),
+              },
+            },
+          });
+          process.exit(1);
+        }
+        // Hard brake 2: turn limit exceeded.
+        const maxTurns = containerInput.maxTurns ?? 50;
+        if (autonomousTurnCount >= maxTurns) {
+          log(`Hard brake: turn_limit_exceeded (${autonomousTurnCount}/${maxTurns})`);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `autonomous_brake: turn_limit_exceeded (${autonomousTurnCount}/${maxTurns})`,
+            newSessionId: sessionId,
+            sourceKind: 'autonomous_brake',
+            streamEvent: {
+              eventType: 'autonomous_brake',
+              displayLevel: 'primary',
+              statusText: 'autonomous_brake',
+              autonomous: {
+                reason: 'turn_limit',
+                turnCount: autonomousTurnCount,
+                maxTurns,
+              },
+            },
+          });
+          process.exit(1);
+        }
+        // Hard brake 3: token limit exceeded.
+        const maxTokens = containerInput.maxTokens ?? 1_000_000;
+        const totalTokens = signals.totalTokens ?? 0;
+        if (totalTokens >= maxTokens) {
+          log(`Hard brake: token_limit_exceeded (${totalTokens}/${maxTokens})`);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `autonomous_brake: token_limit_exceeded (${totalTokens}/${maxTokens})`,
+            newSessionId: sessionId,
+            sourceKind: 'autonomous_brake',
+            streamEvent: {
+              eventType: 'autonomous_brake',
+              displayLevel: 'primary',
+              statusText: 'autonomous_brake',
+              autonomous: {
+                reason: 'token_limit',
+                turnCount: autonomousTurnCount,
+                totalTokens,
+                maxTokens,
+              },
+            },
+          });
+          process.exit(1);
+        }
+        // Hard brake 4: loop detection (3 consecutive identical hashes).
+        const hashes = autonomousOutputHashes;
+        if (hashes.length >= AUTONOMOUS_LOOP_THRESHOLD) {
+          const lastN = hashes.slice(-AUTONOMOUS_LOOP_THRESHOLD);
+          if (lastN.every((h) => h === lastN[0])) {
+            log(`Hard brake: loop_detected (${AUTONOMOUS_LOOP_THRESHOLD} identical turns)`);
+            writeOutput({
+              status: 'error',
+              result: null,
+              error: `autonomous_brake: loop_detected`,
+              newSessionId: sessionId,
+              sourceKind: 'autonomous_brake',
+              streamEvent: {
+                eventType: 'autonomous_brake',
+                displayLevel: 'primary',
+                statusText: 'autonomous_brake',
+                autonomous: {
+                  reason: 'loop_detected',
+                  turnCount: autonomousTurnCount,
+                },
+              },
+            });
+            process.exit(1);
+          }
+        }
+
+        // End-of-turn detection: did the agent ask the user this turn?
+        // Strong signal: AskUserQuestion tool called (signals.lastTurnAskedUser).
+        // Weak signal: text tail matches >=2 ASKING_PATTERNS regexes.
+        const { ASKING_PATTERNS } = await import('./stream-processor.js');
+        const tail = turnText.slice(-500);
+        const askingMatches = ASKING_PATTERNS.filter((re) => re.test(tail));
+        const askedUser = signals.lastTurnAskedUser || askingMatches.length >= 2;
+
+        if (askedUser) {
+          log(`Autonomous mode: end-of-turn detected asking signal (tool=${signals.lastTurnAskedUser}, patterns=${askingMatches.length}). Injecting synthetic continue message.`);
+          writeOutput({
+            status: 'stream',
+            result: null,
+            streamEvent: {
+              eventType: 'autonomous_continued',
+              displayLevel: 'primary',
+              statusText: 'autonomous_continued',
+              autonomous: {
+                turnCount: autonomousTurnCount,
+                message: '检测到 Agent 试图询问用户，已自动注入续接指令',
+              },
+            },
+          });
+          const autoContinuePrompt = [
+            '【系统提示：全托管模式】',
+            '你刚才的输出包含向用户提问的迹象，这违反了 <autonomous-mode> 规则 1（禁止向用户提问）。',
+            '无需等待用户回复，请按你的最佳判断继续推进任务目标：',
+            '- 如果你在 <assumption> 中声明了假设，直接基于该假设执行。',
+            '- 如果当前子任务已完成，进入下一个子任务。',
+            '- 如果所有子任务都已完成，输出最终交付物并停止。',
+            '- 禁止再次询问，禁止输出征询性短语。',
+          ].join('\n');
+          containerInput.turnId = generateTurnId();
+          const autoContResult = await runQuery(
+            autoContinuePrompt,
+            sessionId,
+            mcpServerConfig,
+            containerInput,
+            memoryRecallPrompt,
+            resumeAt,
+            true,
+            DEFAULT_ALLOWED_TOOLS,
+            undefined,
+            undefined,
+            'autonomous_continue',
+          );
+          if (autoContResult.newSessionId) {
+            sessionId = autoContResult.newSessionId;
+            latestSessionId = sessionId;
+          }
+          if (autoContResult.lastAssistantUuid) {
+            resumeAt = autoContResult.lastAssistantUuid;
+          }
+          if (autoContResult.closedDuringQuery) {
+            log('Close sentinel during autonomous auto-continue, exiting');
+            writeOutput({
+              status: 'closed',
+              result: null,
+              streamEvent: {
+                eventType: 'autonomous_aborted',
+                displayLevel: 'primary',
+                statusText: 'autonomous_aborted',
+                autonomous: {
+                  reason: 'user_stop',
+                  turnCount: autonomousTurnCount,
+                },
+              },
+            });
+            break;
+          }
+          // After auto-continue, fall through to wait for next IPC message.
+          // The next turn's end-of-turn detection will run again if needed.
+        }
       }
 
       // Wait for the next message or _close sentinel
