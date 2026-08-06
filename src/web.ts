@@ -644,6 +644,7 @@ async function handleWebUserMessage(
     timestamp,
     is_from_me: false,
     attachments: attachmentsStr,
+    autonomous: !!autonomousForRun,
   });
 
   if (group.created_by) {

@@ -1,5 +1,5 @@
 import { useState, memo, lazy, Suspense } from 'react';
-import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, ImageDown } from 'lucide-react';
+import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, ImageDown, Rocket } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Message } from '../../stores/chat';
@@ -343,6 +343,12 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
         {/* Sender line — no avatars in compact mode */}
         <div className="flex items-center gap-1.5 mb-1">
           <span className={`text-xs font-semibold ${isAI ? 'text-primary' : 'text-muted-foreground'}`}>{senderName}</span>
+          {!isAI && message.autonomous === true && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 font-medium">
+              <Rocket className="w-2.5 h-2.5" />
+              全托管
+            </span>
+          )}
           {showTime && <span className="text-[11px] text-muted-foreground">{time}</span>}
           <button
             onClick={handleCopy}
@@ -517,6 +523,20 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             </span>
           )}
           <div className="relative">
+            {message.autonomous === true && (
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="absolute -left-2 -top-2 z-10 flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white shadow-md ring-2 ring-background">
+                      <Rocket className="w-3 h-3" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">
+                    <p className="text-xs">全托管模式发送 · Agent 不会中途停下询问</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
             {/* Image attachments */}
             {images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2 justify-end">

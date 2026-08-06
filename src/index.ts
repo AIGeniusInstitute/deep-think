@@ -8431,10 +8431,10 @@ async function processAgentConversation(
     };
 
     // Determine autonomous mode for this run:
-    // - Per-message override (last user message row carries autonomous=1) takes precedence
+    // - Per-message override (last user message row carries autonomous=true) takes precedence
     // - Otherwise fall back to per-group config (isChatAutonomousEnabled)
     let autonomousForRun = false;
-    if (lastProcessed?.autonomous === 1) {
+    if (lastProcessed?.autonomous === true) {
       autonomousForRun = true;
     } else {
       try {

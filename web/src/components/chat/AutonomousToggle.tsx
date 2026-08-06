@@ -51,7 +51,7 @@ export function AutonomousToggle({ chatJid }: Props) {
           : '开启全托管（连续推进直到任务完成或硬刹车）'
       }
       className={cn(
-        'hidden lg:flex p-2 rounded-lg transition-colors cursor-pointer',
+        'p-2 rounded-lg transition-colors cursor-pointer',
         enabled
           ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'
           : 'hover:bg-accent text-muted-foreground',

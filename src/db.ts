@@ -2193,13 +2193,18 @@ function normalizeMessageRow(
 ): NewMessage & { is_from_me: boolean };
 function normalizeMessageRow(row: NewMessage): NewMessage;
 function normalizeMessageRow(row: NewMessage & { is_from_me?: number }): NewMessage & { is_from_me?: boolean } {
-  const { is_from_me, content, ...rest } = row;
+  const { is_from_me, content, autonomous, ...rest } = row;
   const out: NewMessage & { is_from_me?: boolean } = {
     ...rest,
     content: toUtf8String(content),
   };
   if (typeof is_from_me === 'number') {
     out.is_from_me = is_from_me === 1;
+  }
+  // autonomous column is INTEGER (0/1). Normalize to boolean for downstream
+  // consumers (HTTP /api/messages response, WebSocket new_message push).
+  if (typeof autonomous === 'number') {
+    out.autonomous = autonomous === 1;
   }
   return out;
 }
@@ -5730,7 +5735,7 @@ export function getMessagesPage(
   const sql = before
     ? `
       SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
       ORDER BY timestamp DESC
@@ -5738,7 +5743,7 @@ export function getMessagesPage(
     `
     : `
       SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
       FROM messages
       WHERE chat_jid = ?
       ORDER BY timestamp DESC
@@ -5765,7 +5770,7 @@ export function getMessagesAfter(
   const rows = db
     .prepare(
       `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
@@ -5790,13 +5795,13 @@ export function getMessagesPageMulti(
   const placeholders = chatJids.map(() => '?').join(',');
   const sql = before
     ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
     : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
@@ -5825,7 +5830,7 @@ export function getMessagesAfterMulti(
   const rows = db
     .prepare(
       `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
-              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, autonomous
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
        ORDER BY timestamp ASC
