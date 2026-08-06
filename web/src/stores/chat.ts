@@ -31,6 +31,10 @@ export interface Message {
   sdk_message_uuid?: string | null;
   source_kind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'legacy' | null;
   finalization_reason?: 'completed' | 'interrupted' | 'error' | null;
+  /** Per-message autonomous flag. Backend stores 0/1 in DB; normalized to
+   *  boolean by normalizeMessageRow. True when the user sent this message via
+   *  the 全托管 button (per-message override). */
+  autonomous?: boolean | null;
 }
 
 // Streaming event types (canonical source: shared/stream-event.ts)

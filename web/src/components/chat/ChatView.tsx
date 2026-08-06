@@ -32,6 +32,7 @@ import { SloganRotator, isDefaultHomeName } from './SloganRotator';
 import { LoopModeSwitcher, LoopForm, type LoopMode } from './LoopModeSwitcher';
 import { SupervisorToggle } from './SupervisorToggle';
 import { AutonomousToggle } from './AutonomousToggle';
+import { AutonomousBanner } from './AutonomousBanner';
 import { AutonomousStopButton } from './AutonomousStopButton';
 import { EngineSwitcher } from './EngineSwitcher';
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
@@ -639,6 +640,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           </button>
         </div>
       </div>
+
+      {/* Autonomous-mode persistent banner — visible on all breakpoints when enabled */}
+      <AutonomousBanner chatJid={groupJid} />
 
       {/* IM channel setup banner for home container without IM */}
       {isOwnHome && imStatus && !Object.values(imStatus).some(Boolean) && !imBannerDismissed && (

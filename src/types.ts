@@ -195,10 +195,11 @@ export interface NewMessage {
   source_kind?: MessageSourceKind | null;
   finalization_reason?: MessageFinalizationReason | null;
   task_id?: string | null;
-  /** Per-message autonomous flag set via Web "全托管" button. 0 = off, 1 = on.
-   *  At cold-start, this overrides the per-group config to enable autonomous
-   *  mode for the run triggered by this message. */
-  autonomous?: number | null;
+  /** Per-message autonomous flag set via Web "全托管" button. True = run this
+   *  message in autonomous mode (no Supervisor clarify, agent does not stop
+   *  mid-task to ask, hard brakes enforced). Stored as INTEGER 0/1 in SQLite;
+   *  normalized to boolean by normalizeMessageRow for HTTP / WS consumers. */
+  autonomous?: boolean | null;
 }
 
 export type MessageSourceKind =
