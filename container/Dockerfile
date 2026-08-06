@@ -7,7 +7,18 @@ FROM node:22-slim
 # NOTE: Keep this layer BEFORE `COPY --from=ghcr.io/astral-sh/uv:latest` so that
 # uv:latest digest churn (frequent releases) does not invalidate this ~440MB layer.
 # See issue #403.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# APT_MIRROR: container build can't read host apt config, China networks time
+# out on deb.debian.org. Default to Tsinghua mirror; override with
+# `--build-arg APT_MIRROR=` (empty) for direct connection, or another mirror.
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     # --- Browser & fonts ---
     chromium \
     fonts-liberation \
@@ -78,7 +89,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     redis-tools \
     # --- Locale ---
     locales \
-    && rm -rf /var/lib/apt/lists/* \
+    # cache mounts above stay out of the image layer; lists get reused across
+    # rebuilds. apt-get clean releases the .deb refs but the cache persists.
+    && apt-get clean \
     # Set up UTF-8 locale
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     # Symlink fd-find → fd (Debian names it fdfind)
