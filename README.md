@@ -44,6 +44,7 @@ DeepThink, an Open Source Enterprise-grade Autonomous Agent self-evolving superi
 
 - **Native Claude Code Powered** — Built on the Claude Agent SDK, with the full Claude Code CLI runtime underneath, inheriting all of its capabilities
 - **Harness & Loop Engineering** — Versioned harness manifests (system prompt / subagents / tools / skills) with snapshot / diff / eval / promote / rollback, plus long-running autonomous task loops with per-iteration review and failure re-injection
+- **Autonomy Layer & Autonomous Mode** *(v1.1.0)* — A cross-cutting Autonomy Layer unifies the 7 capabilities (perception / cognition / decision / execution / learning / adaptation / monitoring) with metrics collection + E2E acceptance; plus a full Autonomous Mode that lets the Agent complete a task end-to-end without human hand-holding, covering three defense layers (CLAUDE.md constitutional override / Supervisor clarify bypass / RLHF end-turn politeness) and four hard brakes (destructive commands / turn limit / token limit / loop detection)
 - **Agent-as-a-Service (PaaS)** — Create, version, mount, share, and install DB-backed Agent definitions across tenants, with per-user quotas, admin review, and a publishable template marketplace
 - **Multi-User Isolation** — Per-user workspaces, per-user IM channels, an RBAC permission system, invite-code registration, and audit logs; every user has an independent execution environment
 - **Eight-Channel Unified Routing** — Feishu (streaming cards + Reactions), Telegram Bot API, QQ Bot API v2, DingTalk Stream, WeChat iLink, Discord Gateway, WhatsApp (Baileys), and the Web interface — all routed uniformly
@@ -126,6 +127,37 @@ Administrators can snapshot, diff, eval, promote, and roll back the model's **ha
 ### Loop Engineering
 
 Long-running autonomous task loops that keep working after you walk away. Six loop modes are supported — `goal`, `loop`, `schedule`, `proactive`, `adaptive`, and `skill_evolution`. Each iteration is reviewed by the SDK and failure reasons are re-injected into the next iteration, closing the self-improvement loop. Loops are driven by slash commands and surface live `loop_start` / `loop_iteration_start` / `loop_iteration_end` / `loop_goal_check` / `loop_review_result` / `loop_end` stream events.
+
+
+### Autonomy Layer & Autonomous Mode *(v1.1.0)*
+
+A two-piece upgrade that takes DeepThink from "tool-user-driven Loop Engineering" to "fully self-contained autonomous Agent system."
+
+**Autonomy Layer** — A cross-cutting layer that unifies the 7 capabilities (perception / cognition / decision / execution / learning / adaptation / monitoring) into a measurable, verifiable, closed-loop system. Built on top of the existing self-evolving / loop / supervisor / super-agent / graph modules, it adds an event bus, capability registry, metrics collection (8 indicator dimensions), and a Playwright E2E acceptance suite.
+
+- **Capability registry** — `GET /api/autonomy/capabilities` returns the 7 canonical capabilities in canonical order
+- **Metrics collection** — Per-capability indicators (proactivity_ratio / decision_independence / execution success / learning latency / adaptation_speed / prediction accuracy / self-heal rate) flow through an event bus into the metrics table, aggregated via `aggregateMetric`, exposed at `GET /api/autonomy/metrics`
+- **Signal → adaptation loop** — `POST /api/autonomy/signals` + `POST /api/autonomy/signals/process` drives signals through to applied adaptations, with `adaptation_speed_ms` collected
+- **Learning loop** — `graph_run` results sediment into lessons; `GET /api/autonomy/lessons` retrieves them for re-injection
+- **Self-heal & prediction** — Consecutive errors trigger `monitoring.predicted` + `self_healed` events; the dashboard surfaces health, signals, and lessons
+- **Schema migration** — SCHEMA_VERSION 53 → 54 (4 tables, idempotent `IF NOT EXISTS`)
+
+> The 7-capability collection closed-loop is fully wired (signal → event → metrics table → aggregateMetric → API → E2E assertion). Reaching the headline targets (≥95% proactivity, ≥90% success, etc.) depends on accumulating real-world traffic — the skeleton is ready, the bar is quantified.
+
+**Autonomous Mode** — A per-group continuous-push switch: once the Agent enters a task, it completes it end-to-end with no human hand-holding. Three defense layers cover the natural friction points, and four hard brakes keep autonomy safe.
+
+- **Defense layer 1 — CLAUDE.md constitutional override** — Injects an `Autonomous Override` section into the agent-runner with 6 rules: no asking the user, disable `AskUserQuestion`, fill in `<assumption>`, loop detection, hard brakes, and what to do when the task cannot be completed
+- **Defense layer 2 — Supervisor clarify bypass** — `supervisor.ts parseDecision` downgrades `clarify` → `delegate` when autonomous is on, drops the question (`reason='autonomous_downgrade'`); any explicit `instruction` is preserved
+- **Defense layer 3 — RLHF end-turn politeness** — The agent-runner main loop detects end-turn asking behavior (strong signal: `AskUserQuestion` tool call; weak signal: `ASKING_PATTERNS`) and auto-continues without breaking
+- **Hard brake 1 — Destructive-command detection** — 14 positive patterns (`rm -rf /`, `git push --force`, `git reset --hard`, `DROP TABLE/DATABASE`, `TRUNCATE`, `DELETE FROM` without `WHERE`, `mkfs.*`, `dd to /dev/`, fork bomb, …) with 10 negative patterns to avoid false positives (`rm -rf ./build`, `git push --force-with-lease`, guarded `DELETE … WHERE`)
+- **Hard brake 2 — Turn limit** — Forced stop after max turns
+- **Hard brake 3 — Token limit** — Forced stop after token budget
+- **Hard brake 4 — Loop detection** — Sliding window of the last 3 identical turns (hash of first 5000 chars, deterministic) triggers an abort
+- **Per-group config + per-message override** (`true` / `false` / `null`); `messages.autonomous` and `scheduled_tasks.autonomous` columns persist the flag
+- **APIs** — `GET / PUT /api/config/autonomous`, `GET /api/config/autonomous/all`
+- **UI** — `AutonomousToggle` switch, `AutonomousStopButton` hard-brake button, `CreateTaskForm` checkbox, 4 new StreamEvents (`autonomous_started` / `autonomous_continued` / `autonomous_aborted` / `autonomous_brake`), persistent banner + rocket-emoji badge so the "Agent is fully self-driving" state stays visible throughout long tasks
+
+> Verified: Autonomy 31 unit tests + 18 E2E, Autonomous Mode 49 unit tests + 20 E2E (14 mode + 6 brake), zero new regressions across the 1325-test baseline. See `docs/test_report/autonomy-system/REPORT.md` and `docs/test_report/feat-autonomous-mode/TEST_REPORT.md`.
 
 
 ### Agent-as-a-Service (PaaS)
@@ -650,6 +682,7 @@ flowchart TD
 | **Engines** | Claude Code · AtomCode · Codex · OpenCode (pluggable, daemon-managed) |
 | **PaaS** | DB-backed Agent definitions · template marketplace · per-user quotas · admin review |
 | **Harness / Loop** | Versioned harness manifests · autonomous task loops · per-iteration SDK review |
+| **Autonomy** | Autonomy Layer (event bus + capability registry + 7-capability metrics) · Autonomous Mode (3 defense layers + 4 hard brakes) · Playwright E2E acceptance |
 | **Sandbox** | Docker + seccomp + cgroups · Chromium CDP browser automation |
 | **Container** | Docker (node:22-slim) · Chromium · agent-browser · Python · Go · 40+ preinstalled tools |
 | **Security** | bcrypt (12 rounds) · AES-256-GCM · HMAC Cookie · RBAC · path-traversal protection · mount whitelist · cross-group ACL |
