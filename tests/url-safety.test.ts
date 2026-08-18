@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   isPrivateHostname,
   validateSafeHttpsUrl,
+  validateSafeHttpsUrlWithDns,
 } from '../src/url-safety.js';
 
 describe('isPrivateHostname', () => {
@@ -23,6 +24,24 @@ describe('isPrivateHostname', () => {
       ['8.8.8.8', false, 'Google DNS'],
       ['1.1.1.1', false, 'Cloudflare DNS'],
       ['203.0.113.1', false, 'TEST-NET (not actually private but routable)'],
+      // --- 100.64.0.0/10 CGNAT（本次补齐，之前全部放行） ---
+      ['100.100.100.200', true, '阿里云 ECS 元数据服务'],
+      ['100.100.2.136', true, '阿里云内网 DNS'],
+      ['100.64.0.1', true, 'CGNAT 下边界'],
+      ['100.127.255.254', true, 'CGNAT 上边界'],
+      ['100.63.255.254', false, 'just below 100.64/10'],
+      ['100.128.0.1', false, 'just above 100.127'],
+      // --- 其余保留段（本次补齐） ---
+      ['192.0.0.8', true, '192.0.0.0/24 IETF 协议专用'],
+      ['192.0.1.1', false, 'just outside 192.0.0.0/24'],
+      ['198.18.0.1', true, '198.18.0.0/15 基准测试'],
+      ['198.19.255.254', true, '198.18/15 上边界'],
+      ['198.20.0.1', false, 'just above 198.18/15'],
+      ['224.0.0.1', true, '组播下边界'],
+      ['239.255.255.255', true, '组播上边界'],
+      ['240.0.0.1', true, '保留段'],
+      ['255.255.255.255', true, '广播地址'],
+      ['223.255.255.254', false, 'just below 224/4，仍是公网'],
     ])('%s → %s (%s)', (host, expected) => {
       expect(isPrivateHostname(host)).toBe(expected);
     });
@@ -58,6 +77,8 @@ describe('isPrivateHostname', () => {
       ['::ffff:a9fe:a9fe', true, 'IPv4-mapped hex form, AWS metadata 169.254.169.254 (R3 fix)'],
       ['::ffff:0a00:1', true, 'IPv4-mapped hex form, 10.0.0.1 (R3 fix)'],
       ['::ffff:c0a8:1', true, 'IPv4-mapped hex form, 192.168.0.1'],
+      ['::ffff:100.100.100.200', true, 'IPv4-mapped 阿里云元数据（本次补齐）'],
+      ['::ffff:6464:64c8', true, 'IPv4-mapped hex 形式的 100.100.100.200'],
       ['::ffff:8.8.8.8', false, 'IPv4-mapped public IP'],
       ['::ffff:0808:808', false, 'IPv4-mapped hex form, 8.8.8.8 public'],
       // 6to4 (2002:abcd:efgh::/16): second + third hextets encode IPv4
@@ -149,5 +170,102 @@ describe('validateSafeHttpsUrl', () => {
   test('accepts public HTTPS URLs', () => {
     expect(validateSafeHttpsUrl('https://github.com/owner/repo.git')).toBeNull();
     expect(validateSafeHttpsUrl('https://npm.example.com/pkg.tgz')).toBeNull();
+  });
+});
+
+describe('validateSafeHttpsUrlWithDns', () => {
+  const lookupTo =
+    (...addrs: string[]) =>
+    async () =>
+      addrs;
+
+  test('字面量公网 IP 直接放行，不发起 DNS 解析', async () => {
+    let called = false;
+    const reason = await validateSafeHttpsUrlWithDns('https://8.8.8.8/x', {
+      lookup: async () => {
+        called = true;
+        return [];
+      },
+    });
+    expect(reason).toBeNull();
+    expect(called).toBe(false);
+  });
+
+  test('字面量内网 IP 仍被字面量校验拦下', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://169.254.169.254/', {
+      lookup: lookupTo('8.8.8.8'),
+    });
+    expect(reason).toMatch(/private/);
+  });
+
+  test('域名解析到 AWS/GCP 元数据 → 拒绝（核心修复）', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/pkg.tgz', {
+      lookup: lookupTo('169.254.169.254'),
+    });
+    expect(reason).toMatch(/resolves to a private\/internal address/);
+    expect(reason).toContain('169.254.169.254');
+  });
+
+  test('域名解析到阿里云元数据 100.100.100.200 → 拒绝', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/pkg.tgz', {
+      lookup: lookupTo('100.100.100.200'),
+    });
+    expect(reason).toMatch(/resolves to a private\/internal address/);
+  });
+
+  test('多条 A 记录中只要有一条是内网就拒绝（防混合应答绕过）', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/', {
+      lookup: lookupTo('93.184.216.34', '10.0.0.5'),
+    });
+    expect(reason).toMatch(/10\.0\.0\.5/);
+  });
+
+  test('AAAA 记录指向 ULA → 拒绝', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/', {
+      lookup: lookupTo('fd00::1'),
+    });
+    expect(reason).toMatch(/fd00::1/);
+  });
+
+  test('全部解析到公网地址 → 放行', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://github.com/o/r.git', {
+      lookup: lookupTo('140.82.121.4', '2606:50c0:8000::153'),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test('DNS 解析失败 → fail-closed 拒绝', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://nx.example.com/', {
+      lookup: async () => {
+        throw new Error('ENOTFOUND');
+      },
+    });
+    expect(reason).toMatch(/DNS resolution failed/);
+  });
+
+  test('DNS 返回空记录 → fail-closed 拒绝', async () => {
+    const reason = await validateSafeHttpsUrlWithDns('https://empty.example.com/', {
+      lookup: lookupTo(),
+    });
+    expect(reason).toMatch(/no records/);
+  });
+
+  test('trailing-dot FQDN 在解析前被剥掉', async () => {
+    let seen = '';
+    await validateSafeHttpsUrlWithDns('https://example.com./', {
+      lookup: async (h) => {
+        seen = h;
+        return ['93.184.216.34'];
+      },
+    });
+    expect(seen).toBe('example.com');
+  });
+
+  test('沿用字面量校验的协议/长度规则', async () => {
+    expect(
+      await validateSafeHttpsUrlWithDns('http://example.com/', {
+        lookup: lookupTo('93.184.216.34'),
+      }),
+    ).toMatch(/HTTPS/);
   });
 });

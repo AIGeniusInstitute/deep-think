@@ -89,7 +89,10 @@ const execFileAsync = promisify(execFile);
  *
  * Re-export 自 ../url-safety.ts 以兼容已有调用方；新代码应直接 import 那里的版本。
  */
-import { isPrivateHostname } from '../url-safety.js';
+import {
+  isPrivateHostname,
+  validateSafeHttpsUrlWithDns,
+} from '../url-safety.js';
 export { isPrivateHostname };
 
 const groupRoutes = new Hono<{ Variables: Variables }>();
@@ -526,10 +529,15 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       return c.json({ error: 'init_git_url must use https protocol' }, 400);
     }
 
-    // 阻止内网地址
-    if (isPrivateHostname(gitUrl.hostname)) {
+    // 阻止内网地址。字面量 IP 与 hostname 的 DNS 解析结果都要判 ——
+    // 只判字面量的话，A 记录指向 169.254.169.254 / 100.100.100.200 的域名
+    // 可以直接绕过（详见 docs/issues/2026-08-18-ssrf-cgnat-and-dns-bypass.md）。
+    const ssrfReason = await validateSafeHttpsUrlWithDns(initGitUrl);
+    if (ssrfReason) {
       return c.json(
-        { error: 'init_git_url must not point to a private/internal address' },
+        {
+          error: `init_git_url must not point to a private/internal address: ${ssrfReason}`,
+        },
         400,
       );
     }

@@ -4,6 +4,7 @@
 // 或 cloud-metadata 的场景下复用，避免每个调用点各自实现一份正则。
 
 import net from 'net';
+import dns from 'dns';
 
 function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split('.').map(Number);
@@ -17,16 +18,34 @@ function isPrivateIPv4(ip: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true;
   // 192.168.0.0/16
   if (a === 192 && b === 168) return true;
-  // 169.254.0.0/16 (link-local — covers AWS/GCP cloud-metadata 169.254.169.254)
+  // 169.254.0.0/16 (link-local — covers AWS/GCP/Azure/华为云 cloud-metadata
+  // 169.254.169.254 与腾讯云 169.254.0.23)
   if (a === 169 && b === 254) return true;
   // 0.0.0.0
   if (a === 0) return true;
+  // 100.64.0.0/10 (RFC 6598 CGNAT)。这一段看上去像公网地址，但它是
+  // 运营商 / 云厂商的内部共享地址段，且阿里云 ECS 把元数据服务
+  // 放在 100.100.100.200、内网 DNS 放在 100.100.2.136/138。不封这段
+  // 等于在阿里云上完全不防 metadata SSRF。
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  // 192.0.0.0/24 (RFC 6890 IETF 协议专用，含 192.0.0.8 dummy address)
+  if (a === 192 && b === 0 && parts[2] === 0) return true;
+  // 198.18.0.0/15 (RFC 2544 基准测试专用)
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  // 224.0.0.0/4 组播 + 240.0.0.0/4 保留（含 255.255.255.255 广播）
+  if (a >= 224) return true;
   return false;
 }
 
 /**
- * 检查 hostname 是否为内网地址（SSRF 防护）。
- * 拒绝 127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00::/7, fe80:: 等。
+ * 检查 hostname 是否为内网 / 非公网可路由地址（SSRF 防护）。
+ * 拒绝 127.x、10.x、172.16-31.x、192.168.x、169.254.x、100.64-127.x (CGNAT)、
+ * 192.0.0.x、198.18-19.x、224.x 以上（组播 + 保留 + 广播）、
+ * ::1、fc00::/7、fe80::/10 等。
+ *
+ * 注意：本函数只做**字面量**判定。传入域名时永远返回 false —— 域名的
+ * A/AAAA 记录可以指向内网。需要覆盖这条路径请用
+ * `validateSafeHttpsUrlWithDns()`。
  */
 export function isPrivateHostname(hostname: string): boolean {
   if (!hostname) return true;
@@ -117,6 +136,75 @@ export function validateSafeHttpsUrl(
   }
   if (isPrivateHostname(parsed.hostname)) {
     return `Hostname not allowed (private/link-local): ${parsed.hostname}`;
+  }
+  return null;
+}
+
+/**
+ * DNS 解析函数签名，返回该 hostname 的全部 A / AAAA 地址。抽成参数是为了
+ * 让单测不依赖真实网络。
+ */
+export type DnsLookupFn = (hostname: string) => Promise<string[]>;
+
+const defaultLookup: DnsLookupFn = async (hostname) => {
+  const records = await dns.promises.lookup(hostname, {
+    all: true,
+    verbatim: true,
+  });
+  return records.map((r) => r.address);
+};
+
+/**
+ * 安全 URL 校验（含 DNS 解析）：在 `validateSafeHttpsUrl` 的字面量校验之上，
+ * 再把 hostname 解析成 IP 并逐条判定，堵住"域名 A 记录指向内网"这条绕过路径
+ * （例如攻击者把 evil.example.com 解析到 169.254.169.254 / 100.100.100.200）。
+ *
+ * 返回 null = 通过；返回 string = 拒绝原因。
+ *
+ * 两点必须说清楚，避免过度承诺：
+ *
+ *  1. **fail-closed**：DNS 解析失败 / 无记录一律拒绝。无法证明目标是公网，
+ *     就不放行。若部署在只有 HTTP(S)_PROXY 出网、本机无 DNS 的环境里，
+ *     这里会拒绝，需要给容器配可用的 resolver。
+ *  2. **不能根治 DNS rebinding**：真正发起请求的是下游的 `npx` / `git`，
+ *     它们会各自重新解析一次域名（TOCTOU）。本校验把攻击面从"填个域名就行"
+ *     收窄到"必须在校验与取用之间精确翻转 DNS 应答"，是纵深防御的一层，
+ *     不是唯一一层。彻底封堵需要在出站连接层面（socket 级 IP 校验 / 出网
+ *     代理白名单）处理。
+ */
+export async function validateSafeHttpsUrlWithDns(
+  raw: string,
+  opts?: {
+    maxLength?: number;
+    allowHttp?: boolean;
+    /** 注入用（单测）。默认走 dns.promises.lookup。 */
+    lookup?: DnsLookupFn;
+  },
+): Promise<string | null> {
+  const lexical = validateSafeHttpsUrl(raw, opts);
+  if (lexical) return lexical;
+
+  // validateSafeHttpsUrl 已经保证这里可以解析成功
+  const hostname = new URL(raw).hostname
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+
+  // 字面量 IP 已由 validateSafeHttpsUrl 判过，无需再解析一次
+  if (net.isIP(hostname)) return null;
+
+  let addresses: string[];
+  try {
+    addresses = await (opts?.lookup ?? defaultLookup)(hostname);
+  } catch {
+    return `DNS resolution failed for ${hostname}`;
+  }
+  if (addresses.length === 0) {
+    return `DNS resolution returned no records for ${hostname}`;
+  }
+  for (const addr of addresses) {
+    if (isPrivateHostname(addr)) {
+      return `Hostname resolves to a private/internal address (${hostname} -> ${addr})`;
+    }
   }
   return null;
 }
