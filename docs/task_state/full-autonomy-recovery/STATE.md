@@ -32,3 +32,13 @@
   - 全量单测 266/266 通过（零回归，better-sqlite3 原生绑定已重编译）
   - agent-runner + web 类型检查通过
 - 2026-08-19 进入 P1（知识缺口消解 + 经验回注）。
+
+## P1（知识缺口消解 + 经验回注）— 完成
+- [x] F3 新增 `container/agent-runner/src/gap-resolver.ts`（规则分类 knowledge/tool/decision + 自消解指令）
+- [x] F3 index.ts askedUser 块：优先用 gap 消解 prompt，decision 回退 <assumption>
+- [x] F4 新增 `src/autonomy/lesson-injection.ts` 共享 helper（reinjectLessonsIntoPrompt）
+- [x] F4 team-builder.decompose + loop-orchestrator.runOneIteration 首轮注入 lessons
+- [x] 单测：gap-classifier 11/11 + lessons-reinjection 3/3
+- [x] 全量 277/277 零回归；agent-runner + 后端类型检查通过
+
+## P2（适应闭环 + gate 续跑 + 归档）— 进行中

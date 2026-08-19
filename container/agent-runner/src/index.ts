@@ -48,6 +48,7 @@ import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 import { traceAllocator, type TraceNodeDescriptor } from './trace-node-allocator.js';
 import { RecoveryState, type BrakeType, type RecoveryResult } from './autonomy-recovery.js';
+import { classifyGap, buildGapResolutionPrompt } from './gap-resolver.js';
 
 // traceAllocator is a module-level singleton (see trace-node-allocator.ts):
 // nodeIds are monotonic across queries within the agent-runner process
@@ -3228,7 +3229,13 @@ async function main(): Promise<void> {
               },
             },
           });
-          const autoContinuePrompt = [
+          // F3: classify the asking gap; for knowledge/tool gaps, inject a
+          // self-resolution directive (use web_search / install_skill instead
+          // of asking). For decision gaps, fall back to the <assumption>
+          // override below.
+          const gapKind = classifyGap(turnText);
+          const gapPrompt = buildGapResolutionPrompt(gapKind, turnText);
+          const autoContinuePrompt = gapPrompt ?? [
             '【系统提示：全托管模式】',
             '你刚才的输出包含向用户提问的迹象，这违反了 <autonomous-mode> 规则 1（禁止向用户提问）。',
             '无需等待用户回复，请按你的最佳判断继续推进任务目标：',
