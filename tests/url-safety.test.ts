@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'vitest';
 import {
+  assertResolvesToPublicAddress,
   isPrivateHostname,
+  resolvePublicAddresses,
   validateSafeHttpsUrl,
-  validateSafeHttpsUrlWithDns,
 } from '../src/url-safety.js';
 
 describe('isPrivateHostname', () => {
@@ -173,99 +174,114 @@ describe('validateSafeHttpsUrl', () => {
   });
 });
 
-describe('validateSafeHttpsUrlWithDns', () => {
+// 上游 happyclaw 的 resolvePublicAddresses / assertResolvesToPublicAddress
+// 目前没有任何测试覆盖，这一节是本 fork 补的。
+describe('resolvePublicAddresses', () => {
   const lookupTo =
     (...addrs: string[]) =>
     async () =>
-      addrs;
+      addrs.map((address) => ({
+        address,
+        family: address.includes(':') ? (6 as const) : (4 as const),
+      }));
 
-  test('字面量公网 IP 直接放行，不发起 DNS 解析', async () => {
-    let called = false;
-    const reason = await validateSafeHttpsUrlWithDns('https://8.8.8.8/x', {
-      lookup: async () => {
-        called = true;
-        return [];
-      },
-    });
-    expect(reason).toBeNull();
-    expect(called).toBe(false);
+  test('全部解析到公网地址 → 返回可直连的地址列表', async () => {
+    const addrs = await resolvePublicAddresses(
+      'github.com',
+      'Test',
+      lookupTo('140.82.121.4', '2606:50c0:8000::153'),
+    );
+    expect(addrs).toEqual([
+      { address: '140.82.121.4', family: 4 },
+      { address: '2606:50c0:8000::153', family: 6 },
+    ]);
   });
 
-  test('字面量内网 IP 仍被字面量校验拦下', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://169.254.169.254/', {
-      lookup: lookupTo('8.8.8.8'),
-    });
-    expect(reason).toMatch(/private/);
+  test('解析到 AWS/GCP 元数据 → 抛异常（核心修复）', async () => {
+    await expect(
+      resolvePublicAddresses(
+        'evil.example.com',
+        'Skill URL hostname',
+        lookupTo('169.254.169.254'),
+      ),
+    ).rejects.toThrow(/resolves to a private or link-local address/);
   });
 
-  test('域名解析到 AWS/GCP 元数据 → 拒绝（核心修复）', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/pkg.tgz', {
-      lookup: lookupTo('169.254.169.254'),
-    });
-    expect(reason).toMatch(/resolves to a private\/internal address/);
-    expect(reason).toContain('169.254.169.254');
+  test('解析到阿里云元数据 100.100.100.200 → 抛异常', async () => {
+    await expect(
+      resolvePublicAddresses('evil.example.com', 'Test', lookupTo('100.100.100.200')),
+    ).rejects.toThrow(/private or link-local/);
   });
 
-  test('域名解析到阿里云元数据 100.100.100.200 → 拒绝', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/pkg.tgz', {
-      lookup: lookupTo('100.100.100.200'),
-    });
-    expect(reason).toMatch(/resolves to a private\/internal address/);
+  test('多条 A 记录中只要有一条内网就抛（防混合应答绕过）', async () => {
+    await expect(
+      resolvePublicAddresses('evil.example.com', 'Test', lookupTo('93.184.216.34', '10.0.0.5')),
+    ).rejects.toThrow(/private or link-local/);
   });
 
-  test('多条 A 记录中只要有一条是内网就拒绝（防混合应答绕过）', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/', {
-      lookup: lookupTo('93.184.216.34', '10.0.0.5'),
-    });
-    expect(reason).toMatch(/10\.0\.0\.5/);
+  test('AAAA 指向 ULA → 抛异常', async () => {
+    await expect(
+      resolvePublicAddresses('evil.example.com', 'Test', lookupTo('fd00::1')),
+    ).rejects.toThrow(/private or link-local/);
   });
 
-  test('AAAA 记录指向 ULA → 拒绝', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://evil.example.com/', {
-      lookup: lookupTo('fd00::1'),
-    });
-    expect(reason).toMatch(/fd00::1/);
-  });
-
-  test('全部解析到公网地址 → 放行', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://github.com/o/r.git', {
-      lookup: lookupTo('140.82.121.4', '2606:50c0:8000::153'),
-    });
-    expect(reason).toBeNull();
-  });
-
-  test('DNS 解析失败 → fail-closed 拒绝', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://nx.example.com/', {
-      lookup: async () => {
+  test('DNS 解析失败 → fail-closed，抛 could not be resolved', async () => {
+    await expect(
+      resolvePublicAddresses('nx.example.com', 'Test', async () => {
         throw new Error('ENOTFOUND');
-      },
-    });
-    expect(reason).toMatch(/DNS resolution failed/);
+      }),
+    ).rejects.toThrow(/could not be resolved/);
   });
 
-  test('DNS 返回空记录 → fail-closed 拒绝', async () => {
-    const reason = await validateSafeHttpsUrlWithDns('https://empty.example.com/', {
-      lookup: lookupTo(),
-    });
-    expect(reason).toMatch(/no records/);
+  test('DNS 返回空记录 → fail-closed', async () => {
+    await expect(
+      resolvePublicAddresses('empty.example.com', 'Test', lookupTo()),
+    ).rejects.toThrow(/private or link-local/);
+  });
+
+  test('label 出现在错误信息里，便于定位是哪个入口被拒', async () => {
+    await expect(
+      resolvePublicAddresses('evil.example.com', 'init_git_url hostname', lookupTo('10.0.0.1')),
+    ).rejects.toThrow(/^init_git_url hostname/);
+  });
+
+  test('IPv6 字面量的方括号在解析前被剥掉', async () => {
+    let seen = '';
+    await resolvePublicAddresses(
+      '[2606:4700:4700::1111]',
+      'Test',
+      async (h) => {
+        seen = h;
+        return [{ address: '2606:4700:4700::1111', family: 6 as const }];
+      },
+    );
+    expect(seen).toBe('2606:4700:4700::1111');
   });
 
   test('trailing-dot FQDN 在解析前被剥掉', async () => {
     let seen = '';
-    await validateSafeHttpsUrlWithDns('https://example.com./', {
-      lookup: async (h) => {
-        seen = h;
-        return ['93.184.216.34'];
-      },
+    await resolvePublicAddresses('example.com.', 'Test', async (h) => {
+      seen = h;
+      return [{ address: '93.184.216.34', family: 4 as const }];
     });
     expect(seen).toBe('example.com');
   });
+});
 
-  test('沿用字面量校验的协议/长度规则', async () => {
-    expect(
-      await validateSafeHttpsUrlWithDns('http://example.com/', {
-        lookup: lookupTo('93.184.216.34'),
-      }),
-    ).toMatch(/HTTPS/);
+describe('assertResolvesToPublicAddress', () => {
+  test('公网地址通过，不抛', async () => {
+    await expect(
+      assertResolvesToPublicAddress('example.com', 'Test', async () => [
+        { address: '93.184.216.34', family: 4 as const },
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
+  test('内网地址抛异常', async () => {
+    await expect(
+      assertResolvesToPublicAddress('evil.example.com', 'Test', async () => [
+        { address: '100.100.100.200', family: 4 as const },
+      ]),
+    ).rejects.toThrow(/private or link-local/);
   });
 });

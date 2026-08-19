@@ -37,6 +37,24 @@
 
 考虑到 DeepThink 定位是「企业级 SaaS、多租户隔离、权限分级」，一个 `member_basic` 模板的普通成员能读到宿主机的云厂商临时凭证，等于整个租户隔离模型被绕过。
 
+### 2.1 上游 happyclaw 同样受影响
+
+DeepThink 是 [happyclaw](https://github.com/riba2534/happyclaw) 的 fork（2026-07-13 squash 分叉）。对上游代码实测：
+
+```
+=== happyclaw validateSafeHttpsUrl 结果 ===
+  放行 ← 可达      100.100.100.200    阿里云 ECS 元数据
+  放行 ← 可达      100.100.2.136      阿里云内网 DNS
+  放行 ← 可达      198.18.0.1         RFC2544
+  放行 ← 可达      192.0.0.8          IETF 专用
+  放行 ← 可达      255.255.255.255    广播
+  拦截            169.254.169.254    AWS/GCP 元数据（对照）
+```
+
+**缺口一（CGNAT）在上游同样存在**，且上游 `src/routes/skills.ts:1299` 的 skill 安装路径也只做了字面量校验、没有接 DNS 检查——三个 sink 保护了两个，漏了这一个。建议同步向上游提交。
+
+**缺口二（DNS）上游已经解决，而且比本 fork 原方案更完整**：上游有 `assertResolvesToPublicAddress()` / `resolvePublicAddresses()`，后者返回已校验的确切 IP 列表，配合 `src/safe-git-proxy.ts` 在连接期把 socket 钉到该 IP，真正收口了 DNS rebinding 的 TOCTOU 窗口。本次修复因此**不再自造轮子**，改为直接对齐上游 API（见 §6.2）。
+
 ## 3. 根因
 
 ### 3.1 CGNAT 段缺失
@@ -114,7 +132,7 @@ curl -s -X POST 'https://<deepthink-host>/api/skills/install' \
 npx vitest run tests/url-safety.test.ts
 ```
 
-在修复前的代码上，本 PR 新增的 CGNAT 与 DNS 用例全部失败；修复后 89 条全绿。
+在修复前的代码上，本 PR 新增的 CGNAT 与 DNS 用例全部失败；修复后 90 条全绿。
 
 ## 5. 诊断方法
 
@@ -125,7 +143,7 @@ npx vitest run tests/url-safety.test.ts
 grep -n "100 && b >= 64" src/url-safety.ts
 
 # 2. 确认是否已有 DNS 解析校验（无输出 = 受影响）
-grep -n "validateSafeHttpsUrlWithDns" src/url-safety.ts
+grep -n "resolvePublicAddresses" src/url-safety.ts
 
 # 3. 排查历史是否已被利用：翻日志里的 skill 安装记录
 grep -rn "skills/install" logs/ | grep -iE "100\.(6[4-9]|[7-9][0-9]|1[0-2][0-7])\.|169\.254\."
@@ -155,60 +173,59 @@ grep -rn "skills/install" logs/ | grep -iE "100\.(6[4-9]|[7-9][0-9]|1[0-2][0-7])
    return false;
 ```
 
-选型理由：沿用现有 if 链，而不是改成 CIDR 表驱动。这个函数逻辑已被 89 条用例锁死，换实现方式会让 diff 从「加 4 行」变成「重写」，评审成本和回归风险都不划算。等未来真要支持可配置白名单时再一并重构。
+选型理由：沿用现有 if 链，而不是改成 CIDR 表驱动。这个函数逻辑已被 90 条用例锁死，换实现方式会让 diff 从「加 4 行」变成「重写」，评审成本和回归风险都不划算。等未来真要支持可配置白名单时再一并重构。
 
-### 6.2 新增 DNS 解析校验
+### 6.2 DNS 解析校验：对齐上游 API，不自造轮子
 
-新增 `validateSafeHttpsUrlWithDns()`，在字面量校验之后把 hostname 解析成 IP 逐条判定；DNS 函数通过 `opts.lookup` 注入，单测不依赖真实网络：
+初版曾自写一个 `validateSafeHttpsUrlWithDns()`（返回 reason 字符串）。在确认上游
+happyclaw 已有等价且更完整的实现后**已废弃该方案**，改为把上游 API 原样引入：
 
 ```ts
-export async function validateSafeHttpsUrlWithDns(
-  raw: string,
-  opts?: { maxLength?: number; allowHttp?: boolean; lookup?: DnsLookupFn },
-): Promise<string | null> {
-  const lexical = validateSafeHttpsUrl(raw, opts);
-  if (lexical) return lexical;
-  const hostname = new URL(raw).hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (net.isIP(hostname)) return null;   // 字面量已判过
-  let addresses: string[];
-  try {
-    addresses = await (opts?.lookup ?? defaultLookup)(hostname);
-  } catch {
-    return `DNS resolution failed for ${hostname}`;
-  }
-  if (addresses.length === 0) return `DNS resolution returned no records for ${hostname}`;
-  for (const addr of addresses) {
-    if (isPrivateHostname(addr)) {
-      return `Hostname resolves to a private/internal address (${hostname} -> ${addr})`;
-    }
-  }
-  return null;
-}
+export interface ResolvedPublicAddress { address: string; family: 4 | 6 }
+
+export async function resolvePublicAddresses(
+  hostname: string,
+  label = 'Hostname',
+  lookupFn: DnsLookupFn = defaultLookup,   // ← 相对上游唯一增量：可选注入，供单测用
+): Promise<ResolvedPublicAddress[]>
+
+export async function assertResolvesToPublicAddress(
+  hostname: string, label = 'Hostname', lookupFn?: DnsLookupFn,
+): Promise<void>
 ```
 
-保留同步版 `validateSafeHttpsUrl()` 不动 —— 它仍是纯函数、无 I/O，`isPrivateHostname()` 的其它调用方（含 `routes/groups.ts` 的 re-export）不受影响。
+选型理由：
 
-**两条必须明说的边界，不做过度承诺：**
+1. **函数名 / 签名 / 抛异常语义与上游完全一致**，DeepThink 后续同步 happyclaw 时这个文件不会冲突。自造的 `validateSafeHttpsUrlWithDns()` 反而会制造一处永久分歧。
+2. **`resolvePublicAddresses()` 返回确切 IP 列表**，是连接期把 socket 钉到已校验 IP 的前置原语。上游据此实现了 `safe-git-proxy.ts`，DeepThink 将来可以直接接入，而自造的「返回字符串」版本给不了这个能力。
+3. **抛异常而非返回字符串**：调用方漏判时直接中断后续网络请求，而不是静默放行。
 
-1. **fail-closed**：解析失败 / 无记录一律拒绝。无法证明目标是公网就不放行。副作用是「只有 HTTP(S)_PROXY 出网、本机无 resolver」的部署会被拒，需要给容器配可用 DNS —— 这是有意的取舍。
-2. **不能根治 DNS rebinding**：真正发请求的是下游 `npx` / `git`，它们各自会重新解析（TOCTOU）。本校验把攻击门槛从「填个域名」抬到「必须在校验与取用之间精确翻转 DNS 应答」，是纵深防御的一层，不是唯一一层。彻底封堵需要在出站连接层做 socket 级 IP 校验或出网代理白名单 —— 见 §8.6。
+唯一增量是可选的第三个参数 `lookupFn`。它可选、不改变上游任何调用点的签名，用于让单测不依赖真实网络——**上游这两个函数目前零测试覆盖**，本 PR 补了 12 条。
 
-### 6.3 三个调用点切到异步版本
+保留的边界（写进代码注释，不做过度承诺）：
 
-```diff
-- const reason = validateSafeHttpsUrl(pkg);
-+ const reason = await validateSafeHttpsUrlWithDns(pkg);
+- **fail-closed**：解析失败 / 无记录一律拒绝。副作用是「只有 `HTTP(S)_PROXY` 出网、本机无 resolver」的部署会被拒。
+- **本 PR 仍不能根治 DNS rebinding**：真正发请求的 `npx` / `git` 会各自重新解析（TOCTOU）。彻底收口需要上游 `safe-git-proxy.ts` 那种连接期钉 IP 的做法，建议后续单独移植。
+
+### 6.3 三个调用点改用上游的两段式写法
+
+```ts
+const reason = validateSafeHttpsUrl(pkg);          // 快速字面量校验，不依赖网络
+if (reason) return ...;
+try {
+  await assertResolvesToPublicAddress(new URL(pkg).hostname, 'Skill URL hostname');
+} catch (err) { return ...; }
 ```
 
-`routes/groups.ts` 的 `init_git_url` 原本直接调 `isPrivateHostname(gitUrl.hostname)`，一并换成 `validateSafeHttpsUrlWithDns(initGitUrl)`。三处 handler 本就是 `async`，无需改签名。
+先字面量后 DNS，与上游 `skill-import-service.ts` / `routes/groups.ts` 的调用顺序一致：字面内网 IP 不必等一次网络往返就能拒掉。三处 handler 本就是 `async`，无需改签名。
 
 ### 6.4 测试
 
-`tests/url-safety.test.ts` 从 62 条扩到 89 条：
+`tests/url-safety.test.ts` 从 62 条扩到 90 条：
 
 - IPv4 表补 16 条：CGNAT 上下边界（`100.64.0.1` / `100.127.255.254`）与紧邻的非命中值（`100.63.255.254` / `100.128.0.1`）、阿里云两个实际端点、`192.0.0.0/24`、`198.18.0.0/15`、组播 / 保留 / 广播，以及 `223.255.255.254` 确认 `224/4` 下边界没有误伤公网。
 - IPv4-mapped 表补 2 条：`::ffff:100.100.100.200` 与其 hex 形式 `::ffff:6464:64c8`。
-- 新增 `validateSafeHttpsUrlWithDns` describe 共 11 条：字面量公网 IP 不触发解析、多 A 记录中混入一条内网即拒、AAAA 指向 ULA、fail-closed 两种、trailing-dot 在解析前剥离、协议规则沿用。
+- 新增 `resolvePublicAddresses` / `assertResolvesToPublicAddress` 共 12 条：返回可直连地址列表、多 A 记录中混入一条内网即拒、AAAA 指向 ULA、阿里云元数据、fail-closed 两种、label 出现在错误信息中、IPv6 方括号与 trailing-dot 在解析前剥离。**这两个函数在上游零覆盖**，属净增。
 
 ## 7. 处理卡住的状态
 
@@ -268,4 +285,8 @@ console.log('OK: 全部云元数据端点已拦截');
 在出网侧（安全组 / iptables / 出网代理）对 `169.254.0.0/16` 与 `100.64.0.0/10` 加一条 deny + log 规则。应用层校验是第一道闸，网络层拒绝是最后一道 —— 后者不会因为下一次有人漏了某个网段而失效，同时还能把「有人在试」这件事变成可观测的告警。
 
 **8.6 后续工作（本 PR 不含，建议单独立 issue）。**
-彻底封堵 DNS rebinding 需要在出站连接层校验实际 socket 对端 IP（Node 侧可用自定义 `Agent` + `lookup` 钩子，在 `net.connect` 前判定），但 `npx` / `git` 是外部进程，只能靠网络层或强制走受控出网代理。建议评估「所有外部包安装统一走内部制品库」这条路，从根上取消这类出网需求。
+
+1. **移植上游 `safe-git-proxy.ts`**：它在连接期把每个 socket 钉到刚校验过的公网 IP，是 DNS rebinding 的真正收口。本 PR 引入的 `resolvePublicAddresses()` 已经是它需要的前置原语，移植成本不高。
+2. **向上游反馈 CGNAT 缺口**：见 §2.1，happyclaw 的 `isPrivateIPv4()` 同样漏 `100.64.0.0/10`，且 `routes/skills.ts` 的 skill 安装路径未接 DNS 校验。
+3. **URL 内嵌凭证检查**：上游 `skill-import-service.ts` 与 `routes/groups.ts` 都会拒绝 `parsedUrl.username || parsedUrl.password`，DeepThink 这三个入口都没有。属于凭证泄露而非 SSRF，未纳入本 PR 范围，建议单独同步。
+4. 评估「所有外部包安装统一走内部制品库」，从根上取消这类出网需求。

@@ -4,7 +4,7 @@
 // 或 cloud-metadata 的场景下复用，避免每个调用点各自实现一份正则。
 
 import net from 'net';
-import dns from 'dns';
+import { lookup } from 'node:dns/promises';
 
 function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split('.').map(Number);
@@ -140,71 +140,71 @@ export function validateSafeHttpsUrl(
   return null;
 }
 
+// --- DNS 解析校验 -----------------------------------------------------------
+//
+// 本节的 API 有意与上游 happyclaw（github.com/riba2534/happyclaw，MIT）的
+// src/url-safety.ts 保持一致：相同函数名、相同签名、相同的「抛异常而非返回
+// reason 字符串」语义。DeepThink 是 happyclaw 的 fork，对齐后这个文件在后续
+// 同步上游时不会冲突，也便于将来一并接入上游的 safe-git-proxy —— 它在连接期
+// 把 socket 钉到刚校验过的 IP，才是 DNS rebinding 的真正收口。
+//
+// 相对上游的唯一增量是可选的第三个参数 lookupFn（用于单测注入）。它是可选的，
+// 不改变上游任何调用点的签名。上游这两个函数目前没有测试覆盖，本文件补上。
+
+export interface ResolvedPublicAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+/** 注入用（单测）。默认走 node:dns/promises 的 lookup。 */
+export type DnsLookupFn = (
+  hostname: string,
+) => Promise<ResolvedPublicAddress[]>;
+
+const defaultLookup: DnsLookupFn = async (hostname) =>
+  (await lookup(hostname, { all: true })).map((entry) => ({
+    address: entry.address,
+    family: entry.family === 6 ? 6 : 4,
+  }));
+
 /**
- * DNS 解析函数签名，返回该 hostname 的全部 A / AAAA 地址。抽成参数是为了
- * 让单测不依赖真实网络。
+ * 解析并校验 hostname 的每一个地址，返回调用方可以直接连接、无需二次解析的
+ * 确切 IP 列表 —— 这是收口 DNS rebinding TOCTOU 窗口所需的连接期原语。
+ *
+ * 解析失败、无记录、或任一地址落在内网/link-local 都会抛出 Error。抛异常而不
+ * 是返回字符串，是为了让调用方漏判时直接中断后续网络请求，而不是静默放行。
  */
-export type DnsLookupFn = (hostname: string) => Promise<string[]>;
-
-const defaultLookup: DnsLookupFn = async (hostname) => {
-  const records = await dns.promises.lookup(hostname, {
-    all: true,
-    verbatim: true,
-  });
-  return records.map((r) => r.address);
-};
-
-/**
- * 安全 URL 校验（含 DNS 解析）：在 `validateSafeHttpsUrl` 的字面量校验之上，
- * 再把 hostname 解析成 IP 并逐条判定，堵住"域名 A 记录指向内网"这条绕过路径
- * （例如攻击者把 evil.example.com 解析到 169.254.169.254 / 100.100.100.200）。
- *
- * 返回 null = 通过；返回 string = 拒绝原因。
- *
- * 两点必须说清楚，避免过度承诺：
- *
- *  1. **fail-closed**：DNS 解析失败 / 无记录一律拒绝。无法证明目标是公网，
- *     就不放行。若部署在只有 HTTP(S)_PROXY 出网、本机无 DNS 的环境里，
- *     这里会拒绝，需要给容器配可用的 resolver。
- *  2. **不能根治 DNS rebinding**：真正发起请求的是下游的 `npx` / `git`，
- *     它们会各自重新解析一次域名（TOCTOU）。本校验把攻击面从"填个域名就行"
- *     收窄到"必须在校验与取用之间精确翻转 DNS 应答"，是纵深防御的一层，
- *     不是唯一一层。彻底封堵需要在出站连接层面（socket 级 IP 校验 / 出网
- *     代理白名单）处理。
- */
-export async function validateSafeHttpsUrlWithDns(
-  raw: string,
-  opts?: {
-    maxLength?: number;
-    allowHttp?: boolean;
-    /** 注入用（单测）。默认走 dns.promises.lookup。 */
-    lookup?: DnsLookupFn;
-  },
-): Promise<string | null> {
-  const lexical = validateSafeHttpsUrl(raw, opts);
-  if (lexical) return lexical;
-
-  // validateSafeHttpsUrl 已经保证这里可以解析成功
-  const hostname = new URL(raw).hostname
-    .replace(/^\[|\]$/g, '')
-    .replace(/\.+$/, '');
-
-  // 字面量 IP 已由 validateSafeHttpsUrl 判过，无需再解析一次
-  if (net.isIP(hostname)) return null;
-
-  let addresses: string[];
+export async function resolvePublicAddresses(
+  hostname: string,
+  label = 'Hostname',
+  lookupFn: DnsLookupFn = defaultLookup,
+): Promise<ResolvedPublicAddress[]> {
+  // new URL('https://[::1]/').hostname 会保留方括号，dns.lookup 不认；
+  // 同时去掉 FQDN 结尾的点。
+  const normalized = hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  let addresses: ResolvedPublicAddress[];
   try {
-    addresses = await (opts?.lookup ?? defaultLookup)(hostname);
+    addresses = await lookupFn(normalized);
   } catch {
-    return `DNS resolution failed for ${hostname}`;
+    throw new Error(`${label} could not be resolved`);
   }
-  if (addresses.length === 0) {
-    return `DNS resolution returned no records for ${hostname}`;
+  if (
+    addresses.length === 0 ||
+    addresses.some(({ address }) => isPrivateHostname(address))
+  ) {
+    throw new Error(`${label} resolves to a private or link-local address`);
   }
-  for (const addr of addresses) {
-    if (isPrivateHostname(addr)) {
-      return `Hostname resolves to a private/internal address (${hostname} -> ${addr})`;
-    }
-  }
-  return null;
+  return addresses;
+}
+
+/**
+ * 只校验不取地址的薄封装。调用方应先用 validateSafeHttpsUrl() /
+ * isPrivateHostname() 做字面量校验（更快，且填内网字面 IP 时不依赖网络即可拒绝）。
+ */
+export async function assertResolvesToPublicAddress(
+  hostname: string,
+  label = 'Hostname',
+  lookupFn: DnsLookupFn = defaultLookup,
+): Promise<void> {
+  await resolvePublicAddresses(hostname, label, lookupFn);
 }

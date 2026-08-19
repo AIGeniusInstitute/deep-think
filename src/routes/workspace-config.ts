@@ -17,7 +17,10 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { GROUPS_DIR } from '../config.js';
-import { validateSafeHttpsUrlWithDns } from '../url-safety.js';
+import {
+  assertResolvesToPublicAddress,
+  validateSafeHttpsUrl,
+} from '../url-safety.js';
 import { canAccessGroup, canModifyGroup } from '../web-context.js';
 import { getRegisteredGroup } from '../db.js';
 import {
@@ -261,9 +264,18 @@ workspaceConfigRoutes.post(
     if (isUrl) {
       // SSRF 防护：URL 形式必须 HTTPS + 非内网（拒 169.254.169.254、
       // 100.100.100.200 等），并校验 hostname 的 DNS 解析结果。
-      const reason = await validateSafeHttpsUrlWithDns(pkg);
+      const reason = validateSafeHttpsUrl(pkg);
       if (reason) {
         return c.json({ error: `Refused skill URL: ${reason}` }, 400);
+      }
+      try {
+        await assertResolvesToPublicAddress(
+          new URL(pkg).hostname,
+          'Skill URL hostname',
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ error: `Refused skill URL: ${msg}` }, 400);
       }
     }
 
