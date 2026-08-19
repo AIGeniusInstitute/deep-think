@@ -4013,6 +4013,11 @@ export function updateGraphRunStatus(
   }
 }
 
+/** Persist graph state without changing the run's lifecycle status. */
+export function updateGraphRunState(id: string, stateJson: string): void {
+  db.prepare('UPDATE graph_runs SET state_json = ? WHERE id = ?').run(stateJson, id);
+}
+
 /** P1: repoint a graph run to a new definition version (dynamic re-plan).
  *  Used after registerDefinition creates v(N+1) so resume loads the new
  *  nodes/edges. Completed-node set is unaffected; new nodes become ready. */
