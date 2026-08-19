@@ -41,4 +41,13 @@
 - [x] 单测：gap-classifier 11/11 + lessons-reinjection 3/3
 - [x] 全量 277/277 零回归；agent-runner + 后端类型检查通过
 
-## P2（适应闭环 + gate 续跑 + 归档）— 进行中
+## P2（适应闭环 + gate 续跑 + 归档）— 完成
+- [x] F5 `src/autonomy/autonomy-adapt.ts`：targeted signal 生成 LLM 调整（generateAdjustment，30s 超时，非致命），写回 payload_json + 事件携带 adjustment；processPendingSignals/startAdaptationLoop 改 async；routes/autonomy signals/process async
+- [x] F6 `src/graph-engineering/graph-orchestrator.ts`：executeGraph 失败分支增加 gate 自动续跑（gateRetryCount，tries<GATE_RETRY_MAX=2 → 重置上游 + 写 gate_feedback_<upstreamId> 到 state + continue；否则终态失败）
+- [x] F6 `src/graph-engineering/graph-runner.ts`：抽取 `composeAgentPrompt(node,state)`，gate 反馈前置注入（feedback→goalAnchor→base）
+- [x] F6 顺带修复预存在 bug：终态分支 persistState（硬编码 running）会覆盖 failed，重排为 persistState→updateGraphRunStatus('failed')
+- [x] F7 `src/autonomy/autonomy-learning.ts`：captureToolArtifacts 从 trace_tool_calls 归档 web_search/web_fetch/sandbox_run_code 为 perception/execution 经验，去重幂等；captureRunLesson 内非致命调用
+- [x] 单测：autonomy-p1 +2（F5 targeted/untargeted）；tool-artifact-lesson 3/3；gate-feedback-prompt 5/5；gate-auto-resume 4/4
+- [x] 全量回归 1424 passed / 4 skipped / 1 failed（prompt-loader 预存在无关失败）；tsc 0 error
+- [x] 测试报告写入 docs/test_report/full-autonomy-recovery/TEST_REPORT.md
+

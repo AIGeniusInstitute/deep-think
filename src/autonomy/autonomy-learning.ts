@@ -77,6 +77,81 @@ export function extractRunLesson(graphRunId: string): RunLesson | null {
 }
 
 /**
+ * F7: archive fine-grained external-interaction results (web_search /
+ * web_fetch / sandbox_run_code) from trace_tool_calls as autonomy_lessons.
+ * This gives the system continual-learning material at the tool level, not
+ * just the graph_run level. Called from captureRunLesson after the run lesson.
+ *
+ * Each archived lesson: capability='perception' (web) or 'execution' (sandbox),
+ * lesson_text carries the query/url + a short result excerpt.
+ */
+const EXTERNAL_TOOLS = new Set([
+  'web_search',
+  'mcp__deepthink__web_search',
+  'web_fetch',
+  'mcp__deepthink__web_fetch',
+  'sandbox_run_code',
+  'mcp__deepthink__sandbox_run_code',
+]);
+
+function capabilityForTool(toolName: string): 'perception' | 'execution' {
+  return toolName.includes('web') ? 'perception' : 'execution';
+}
+
+export function captureToolArtifacts(graphRunId: string): number {
+  const db = getDb();
+  let rows: { tool_name: string; input_json: string | null; output_json: string | null }[] = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT tool_name, input_json, output_json FROM trace_tool_calls
+         WHERE graph_run_id = ? AND tool_name IS NOT NULL`,
+      )
+      .all(graphRunId) as { tool_name: string; input_json: string | null; output_json: string | null }[];
+  } catch {
+    return 0; // trace_tool_calls not available (non-graph run)
+  }
+  const now = nowMs();
+  let archived = 0;
+  for (const r of rows) {
+    // Normalize tool name (strip mcp__deepthink__ prefix).
+    const tool = r.tool_name.replace(/^mcp__deepthink__/, '');
+    if (!EXTERNAL_TOOLS.has(tool)) continue;
+    // Avoid duplicate archival for the same run+tool+input.
+    let inputSummary = '';
+    try {
+      const parsed = r.input_json ? JSON.parse(r.input_json) : {};
+      inputSummary = parsed.query || parsed.url || parsed.code || JSON.stringify(parsed).slice(0, 120);
+    } catch {
+      inputSummary = (r.input_json || '').slice(0, 120);
+    }
+    const dedupKey = `${graphRunId}|${tool}|${inputSummary.slice(0, 60)}`;
+    const existing = db
+      .prepare(`SELECT id FROM autonomy_lessons WHERE lesson_text LIKE ?`)
+      .get(`%${dedupKey}%`);
+    if (existing) continue;
+    let outputSummary = '';
+    try {
+      if (r.output_json) {
+        const parsed = JSON.parse(r.output_json);
+        const text = typeof parsed === 'string' ? parsed : (parsed.text || parsed.content || JSON.stringify(parsed));
+        outputSummary = String(text).slice(0, 200);
+      }
+    } catch {
+      outputSummary = (r.output_json || '').slice(0, 200);
+    }
+    const lessonText = `[${tool}] ${inputSummary.slice(0, 120)} → ${outputSummary} (run:${graphRunId})`;
+    db.prepare(
+      `INSERT INTO autonomy_lessons
+        (capability, lesson_text, derived_from_run_ids, applied_count, status, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 'active', ?, ?)`,
+    ).run(capabilityForTool(tool), `${dedupKey}\n${lessonText}`, JSON.stringify([graphRunId]), now, now);
+    archived++;
+  }
+  return archived;
+}
+
+/**
  * Persist a run lesson + emit learning.promoted so the learning-efficiency
  * metric (latency from run start → lesson sediment) is collected.
  * Idempotent guard: skips if a lesson for this run already exists.
@@ -90,6 +165,13 @@ export function captureRunLesson(graphRunId: string): RunLesson | null {
       `SELECT id FROM autonomy_lessons WHERE derived_from_run_ids LIKE ?`,
     )
     .get(`%"${graphRunId}"%`);
+  // F7: archive fine-grained tool artifacts regardless of run-lesson idempotency
+  // (captureToolArtifacts has its own per-tool dedup).
+  try {
+    captureToolArtifacts(graphRunId);
+  } catch (err) {
+    logger.warn({ err, graphRunId }, '[autonomy-learning] tool-artifact capture failed — swallowed');
+  }
   if (existing) return lesson; // already sedimented — idempotent
   const now = nowMs();
   const startedAtMs = Date.parse(

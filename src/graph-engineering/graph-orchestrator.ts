@@ -45,6 +45,8 @@ import { runGraphNode, type GraphDeps, type GraphRunContext } from './graph-runn
 import type { GraphDefinition, GraphNode, GraphState, NodeRunOutcome } from './graph-types.js';
 
 const BRANCH_STATE_PREFIX = '__branch_';
+const GATE_FEEDBACK_PREFIX = 'gate_feedback_';
+const GATE_RETRY_MAX = 2;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BACKOFF_MS = 5000;
 const POLL_INTERVAL_MS = 1000;
@@ -159,6 +161,11 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
   // Resume: rebuild completed-set + branch decisions from persisted state.
   const completed = getCompletedGraphNodeIds(ctx.graphRunId);
   const branchDecisions = reconstructBranchDecisions(ctx.state);
+  // F6: per-gate retry counter for gate-failure auto-resume. A gate failure
+  // re-runs its upstream agent node with the failure evidence injected (not the
+  // gate itself — re-running a gate against unchanged output is pointless).
+  // Up to GATE_RETRY_MAX re-runs before the run is marked failed.
+  const gateRetryCount = new Map<string, number>();
 
   try {
     while (true) {
@@ -238,11 +245,42 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
           return;
         } else {
           // failed (skipped from cancel also lands here)
+          // F6: gate failure auto-resume. A gate failing against its upstream
+          // agent's output means the upstream work didn't meet the gate's
+          // behavioral evidence / assertions. Instead of failing the whole run
+          // on the first gate miss, reset the upstream agent node to re-run with
+          // the failure evidence injected as feedback, up to GATE_RETRY_MAX.
+          // Re-running the gate node itself would be pointless — it asserts
+          // against the same unchanged output. See SOLUTION.md §4.2 (AC6.1).
+          if (node.type === 'gate' && node.upstreamNodeId) {
+            const tries = (gateRetryCount.get(node.id) ?? 0) + 1;
+            gateRetryCount.set(node.id, tries);
+            if (tries < GATE_RETRY_MAX) {
+              const feedback = outcome.error ?? outcome.output ?? 'gate 失败（无详情）';
+              ctx.state[`${GATE_FEEDBACK_PREFIX}${node.upstreamNodeId}`] =
+                `【上游 Gate "${node.title}" 第 ${tries} 次评审失败,请据此修正后重做】\n${feedback}`;
+              completed.delete(node.upstreamNodeId);
+              persistState(ctx.graphRunId, ctx.state);
+              logger.warn(
+                { graphRunId: ctx.graphRunId, gateId: node.id, upstreamId: node.upstreamNodeId, tries },
+                'Gate failed — resetting upstream agent node for re-run with feedback',
+              );
+              continue;
+            }
+            logger.error(
+              { graphRunId: ctx.graphRunId, gateId: node.id, tries },
+              'Gate failed — GATE_RETRY_MAX exhausted, failing run',
+            );
+          }
+          // persistState hardcodes status='running', so it MUST run before the
+          // terminal 'failed' write — otherwise it clobbers 'failed' back to
+          // 'running' (pre-existing latent bug in this exact path; surfaced by
+          // F6 AC6.1.2 which asserts the terminal status persists).
+          persistState(ctx.graphRunId, ctx.state);
           updateGraphRunStatus(ctx.graphRunId, 'failed', {
             endedAt: new Date().toISOString(),
             cancelReason: `node ${node.id} failed: ${outcome.error ?? 'unknown'}`,
           });
-          persistState(ctx.graphRunId, ctx.state);
           logger.error({ graphRunId: ctx.graphRunId, nodeId: node.id, err: outcome.error },
             'Graph run failed at node');
           emitExecutionOutcome(ctx, false, `node ${node.id} failed`);

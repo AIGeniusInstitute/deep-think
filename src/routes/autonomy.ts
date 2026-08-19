@@ -136,8 +136,8 @@ autonomyRoutes.get('/signals', (c) => {
 });
 
 /** POST /api/autonomy/signals/process — drain pending signals now (admin; for E2E determinism). */
-autonomyRoutes.post('/signals/process', (c) => {
-  const processed = processPendingSignals();
+autonomyRoutes.post('/signals/process', async (c) => {
+  const processed = await processPendingSignals();
   return c.json({ processed });
 });
 
