@@ -41,7 +41,7 @@ make sync-types
 make dev
 ```
 
-The web UI is served at `http://localhost:3118` by default. The first run will walk you through the setup wizard.
+The frontend dev server is available at `http://localhost:5173` by default and proxies API requests to the backend on port `9898`. The first run will walk you through the setup wizard.
 
 ## Project Structure
 
