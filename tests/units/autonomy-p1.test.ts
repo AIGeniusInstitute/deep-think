@@ -17,6 +17,12 @@ vi.mock('../../src/config.js', async () => ({
   GROUPS_DIR: tmpGroupsDir,
 }));
 
+// F5: autonomy-adapt now calls sdkQuery for targeted signals. Mock it so unit
+// tests don't make real LLM calls.
+vi.mock('../../src/sdk-query.js', () => ({
+  sdkQuery: async () => 'mocked-adjustment-text',
+}));
+
 const { initDatabase, getDb } = await import('../../src/db.js');
 const {
   bootAutonomyRegistry,
@@ -179,13 +185,13 @@ describe('autonomy-learning (WP3)', () => {
 // --- WP4: active adaptation ---
 
 describe('autonomy-adapt (WP4)', () => {
-  test('processPendingSignals marks applied + emits adaptation.adjusted', () => {
+  test('processPendingSignals marks applied + emits adaptation.adjusted', async () => {
     const db = getDb();
     db.prepare(
       `INSERT INTO autonomy_signals (signal_type, payload_json, target_run_id, status, created_at, applied_at)
        VALUES (?, ?, ?, 'pending', ?, NULL)`,
     ).run('perf_degradation', JSON.stringify({ source: 'test' }), 'run-x', Date.now() - 2000);
-    const n = processPendingSignals();
+    const n = await processPendingSignals();
     expect(n).toBe(1);
     const row = db.prepare('SELECT status, applied_at FROM autonomy_signals WHERE id = 1').get() as any;
     expect(row.status).toBe('applied');
@@ -196,32 +202,61 @@ describe('autonomy-adapt (WP4)', () => {
     expect(adjusted[0].payload.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
-  test('adaptation.adjusted metric collected (adaptation_speed_ms)', () => {
+  test('adaptation.adjusted metric collected (adaptation_speed_ms)', async () => {
     const db = getDb();
     db.prepare(
       `INSERT INTO autonomy_signals (signal_type, target_run_id, status, created_at, applied_at)
        VALUES (?, ?, 'pending', ?, NULL)`,
     ).run('demand_change', 'run-y', Date.now() - 1500);
-    processPendingSignals();
+    await processPendingSignals();
     const m = aggregateMetric('adaptation', 'adaptation_speed_ms', 0, Date.now() + 1000)!;
     expect(m.denominator).toBe(1);
     expect(m.numerator).toBeGreaterThanOrEqual(0);
   });
 
-  test('processPendingSignals is idempotent (no double-process)', () => {
+  test('processPendingSignals is idempotent (no double-process)', async () => {
     const db = getDb();
     db.prepare(
       `INSERT INTO autonomy_signals (signal_type, status, created_at, applied_at)
        VALUES (?, 'pending', ?, NULL)`,
     ).run('data_source_update', Date.now() - 1000);
-    const first = processPendingSignals();
-    const second = processPendingSignals();
+    const first = await processPendingSignals();
+    const second = await processPendingSignals();
     expect(first).toBe(1);
     expect(second).toBe(0);
   });
 
-  test('no pending signals → processes 0, no event', () => {
-    expect(processPendingSignals()).toBe(0);
+  test('no pending signals → processes 0, no event', async () => {
+    expect(await processPendingSignals()).toBe(0);
     expect(captured.filter((e) => e.type === 'adaptation.adjusted')).toHaveLength(0);
+  });
+
+  test('F5: targeted signal generates + emits + persists LLM adjustment (AC5.1.1/5.1.2)', async () => {
+    const db = getDb();
+    const res = db.prepare(
+      `INSERT INTO autonomy_signals (signal_type, payload_json, target_run_id, status, created_at, applied_at)
+       VALUES (?, ?, ?, 'pending', ?, NULL)`,
+    ).run('env_change', JSON.stringify({ reason: 'provider degraded' }), 'run-f5', Date.now() - 500);
+    const n = await processPendingSignals();
+    expect(n).toBe(1);
+    const adjusted = captured.filter((e) => e.type === 'adaptation.adjusted' && e.payload.target_run_id === 'run-f5');
+    expect(adjusted).toHaveLength(1);
+    expect(adjusted[0].payload.adjustment).toBe('mocked-adjustment-text');
+    // adjustment written back into payload_json
+    const row = db.prepare('SELECT payload_json FROM autonomy_signals WHERE id = ?').get(res.lastInsertRowid) as any;
+    const payload = JSON.parse(row.payload_json);
+    expect(payload.adjustment).toBe('mocked-adjustment-text');
+  });
+
+  test('F5: untargeted signal skips adjustment generation (no target_run_id)', async () => {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO autonomy_signals (signal_type, target_run_id, status, created_at, applied_at)
+       VALUES (?, NULL, 'pending', ?, NULL)`,
+    ).run('system_pulse', Date.now() - 100);
+    await processPendingSignals();
+    const adjusted = captured.filter((e) => e.type === 'adaptation.adjusted' && e.payload.signal_type === 'system_pulse');
+    expect(adjusted).toHaveLength(1);
+    expect(adjusted[0].payload.adjustment).toBeUndefined();
   });
 });

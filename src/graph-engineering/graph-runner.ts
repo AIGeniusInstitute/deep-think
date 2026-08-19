@@ -256,6 +256,27 @@ async function dispatchByType(
   }
 }
 
+/**
+ * Compose the effective prompt for an agent node: goal anchor + base prompt,
+ * and (F6) prepend any downstream-gate failure feedback the orchestrator wrote
+ * into state when it reset this node for re-run. Pure so it is unit-testable.
+ */
+export function composeAgentPrompt(node: GraphNode, state: GraphState): string {
+  const basePrompt = node.prompt ?? node.title;
+  let prompt = node.goalAnchor
+    ? `${node.goalAnchor}\n\n---\n\n${basePrompt}`
+    : basePrompt;
+  const gateFeedbackKey = `gate_feedback_${node.id}`;
+  const gateFeedback =
+    typeof state[gateFeedbackKey] === 'string'
+      ? (state[gateFeedbackKey] as string)
+      : '';
+  if (gateFeedback) {
+    prompt = `${gateFeedback}\n\n---\n\n${prompt}`;
+  }
+  return prompt;
+}
+
 /** Run an 'agent' node — calls runHostAgent/runContainerAgent (mirrors runOneIteration). */
 async function runAgentNode(
   ctx: GraphRunContext,
@@ -296,13 +317,7 @@ async function runAgentNode(
   let outputTokens = 0;
   let costUsd = 0;
 
-  // Super Agent Team: prepend the goal anchor (original goal + acceptance
-  // criteria + role + deliverable) to the prompt on every execution so the
-  // goal is re-anchored each turn. Missing goalAnchor → backward-compat.
-  const basePrompt = node.prompt ?? node.title;
-  const prompt = node.goalAnchor
-    ? `${node.goalAnchor}\n\n---\n\n${basePrompt}`
-    : basePrompt;
+  const prompt = composeAgentPrompt(node, ctx.state);
 
   const input: ContainerInput = {
     prompt,

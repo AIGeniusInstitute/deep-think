@@ -55,12 +55,14 @@ import {
   buildGoalAnchor,
   buildFallbackPlan,
 } from './team-prompt.js';
+import { reinjectLessonsIntoPrompt } from '../autonomy/lesson-injection.js';
 
 const DECOMPOSE_TIMEOUT_MS = 120_000;
 
 /** Decompose via LLM, retry once, then fall back. Returns a valid TeamPlan. */
 async function decompose(input: TeamTaskInput): Promise<TeamPlan> {
-  const prompt = buildDecompositionPrompt(input);
+  // F4: reinject relevant past lessons (continual-learning 近似).
+  const prompt = reinjectLessonsIntoPrompt(input.goalText, buildDecompositionPrompt(input), 'decision');
   // Attempt 1.
   let plan = parseTeamPlan(await sdkQuery(prompt, { timeout: DECOMPOSE_TIMEOUT_MS }));
   if (plan) return plan;

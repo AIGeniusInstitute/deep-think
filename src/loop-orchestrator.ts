@@ -42,6 +42,7 @@ import {
   type ContainerOutput,
 } from './container-runner.js';
 import { buildReminderConfig } from './reminder-config.js';
+import { reinjectLessonsIntoPrompt } from './autonomy/lesson-injection.js';
 import type { StreamEvent } from './stream-event.types.js';
 import type { ExecutionMode, RegisteredGroup } from './types.js';
 import type { ChildProcess } from 'child_process';
@@ -271,6 +272,9 @@ async function runOneIteration(
   });
 
   const prompt = buildIterationPromptForKind(ctx, iterationIndex, reviewHint);
+  // F4: reinject relevant past lessons on the first iteration only
+  // (continual-learning 近似). Later iterations carry the reviewer hint instead.
+  const finalPrompt = iterationIndex === 0 ? reinjectLessonsIntoPrompt(ctx.goalText, prompt, 'execution') : prompt;
   const executionMode = resolveExecutionMode(ctx, deps);
   const sessionId = resolveSessionId(ctx, deps, iterationIndex);
   const runAgent = executionMode === 'host' ? runHostAgent : runContainerAgent;
@@ -287,7 +291,7 @@ async function runOneIteration(
 
   try {
     const input: ContainerInput = {
-      prompt,
+      prompt: finalPrompt,
       sessionId,
       groupFolder: ctx.groupFolder,
       chatJid: ctx.chatJid,

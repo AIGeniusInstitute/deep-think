@@ -24,7 +24,8 @@ export type StreamEventType =
   | 'loop_goal_check' | 'loop_review_result' | 'loop_end'
   | 'human_approval_request' | 'human_approval_result'
   | 'reminder_injected'
-  | 'autonomous_started' | 'autonomous_continued' | 'autonomous_aborted' | 'autonomous_brake';
+  | 'autonomous_started' | 'autonomous_continued' | 'autonomous_aborted' | 'autonomous_brake'
+  | 'autonomous_recovering' | 'autonomous_recovered';
 
 export type StreamAgentScope = 'main' | 'task' | 'subagent' | 'system';
 export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
@@ -245,5 +246,10 @@ export interface StreamEvent {
     totalTokens?: number;
     maxTokens?: number;
     message?: string;
+    /** Recoverable-brake: short strategy label (safe_alternative /
+     *  checkpoint_compact_resume / force_compact_resume / reflect_and_pivot). */
+    strategy?: string;
+    /** Recoverable-brake: 1-based recovery attempt count for this brake type. */
+    attempt?: number;
   };
 }

@@ -114,7 +114,7 @@ export interface ContainerOutput {
   turnId?: string;
   sessionId?: string;
   sdkMessageUuid?: string;
-  sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'overflow_partial' | 'compact_partial' | 'legacy' | 'auto_continue' | 'truncation_continue' | 'autonomous_continue' | 'autonomous_brake';
+  sourceKind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'overflow_partial' | 'compact_partial' | 'legacy' | 'auto_continue' | 'truncation_continue' | 'autonomous_continue' | 'autonomous_brake' | 'autonomous_recover';
   /** 'truncated'：上游断流截断的 partial（usage 双零指纹，runner 会自动续写） */
   finalizationReason?: 'completed' | 'interrupted' | 'error' | 'truncated';
   /** 本 result 发出时仍未 settle 的后台任务数（异步 Agent / backgrounded Bash）。
