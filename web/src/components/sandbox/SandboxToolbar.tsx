@@ -17,6 +17,7 @@ export function SandboxToolbar({ sessionId }: SandboxToolbarProps) {
   const [showExecHistory, setShowExecHistory] = useState(false);
   const create = useSandboxStore((s) => s.create);
   const destroy = useSandboxStore((s) => s.destroy);
+  const startBrowser = useSandboxStore((s) => s.startBrowser);
 
   const handleCreate = async () => {
     await create({ language, browserEnabled });
@@ -54,7 +55,7 @@ export function SandboxToolbar({ sessionId }: SandboxToolbarProps) {
         alert('该沙箱未启用浏览器，请销毁后重新创建并勾选"启动浏览器"');
         return;
       }
-      await sandboxApi.browserStart(sessionId, browserUrl);
+      await startBrowser(sessionId, browserUrl);
     } catch (e: any) {
       setResult(`✗ 导航失败: ${e?.message ?? e}`);
     }

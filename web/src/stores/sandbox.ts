@@ -16,6 +16,7 @@ interface SandboxStore {
   activeSessionId: string | null;
   browserFrame: string | null;
   browserFrames: Record<string, string>;
+  browserStartedSessions: Set<string>;
   subscribedSessions: Set<string>;
   loading: boolean;
   error: string | null;
@@ -32,8 +33,10 @@ interface SandboxStore {
   startTerminal: (sessionId: string, cols: number, rows: number) => void;
   stopTerminal: (sessionId: string) => void;
   resizeTerminal: (sessionId: string, cols: number, rows: number) => void;
-  subscribeBrowser: (sessionId: string, url?: string) => void;
+  startBrowser: (sessionId: string, url?: string) => Promise<boolean>;
+  subscribeBrowser: (sessionId: string, url?: string) => boolean;
   unsubscribeBrowser: (sessionId: string) => void;
+  setBrowserStarted: (sessionId: string, started: boolean) => void;
   setBrowserFrame: (dataUrl: string | null) => void;
   setBrowserFrameForSession: (sessionId: string, dataUrl: string) => void;
   getBrowserFrame: (sessionId: string) => string | null;
@@ -48,6 +51,7 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
   activeSessionId: null,
   browserFrame: null,
   browserFrames: {},
+  browserStartedSessions: new Set<string>(),
   subscribedSessions: new Set<string>(),
   loading: false,
   error: null,
@@ -84,12 +88,15 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
         const activeSessionId = st.activeSessionId === id ? null : st.activeSessionId;
         const browserFrames = { ...st.browserFrames };
         delete browserFrames[id];
+        const browserStartedSessions = new Set(st.browserStartedSessions);
+        browserStartedSessions.delete(id);
         const subscribedSessions = new Set(st.subscribedSessions);
         subscribedSessions.delete(id);
         return {
           sessions,
           activeSessionId,
           browserFrames,
+          browserStartedSessions,
           subscribedSessions,
           browserFrame: activeSessionId === st.activeSessionId ? st.browserFrame : null,
         };
@@ -119,25 +126,73 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
     wsManager.send({ type: 'sandbox_terminal_resize', sessionId, cols, rows });
   },
 
+  startBrowser: async (sessionId, url) => {
+    const result = await sandboxApi.browserStart(sessionId, url);
+    if (result.started) {
+      get().setBrowserStarted(sessionId, true);
+      get().subscribeBrowser(sessionId);
+    }
+    return result.started;
+  },
+
   subscribeBrowser: (sessionId, url) => {
+    if (get().isSubscribed(sessionId)) return true;
+    const sent = wsManager.send({
+      type: 'sandbox_browser_subscribe',
+      sessionId,
+      ...(url ? { url } : {}),
+    });
+    if (!sent) return false;
     set((st) => {
       const subscribedSessions = new Set(st.subscribedSessions);
       subscribedSessions.add(sessionId);
       return { subscribedSessions, browserFrame: null };
     });
-    wsManager.send({ type: 'sandbox_browser_subscribe', sessionId, ...(url ? { url } : {}) });
+    return true;
   },
 
   unsubscribeBrowser: (sessionId) => {
+    const shouldStop = get().isSubscribed(sessionId)
+      || get().browserStartedSessions.has(sessionId);
+    if (!shouldStop) return;
     set((st) => {
       const subscribedSessions = new Set(st.subscribedSessions);
       subscribedSessions.delete(sessionId);
+      const browserStartedSessions = new Set(st.browserStartedSessions);
+      browserStartedSessions.delete(sessionId);
       const browserFrames = { ...st.browserFrames };
       delete browserFrames[sessionId];
-      return { subscribedSessions, browserFrames, browserFrame: null };
+      return {
+        subscribedSessions,
+        browserStartedSessions,
+        browserFrames,
+        browserFrame: st.activeSessionId === sessionId ? null : st.browserFrame,
+      };
     });
-    wsManager.send({ type: 'sandbox_browser_unsubscribe', sessionId });
+    if (!wsManager.send({ type: 'sandbox_browser_unsubscribe', sessionId })) {
+      void sandboxApi.browserStop(sessionId).catch(() => {});
+    }
   },
+
+  setBrowserStarted: (sessionId, started) => set((st) => {
+    const browserStartedSessions = new Set(st.browserStartedSessions);
+    if (started) {
+      browserStartedSessions.add(sessionId);
+      return { browserStartedSessions };
+    }
+
+    browserStartedSessions.delete(sessionId);
+    const subscribedSessions = new Set(st.subscribedSessions);
+    subscribedSessions.delete(sessionId);
+    const browserFrames = { ...st.browserFrames };
+    delete browserFrames[sessionId];
+    return {
+      browserStartedSessions,
+      subscribedSessions,
+      browserFrames,
+      browserFrame: st.activeSessionId === sessionId ? null : st.browserFrame,
+    };
+  }),
 
   setBrowserFrame: (dataUrl) => set({ browserFrame: dataUrl }),
 
@@ -164,6 +219,15 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
 
   wireWsHandlers: () => {
     const offs: Array<(() => void) | undefined> = [];
+    offs.push(wsManager.on('connected', () => {
+      const state = get();
+      for (const sessionId of state.browserStartedSessions) {
+        state.subscribeBrowser(sessionId);
+      }
+    }));
+    offs.push(wsManager.on('disconnected', () => {
+      set({ subscribedSessions: new Set<string>() });
+    }));
     offs.push(wsManager.on('sandbox_browser_frame', (data) => {
       const sid = data?.sessionId;
       if (!sid) return;
@@ -173,6 +237,12 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
       if (sid === get().activeSessionId) {
         get().setBrowserFrame(data.dataUrl);
       }
+    }));
+    offs.push(wsManager.on('sandbox_browser_started', (data) => {
+      if (data?.sessionId) get().setBrowserStarted(data.sessionId, true);
+    }));
+    offs.push(wsManager.on('sandbox_browser_stopped', (data) => {
+      if (data?.sessionId) get().setBrowserStarted(data.sessionId, false);
     }));
     offs.push(wsManager.on('sandbox_status', (data) => {
       if (data?.sessionId) {
