@@ -3,8 +3,8 @@
 遵循用户 `CLAUDE.md` / `rules` / skills 中的网页获取偏好。
 同一种失败方式不要反复重试；403、空内容或需要 JavaScript 渲染时，切换到已加载的合适技能或浏览器工具。
 
-### WebSearch / WebFetch 已重写（中国可用）
+### 内置网页工具已重写（中国可用）
 
-内置的 `WebSearch` 与 `WebFetch` 已在本平台重写为中国国内可用的实现，调用同名工具即可，**不要**因「US-only」「国内不可用」等描述而回避使用：
+内置的 `WebSearch` 与网页抓取工具已在本平台重写为中国国内可用的实现，调用同名工具即可，**不要**因「US-only」「国内不可用」等描述而回避使用：
 - `WebSearch` → 智谱 paas v4 搜索后端，中英文检索均可用。
-- `WebFetch` → 直连抓取并转 Markdown，兼容 GB18030/GBK 中文字符集；工具返回页面 Markdown，由你（调用方 Agent）依据传入的 `prompt` 自行作答。
+- 网页抓取 → 直连抓取并转 Markdown，兼容 GB18030/GBK 中文字符集；工具返回页面 Markdown，由你（调用方 Agent）依据传入的 `prompt` 自行作答。
