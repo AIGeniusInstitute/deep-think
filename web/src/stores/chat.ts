@@ -1234,6 +1234,31 @@ function applyStreamEvent(
       );
       break;
     }
+    case 'autonomous_recovering': {
+      const a = event.autonomous;
+      const reasonMap: Record<string, string> = {
+        destructive_command: '破坏性命令',
+        turn_limit: '轮次上限',
+        token_limit: 'token 上限',
+        loop_detected: '输出循环',
+      };
+      const reasonText = reasonMap[a?.reason ?? ''] ?? a?.reason ?? 'unknown';
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🟡 全托管恢复中（第 ${a?.attempt ?? '?'}/${3} 次）：${reasonText} → 策略 ${a?.strategy ?? 'unknown'}`,
+      );
+      break;
+    }
+    case 'autonomous_recovered': {
+      const a = event.autonomous;
+      next.recentEvents = pushEvent(
+        prev.recentEvents,
+        'status',
+        `🟢 全托管已恢复：${a?.strategy ?? ''}（第 ${a?.attempt ?? '?'} 次，已运行 ${a?.turnCount ?? '?'} 轮）`,
+      );
+      break;
+    }
   }
 }
 

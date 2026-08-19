@@ -47,6 +47,7 @@ import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 import { traceAllocator, type TraceNodeDescriptor } from './trace-node-allocator.js';
+import { RecoveryState, type BrakeType, type RecoveryResult } from './autonomy-recovery.js';
 
 // traceAllocator is a module-level singleton (see trace-node-allocator.ts):
 // nodeIds are monotonic across queries within the agent-runner process
@@ -2550,10 +2551,99 @@ async function main(): Promise<void> {
   const autonomousOutputHashes: string[] = [];
   const AUTONOMOUS_LOOP_WINDOW = 5; // keep last 5 hashes
   const AUTONOMOUS_LOOP_THRESHOLD = 3; // 3 consecutive identical → brake
+  // Recoverable-brake state: per-brake-type attempt counter with decay.
+  // Converts the 4 terminal hard brakes (exit 1) into recoverable brakes —
+  // on hit, inject a strategy-change prompt and continue the loop, mirroring
+  // the auto-continue path below. Only after MAX_RECOVERY_ATTEMPTS (3)
+  // consecutive unrecovered hits of the same brake type does it go terminal.
+  const recoveryState = new RecoveryState();
   // 暂存的会话历史上下文：当 auto-continue 阶段发生 sessionResumeFailed 时，
   // 历史无法直接拼到 auto-continue prompt（因为 fall-through 等下一条 IPC 消息后才重启 query），
   // 需要在下一轮主循环 query 之前消费它，避免新会话完全丢失上下文。
   let pendingHistoryContext: string | null = null;
+
+  // Shared recovery-turn executor for the 4 recoverable hard brakes.
+  // Mirrors the auto-continue path (inject synthetic prompt → runQuery with
+  // 'autonomous_recover' source → thread session/resume/close). Returns true
+  // if the run should continue (recovery turn done), false if a _close
+  // sentinel arrived mid-recovery (loop must break).
+  const runRecoveryTurn = async (brake: BrakeType, rec: RecoveryResult): Promise<boolean> => {
+    log(`Recovery attempt ${rec.attempt}/${3} for ${brake} (strategy=${rec.strategy})`);
+    writeOutput({
+      status: 'stream',
+      result: null,
+      streamEvent: {
+        eventType: 'autonomous_recovering',
+        displayLevel: 'primary',
+        statusText: 'autonomous_recovering',
+        autonomous: {
+          reason: brake,
+          strategy: rec.strategy,
+          attempt: rec.attempt,
+          turnCount: autonomousTurnCount,
+          message: rec.prompt ? rec.prompt.slice(0, 200) : undefined,
+        },
+      },
+    });
+    // Side effects requested by the recovery strategy.
+    if (rec.newMaxTurns) {
+      containerInput.maxTurns = rec.newMaxTurns;
+    }
+    if (rec.clearHashWindow) {
+      autonomousOutputHashes.length = 0;
+    }
+    // requireCompaction: rely on runQuery's existing overflow/compaction
+    // handling — injecting a fresh prompt naturally drives context compaction
+    // when the window is over budget. No separate code path needed (P0).
+    containerInput.turnId = generateTurnId();
+    const recResult = await runQuery(
+      rec.prompt!,
+      sessionId,
+      mcpServerConfig,
+      containerInput,
+      memoryRecallPrompt,
+      resumeAt,
+      true,
+      DEFAULT_ALLOWED_TOOLS,
+      undefined,
+      undefined,
+      'autonomous_recover',
+    );
+    if (recResult.newSessionId) {
+      sessionId = recResult.newSessionId;
+      latestSessionId = sessionId;
+    }
+    if (recResult.lastAssistantUuid) {
+      resumeAt = recResult.lastAssistantUuid;
+    }
+    if (recResult.closedDuringQuery) {
+      log('Close sentinel during autonomous recovery, exiting');
+      writeOutput({
+        status: 'closed',
+        result: null,
+        streamEvent: {
+          eventType: 'autonomous_aborted',
+          displayLevel: 'primary',
+          statusText: 'autonomous_aborted',
+          autonomous: { reason: 'user_stop', turnCount: autonomousTurnCount },
+        },
+      });
+      return false;
+    }
+    // Recovery turn completed without re-braking the same brake → emit recovered.
+    writeOutput({
+      status: 'stream',
+      result: null,
+      streamEvent: {
+        eventType: 'autonomous_recovered',
+        displayLevel: 'primary',
+        statusText: 'autonomous_recovered',
+        autonomous: { reason: brake, strategy: rec.strategy, attempt: rec.attempt, turnCount: autonomousTurnCount },
+      },
+    });
+    return true;
+  };
+
   try {
     while (true) {
       pruneProcessedHistoryImagesInTranscript(sessionId);
@@ -3029,101 +3119,90 @@ async function main(): Promise<void> {
           autonomousOutputHashes.shift();
         }
 
-        // Hard brake 1: destructive Bash command detected this turn.
-        const destructiveCmd = signals.lastTurnDestructiveCmd;
-        if (destructiveCmd) {
-          log(`Hard brake: destructive_command detected: ${destructiveCmd.slice(0, 200)}`);
-          writeOutput({
-            status: 'error',
-            result: null,
-            error: `autonomous_brake: destructive_command`,
-            newSessionId: sessionId,
-            sourceKind: 'autonomous_brake',
-            streamEvent: {
-              eventType: 'autonomous_brake',
-              displayLevel: 'primary',
-              statusText: 'autonomous_brake',
-              autonomous: {
-                reason: 'destructive_command',
-                turnCount: autonomousTurnCount,
-                message: destructiveCmd.slice(0, 200),
-              },
-            },
-          });
-          process.exit(1);
-        }
-        // Hard brake 2: turn limit exceeded.
+        // ─── Recoverable hard brakes ───
+        // Previously each brake did process.exit(1). Now each requests a
+        // recovery strategy from recoveryState; only after MAX_RECOVERY_ATTEMPTS
+        // (3) consecutive unrecovered hits of the same brake type does it go
+        // terminal. Recovery mirrors the end-of-turn auto-continue path
+        // (runRecoveryTurn → fall through to waitForIpcMessage), so the host's
+        // normal autonomous turn-driving feeds the next turn identically.
         const maxTurns = containerInput.maxTurns ?? 50;
-        if (autonomousTurnCount >= maxTurns) {
-          log(`Hard brake: turn_limit_exceeded (${autonomousTurnCount}/${maxTurns})`);
-          writeOutput({
-            status: 'error',
-            result: null,
-            error: `autonomous_brake: turn_limit_exceeded (${autonomousTurnCount}/${maxTurns})`,
-            newSessionId: sessionId,
-            sourceKind: 'autonomous_brake',
-            streamEvent: {
-              eventType: 'autonomous_brake',
-              displayLevel: 'primary',
-              statusText: 'autonomous_brake',
-              autonomous: {
-                reason: 'turn_limit',
-                turnCount: autonomousTurnCount,
-                maxTurns,
-              },
-            },
-          });
-          process.exit(1);
-        }
-        // Hard brake 3: token limit exceeded.
         const maxTokens = containerInput.maxTokens ?? 1_000_000;
         const totalTokens = signals.totalTokens ?? 0;
-        if (totalTokens >= maxTokens) {
-          log(`Hard brake: token_limit_exceeded (${totalTokens}/${maxTokens})`);
-          writeOutput({
-            status: 'error',
-            result: null,
-            error: `autonomous_brake: token_limit_exceeded (${totalTokens}/${maxTokens})`,
-            newSessionId: sessionId,
-            sourceKind: 'autonomous_brake',
-            streamEvent: {
-              eventType: 'autonomous_brake',
-              displayLevel: 'primary',
-              statusText: 'autonomous_brake',
-              autonomous: {
-                reason: 'token_limit',
-                turnCount: autonomousTurnCount,
-                totalTokens,
-                maxTokens,
-              },
-            },
-          });
-          process.exit(1);
-        }
-        // Hard brake 4: loop detection (3 consecutive identical hashes).
+        const goalSnippet = prompt.slice(0, 300);
+        const baseCtx = { turnCount: autonomousTurnCount, maxTurns, totalTokens, maxTokens, goalSnippet };
         const hashes = autonomousOutputHashes;
-        if (hashes.length >= AUTONOMOUS_LOOP_THRESHOLD) {
-          const lastN = hashes.slice(-AUTONOMOUS_LOOP_THRESHOLD);
-          if (lastN.every((h) => h === lastN[0])) {
-            log(`Hard brake: loop_detected (${AUTONOMOUS_LOOP_THRESHOLD} identical turns)`);
+
+        // Brake 1: destructive Bash command detected this turn.
+        const destructiveCmd = signals.lastTurnDestructiveCmd;
+        if (destructiveCmd) {
+          const rec = recoveryState.request('destructive_command', { ...baseCtx, destructiveCmd });
+          if (rec.terminal) {
+            log(`Unrecoverable brake: destructive_command (attempts exhausted)`);
             writeOutput({
-              status: 'error',
-              result: null,
-              error: `autonomous_brake: loop_detected`,
-              newSessionId: sessionId,
-              sourceKind: 'autonomous_brake',
-              streamEvent: {
-                eventType: 'autonomous_brake',
-                displayLevel: 'primary',
-                statusText: 'autonomous_brake',
-                autonomous: {
-                  reason: 'loop_detected',
-                  turnCount: autonomousTurnCount,
-                },
-              },
+              status: 'error', result: null, error: `autonomous_brake: destructive_command`,
+              newSessionId: sessionId, sourceKind: 'autonomous_brake',
+              streamEvent: { eventType: 'autonomous_brake', displayLevel: 'primary', statusText: 'autonomous_brake',
+                autonomous: { reason: 'destructive_command', turnCount: autonomousTurnCount, message: destructiveCmd.slice(0, 200) } },
             });
             process.exit(1);
           }
+          const ok = await runRecoveryTurn('destructive_command', rec);
+          if (!ok) break; // _close sentinel during recovery
+          // Recovery turn done → fall through to waitForIpcMessage (mirror auto-continue).
+        } else
+        // Brake 2: turn limit exceeded.
+        if (autonomousTurnCount >= maxTurns) {
+          const rec = recoveryState.request('turn_limit', baseCtx);
+          if (rec.terminal) {
+            log(`Unrecoverable brake: turn_limit (attempts exhausted)`);
+            writeOutput({
+              status: 'error', result: null, error: `autonomous_brake: turn_limit_exceeded (${autonomousTurnCount}/${maxTurns})`,
+              newSessionId: sessionId, sourceKind: 'autonomous_brake',
+              streamEvent: { eventType: 'autonomous_brake', displayLevel: 'primary', statusText: 'autonomous_brake',
+                autonomous: { reason: 'turn_limit', turnCount: autonomousTurnCount, maxTurns } },
+            });
+            process.exit(1);
+          }
+          const ok = await runRecoveryTurn('turn_limit', rec);
+          if (!ok) break;
+        } else
+        // Brake 3: token limit exceeded.
+        if (totalTokens >= maxTokens) {
+          const rec = recoveryState.request('token_limit', baseCtx);
+          if (rec.terminal) {
+            log(`Unrecoverable brake: token_limit (attempts exhausted)`);
+            writeOutput({
+              status: 'error', result: null, error: `autonomous_brake: token_limit_exceeded (${totalTokens}/${maxTokens})`,
+              newSessionId: sessionId, sourceKind: 'autonomous_brake',
+              streamEvent: { eventType: 'autonomous_brake', displayLevel: 'primary', statusText: 'autonomous_brake',
+                autonomous: { reason: 'token_limit', turnCount: autonomousTurnCount, totalTokens, maxTokens } },
+            });
+            process.exit(1);
+          }
+          const ok = await runRecoveryTurn('token_limit', rec);
+          if (!ok) break;
+        } else
+        // Brake 4: loop detection (3 consecutive identical hashes).
+        if (hashes.length >= AUTONOMOUS_LOOP_THRESHOLD && hashes.slice(-AUTONOMOUS_LOOP_THRESHOLD).every((h) => h === hashes[hashes.length - 1])) {
+          const rec = recoveryState.request('loop_detected', baseCtx);
+          if (rec.terminal) {
+            log(`Unrecoverable brake: loop_detected (attempts exhausted)`);
+            writeOutput({
+              status: 'error', result: null, error: `autonomous_brake: loop_detected`,
+              newSessionId: sessionId, sourceKind: 'autonomous_brake',
+              streamEvent: { eventType: 'autonomous_brake', displayLevel: 'primary', statusText: 'autonomous_brake',
+                autonomous: { reason: 'loop_detected', turnCount: autonomousTurnCount } },
+            });
+            process.exit(1);
+          }
+          const ok = await runRecoveryTurn('loop_detected', rec);
+          if (!ok) break;
+        } else {
+          // No brake fired this turn → the run productively advanced; decay
+          // stale recovery attempt counts so early mishaps don't permanently
+          // erode the budget (AC1.1.3).
+          recoveryState.tickSuccess();
         }
 
         // End-of-turn detection: did the agent ask the user this turn?
