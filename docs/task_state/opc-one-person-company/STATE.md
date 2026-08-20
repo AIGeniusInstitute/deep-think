@@ -11,24 +11,30 @@
 - [x] 3. 编码实施
   - [x] 3.1 后端 DB DDL + Row 类型 + DB 函数（src/db.ts）
   - [x] 3.2 后端路由 src/routes/opc.ts
-  - [x] 3.3 后端路由注册 src/web.ts（import + app.route('/api/opc')）
-  - [x] 3.4 前端菜单 nav-items.ts（Building2 图标，置于 /team 之后）
-  - [x] 3.5 前端路由 App.tsx（lazy OpcPage + /opc Route）
-  - [x] 3.6 前端 store web/src/stores/opc.ts（公司/目标 CRUD）
-  - [x] 3.7 前端页面 web/src/pages/OpcPage.tsx（含内联 Company/Objective Dialog、目标看板、launch 编排）
-  - [x] 3.8 后端单元测试 tests/opc.test.ts（10 用例）
-  - [x] 3.9 team store 增量改动：buildTeam 返回值新增 buildId（additive），供 OpcPage 回写 team_build_id、支持「查看运行」openHistory 恢复
+  - [x] 3.3 后端路由注册 src/web.ts
+  - [x] 3.4 前端菜单 nav-items.ts
+  - [x] 3.5 前端路由 App.tsx
+  - [x] 3.6 前端 store web/src/stores/opc.ts
+  - [x] 3.7 前端页面 web/src/pages/OpcPage.tsx
+  - [x] 3.8 后端单元测试 tests/opc.test.ts
 - [x] 4. 测试 + 修复循环
 - [x] 5. 测试报告
-- [x] 6. 合并 main + push
+- [ ] 6. 合并 main + push
 
 ## 执行日志
 
 ### 2026-08-21
-- 探索代码库：确认菜单结构（nav-items.ts）、路由注册（web.ts app.route）、DB 模式（initDatabase 内 db.exec CREATE TABLE）、team 子系统异步 build 模式。
-- 设计取舍：OPC 复用 team builder 做 launch，不重造 agent 基础设施；分成仅配置存储不做计费集成。
-- 后端实施：db.ts 新增 opc_companies/opc_objectives 两表（带 CHECK 约束）+ 完整 CRUD（含级联删除、动态 SET 局部更新）；routes/opc.ts 完成 8 个端点（Zod 校验 + owner 隔离 + 分成合计≤100% 双重校验）；web.ts 挂载 /api/opc。
-- 前端实施：nav-items/App 路由接好；stores/opc.ts zustand store；OpcPage 单文件自包含（公司列表+详情+统计+目标看板+launch+查看运行+删除确认）。
-- F4 补全：buildTeam 原仅返回 {runId,plan}，OpcPage 需 team_build_id 才能 openHistory 恢复运行。对 team store 做增量 additive 改动（返回值加 buildId，TeamPage 仅 await 不消费返回值，零回归）。
-- 验证：后端 `tsc --noEmit` exit 0；前端 `tsc --noEmit` exit 0 + `vite build` exit 0；`vitest run tests/opc.test.ts` 10/10 通过；全量 `vitest run` 1429 passed（仅 2 个预存 zustand 模块解析失败，与本期改动无关）。
-- 清理：删除本期误创建的两个未使用独立 Dialog 组件（页面用内联 Dialog，外科式不保留死代码）。
+- 探索代码库：确认菜单结构（nav-items.ts，UnifiedSidebar + BottomTabBar 共用 filterNavItems）、路由注册（web.ts app.route）、DB 模式（initDatabase 内 db.exec CREATE TABLE，无外键，显式级联）、team 子系统异步 build + 轮询模式。
+- 设计取舍：OPC 复用 team builder 做 launch，不重造 agent 基础设施；分成仅配置存储不做计费集成；归属校验返回 404 不泄露存在性。
+- 后端：src/db.ts 新增 opc_companies / opc_objectives 两表 + Row 类型 + 9 个 CRUD 函数（含级联删）；src/routes/opc.ts 新增 8 个端点 + zod 校验 + 分成合计校验；src/web.ts 注册 `/api/opc`。
+- 前端：nav-items.ts 加 OPC 项（Building2 图标，置于团队之后）；App.tsx lazy 挂载 /opc；web/src/stores/opc.ts（zustand，api.get/post/put/delete）；web/src/pages/OpcPage.tsx（公司列表+详情+统计+目标看板+分成+launch 编排复用 useTeamStore.buildTeam）。
+- 发现先前会话已留下两处改动并沿用：
+  1. `web/src/stores/opc.ts`（store 实现，与后端契约完全匹配，保留）
+  2. `web/src/stores/team.ts` 让 buildTeam 返回 `buildId`（支撑 OpcPage launch 回写 team_build_id，供「查看运行」openHistory 使用）——已验证在干净 node_modules 下 tsc 零错误。
+- OpcPage launch 改用 `result.buildId` 回写 `team_build_id`，与 team.ts 改动一致。
+- 测试修复循环：
+  - 首跑 tests/opc.test.ts：parse error（afterEach 内 await import）→ 改为 beforeAll 预导入 better-sqlite3。
+  - 次跑：8 failed（createCompany 里 res.json() 被读两次）→ 改为只读一次。
+  - 终跑：10 passed。
+- 后端 typecheck 干净；后端 opc + db-transactions 回归 19 passed。
+- 前端 vite build 成功（OpcPage 正常打包）；前端 tsc 在干净 node_modules 下零错误（worktree 符号链接 node_modules 会产生 team.ts 类型重复解析噪音，非真实错误，已通过主 tree 交叉验证排除）。
