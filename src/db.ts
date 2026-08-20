@@ -539,6 +539,46 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_team_builds_owner ON team_builds(owner_user_id, created_at DESC);
 
+    -- OPC（一人公司）模块：在既有 team/graph 等子系统之上叠加的目标驱动编排层。
+    -- opc_companies 承载一人公司配置（愿景/商业目标/运营策略/规模/领域/分成），
+    -- opc_objectives 承载挂在公司下的商业目标，launch 后回写 team_build_id/run_id
+    -- 关联既有 team_builds / graph_runs，复用而非重造 agent 基础设施。
+    CREATE TABLE IF NOT EXISTS opc_companies (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      vision TEXT,
+      commercial_goals TEXT,
+      operating_strategy TEXT,
+      scale_tier TEXT NOT NULL DEFAULT 'solo'
+        CHECK(scale_tier IN ('solo','small','mid')),
+      domains_json TEXT,
+      revenue_share_json TEXT,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK(status IN ('active','archived')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_opc_companies_owner ON opc_companies(owner_user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS opc_objectives (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      domain TEXT,
+      acceptance_criteria TEXT,
+      metrics_json TEXT,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft','active','running','completed','failed')),
+      team_build_id TEXT,
+      run_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_opc_objectives_company ON opc_objectives(company_id, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS graph_node_runs (
       id TEXT PRIMARY KEY,
       graph_run_id TEXT NOT NULL,
@@ -3239,6 +3279,38 @@ export interface TeamBuildRow {
   updated_at: number;
 }
 
+// --- OPC（一人公司）行类型 ---
+export interface OpcCompanyRow {
+  id: string;
+  owner_user_id: string;
+  name: string;
+  vision: string | null;
+  commercial_goals: string | null;
+  operating_strategy: string | null;
+  scale_tier: 'solo' | 'small' | 'mid';
+  domains_json: string | null;
+  revenue_share_json: string | null;
+  status: 'active' | 'archived';
+  created_at: number;
+  updated_at: number;
+}
+
+export interface OpcObjectiveRow {
+  id: string;
+  company_id: string;
+  owner_user_id: string;
+  title: string;
+  description: string | null;
+  domain: string | null;
+  acceptance_criteria: string | null;
+  metrics_json: string | null;
+  status: 'draft' | 'active' | 'running' | 'completed' | 'failed';
+  team_build_id: string | null;
+  run_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface GraphNodeRunRow {
   id: string;
   graph_run_id: string;
@@ -3960,6 +4032,163 @@ export function listTeamBuilds(
       `SELECT * FROM team_builds WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ?`,
     )
     .all(ownerUserId, limit) as TeamBuildRow[];
+}
+
+// --- OPC（一人公司）CRUD ---
+
+/** 创建一人公司，返回 id。 */
+export function createOpcCompany(row: {
+  id: string;
+  owner_user_id: string;
+  name: string;
+  vision?: string | null;
+  commercial_goals?: string | null;
+  operating_strategy?: string | null;
+  scale_tier?: 'solo' | 'small' | 'mid';
+  domains_json?: string | null;
+  revenue_share_json?: string | null;
+}): string {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO opc_companies
+      (id, owner_user_id, name, vision, commercial_goals, operating_strategy,
+       scale_tier, domains_json, revenue_share_json, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+  ).run(
+    row.id,
+    row.owner_user_id,
+    row.name,
+    row.vision ?? null,
+    row.commercial_goals ?? null,
+    row.operating_strategy ?? null,
+    row.scale_tier ?? 'solo',
+    row.domains_json ?? null,
+    row.revenue_share_json ?? null,
+    now,
+    now,
+  );
+  return row.id;
+}
+
+export function getOpcCompany(id: string): OpcCompanyRow | undefined {
+  return db.prepare('SELECT * FROM opc_companies WHERE id = ?').get(id) as
+    | OpcCompanyRow
+    | undefined;
+}
+
+export function listOpcCompanies(ownerUserId: string): OpcCompanyRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM opc_companies WHERE owner_user_id = ? ORDER BY created_at DESC`,
+    )
+    .all(ownerUserId) as OpcCompanyRow[];
+}
+
+/** 局部更新公司字段——仅更新传入的键，避免覆盖未传字段。 */
+export function updateOpcCompany(
+  id: string,
+  fields: Partial<{
+    name: string;
+    vision: string | null;
+    commercial_goals: string | null;
+    operating_strategy: string | null;
+    scale_tier: 'solo' | 'small' | 'mid';
+    domains_json: string | null;
+    revenue_share_json: string | null;
+    status: 'active' | 'archived';
+  }>,
+): void {
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return;
+  const setClause = keys.map((k) => `${k} = ?`).join(', ');
+  const params = keys.map((k) => (fields as Record<string, unknown>)[k]);
+  params.push(Date.now(), id);
+  db.prepare(
+    `UPDATE opc_companies SET ${setClause}, updated_at = ? WHERE id = ?`,
+  ).run(...params);
+}
+
+/** 删除公司并级联删除其下所有目标——不依赖外键，显式删。 */
+export function deleteOpcCompany(id: string): void {
+  db.prepare('DELETE FROM opc_objectives WHERE company_id = ?').run(id);
+  db.prepare('DELETE FROM opc_companies WHERE id = ?').run(id);
+}
+
+// --- OPC 商业目标 CRUD ---
+
+/** 在公司下创建商业目标，返回 id。 */
+export function createOpcObjective(row: {
+  id: string;
+  company_id: string;
+  owner_user_id: string;
+  title: string;
+  description?: string | null;
+  domain?: string | null;
+  acceptance_criteria?: string | null;
+  metrics_json?: string | null;
+}): string {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO opc_objectives
+      (id, company_id, owner_user_id, title, description, domain,
+       acceptance_criteria, metrics_json, status, team_build_id, run_id,
+       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', NULL, NULL, ?, ?)`,
+  ).run(
+    row.id,
+    row.company_id,
+    row.owner_user_id,
+    row.title,
+    row.description ?? null,
+    row.domain ?? null,
+    row.acceptance_criteria ?? null,
+    row.metrics_json ?? null,
+    now,
+    now,
+  );
+  return row.id;
+}
+
+export function getOpcObjective(id: string): OpcObjectiveRow | undefined {
+  return db.prepare('SELECT * FROM opc_objectives WHERE id = ?').get(id) as
+    | OpcObjectiveRow
+    | undefined;
+}
+
+export function listOpcObjectivesByCompany(companyId: string): OpcObjectiveRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM opc_objectives WHERE company_id = ? ORDER BY created_at DESC`,
+    )
+    .all(companyId) as OpcObjectiveRow[];
+}
+
+/** 局部更新目标——launch 成功/失败时回写 status/team_build_id/run_id。 */
+export function updateOpcObjective(
+  id: string,
+  fields: Partial<{
+    title: string;
+    description: string | null;
+    domain: string | null;
+    acceptance_criteria: string | null;
+    metrics_json: string | null;
+    status: 'draft' | 'active' | 'running' | 'completed' | 'failed';
+    team_build_id: string | null;
+    run_id: string | null;
+  }>,
+): void {
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return;
+  const setClause = keys.map((k) => `${k} = ?`).join(', ');
+  const params = keys.map((k) => (fields as Record<string, unknown>)[k]);
+  params.push(Date.now(), id);
+  db.prepare(
+    `UPDATE opc_objectives SET ${setClause}, updated_at = ? WHERE id = ?`,
+  ).run(...params);
+}
+
+export function deleteOpcObjective(id: string): void {
+  db.prepare('DELETE FROM opc_objectives WHERE id = ?').run(id);
 }
 
 export function listGraphRuns(

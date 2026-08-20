@@ -81,6 +81,7 @@ import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
 import sandboxRoutes from './routes/sandbox.js';
+import { opcRoutes } from './routes/opc.js';
 import { getSandboxManager } from './sandbox/index.js';
 import {
   checkBillingAccess,
@@ -296,6 +297,7 @@ app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
 app.route('/api/bug-report', bugReportRoutes);
 app.route('/api/sandbox', sandboxRoutes);
+app.route('/api/opc', opcRoutes);
 
 // --- POST /api/messages ---
 
