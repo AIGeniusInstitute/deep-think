@@ -2,7 +2,7 @@ import { replaceInApp, withBasePath } from '../utils/url';
 
 type WsHandler = (data: any) => void;
 
-class WsManager {
+export class WsManager {
   private ws: WebSocket | null = null;
   private handlers = new Map<string, Set<WsHandler>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
