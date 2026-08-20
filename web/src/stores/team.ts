@@ -58,7 +58,7 @@ interface TeamState {
     maxTeamSize?: number;
     toolset?: string[];
     executionMode?: 'auto' | 'semi-auto';
-  }) => Promise<{ runId: string; plan: TeamPlan } | null>;
+  }) => Promise<{ runId: string; buildId: string; plan: TeamPlan } | null>;
   reset: () => void;
   loadHistory: () => Promise<void>;
   /** Reopen a historical team build: fetch its completed plan + runId, set
@@ -135,7 +135,7 @@ export const useTeamStore = create<TeamState>((set) => ({
     if (token !== pollToken) return null; // POST 期间已被 reset
 
     // 2. 轮询拿终态。
-    return new Promise<{ runId: string; plan: TeamPlan } | null>((resolve) => {
+    return new Promise<{ runId: string; buildId: string; plan: TeamPlan } | null>((resolve) => {
       pollBuild(
         token,
         buildId,
@@ -145,7 +145,7 @@ export const useTeamStore = create<TeamState>((set) => ({
             return;
           }
           set({ building: false, lastRunId: runId, lastPlan: plan });
-          resolve({ runId, plan });
+          resolve({ runId, buildId, plan });
         },
         (error) => {
           if (token !== pollToken) {
