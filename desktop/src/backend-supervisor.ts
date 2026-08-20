@@ -11,18 +11,79 @@ export interface StartResult {
   proc: ChildProcess;
 }
 
+interface ReadyWait {
+  generation: number;
+  proc: ChildProcess;
+  timeout: ReturnType<typeof setTimeout> | null;
+  probeTimer: ReturnType<typeof setTimeout> | null;
+  resolve: (port: number) => void;
+  reject: (err: Error) => void;
+}
+
 export class BackendSupervisor {
   private proc: ChildProcess | null = null;
   private port: number | null = null;
   private logStream: fs.WriteStream | null = null;
   private restartCount = 0;
   private stopped = false;
-  private readyResolve: ((port: number) => void) | null = null;
-  private readyReject: ((err: Error) => void) | null = null;
+  private generation = 0;
+  private startPromise: Promise<StartResult> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyWait: ReadyWait | null = null;
+  private ready = false;
 
-  async start(): Promise<StartResult> {
+  start(): Promise<StartResult> {
+    if (this.startPromise) return this.startPromise;
+    const proc = this.proc;
+    if (
+      !this.stopped &&
+      proc &&
+      proc.exitCode === null &&
+      proc.signalCode === null
+    ) {
+      if (this.ready && this.port !== null) {
+        return Promise.resolve({ port: this.port, proc });
+      }
+      return Promise.reject(
+        new Error(
+          'Backend process is running but did not become ready; stop it before restarting',
+        ),
+      );
+    }
+
+    this.cancelRestartTimer();
+    this.stopped = false;
+    this.restartCount = 0;
+    const generation = ++this.generation;
+    return this.trackStart(generation);
+  }
+
+  private trackStart(generation: number): Promise<StartResult> {
+    if (this.startPromise) return this.startPromise;
+
+    const pendingStop = this.stopPromise;
+    const task = (async () => {
+      if (pendingStop) await pendingStop;
+      if (this.stopped || generation !== this.generation) {
+        throw new Error('Backend start cancelled');
+      }
+      return this.startAttempt(generation);
+    })();
+    const tracked = task.finally(() => {
+      if (this.startPromise === tracked) this.startPromise = null;
+    });
+    this.startPromise = tracked;
+    return tracked;
+  }
+
+  private async startAttempt(generation: number): Promise<StartResult> {
     const port = await findFreePort(49281, 49300);
+    if (this.stopped || generation !== this.generation) {
+      throw new Error('Backend start cancelled');
+    }
     this.port = port;
+    this.ready = false;
     this.openLogStream();
     this.log(`[supervisor] starting backend on port ${port}`);
 
@@ -39,11 +100,17 @@ export class BackendSupervisor {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.proc = proc;
-    proc.stdout?.on('data', (chunk: Buffer) => this.onStdout(chunk));
-    proc.stderr?.on('data', (chunk: Buffer) => this.onStderr(chunk));
-    proc.on('exit', (code, signal) => this.onExit(code, signal));
+    proc.stdout?.on('data', (chunk: Buffer) =>
+      this.onStdout(proc, generation, port, chunk),
+    );
+    proc.stderr?.on('data', (chunk: Buffer) =>
+      this.onStderr(proc, generation, chunk),
+    );
+    proc.on('exit', (code, signal) =>
+      this.onExit(proc, generation, code, signal),
+    );
 
-    await this.waitForReady(port);
+    await this.waitForReady(proc, generation, port);
     return { port, proc };
   }
 
@@ -84,30 +151,47 @@ export class BackendSupervisor {
     console.log(line);
   }
 
-  private onStdout(chunk: Buffer): void {
+  private onStdout(
+    proc: ChildProcess,
+    generation: number,
+    port: number,
+    chunk: Buffer,
+  ): void {
+    if (this.proc !== proc || this.generation !== generation) return;
     this.logStream?.write(chunk);
     const text = chunk.toString();
     // Detect ready signal: Hono @hono/node-server prints "Server listening on" or
     // we rely on HTTP probe. Both paths handled below.
-    if (this.readyResolve && /listening|Server listening|started on/i.test(text)) {
-      // Resolve after a tiny tick to let socket settle
-      this.readyResolve(this.port!);
-      this.readyResolve = null;
-      this.readyReject = null;
+    if (/listening|Server listening|started on/i.test(text)) {
+      this.resolveReady(proc, generation, port);
     }
   }
 
-  private onStderr(chunk: Buffer): void {
+  private onStderr(
+    proc: ChildProcess,
+    generation: number,
+    chunk: Buffer,
+  ): void {
+    if (this.proc !== proc || this.generation !== generation) return;
     this.logStream?.write(Buffer.concat([Buffer.from('[stderr] '), chunk]));
   }
 
-  private onExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private onExit(
+    proc: ChildProcess,
+    generation: number,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.proc !== proc || this.generation !== generation) return;
+
     this.log(`[supervisor] backend exited code=${code} signal=${signal}`);
-    if (this.readyReject) {
-      this.readyReject(new Error(`Backend exited before ready (code=${code} signal=${signal})`));
-      this.readyResolve = null;
-      this.readyReject = null;
-    }
+    this.proc = null;
+    this.ready = false;
+    this.rejectReady(
+      proc,
+      generation,
+      new Error(`Backend exited before ready (code=${code} signal=${signal})`),
+    );
     if (this.stopped) return;
     this.restartCount += 1;
     if (this.restartCount > 3) {
@@ -115,65 +199,163 @@ export class BackendSupervisor {
       return;
     }
     const delayMs = 1000 * Math.pow(2, this.restartCount - 1);
-    this.log(`[supervisor] scheduling restart #${this.restartCount} in ${delayMs}ms`);
-    setTimeout(() => {
-      if (this.stopped) return;
-      this.start().catch((err) => this.log(`[supervisor] restart failed: ${err.message}`));
+    this.log(
+      `[supervisor] scheduling restart #${this.restartCount} in ${delayMs}ms`,
+    );
+    const timer = setTimeout(() => {
+      if (this.restartTimer !== timer) return;
+      this.restartTimer = null;
+      if (this.stopped || this.generation !== generation || this.proc) return;
+      this.trackStart(generation).catch((err) => {
+        this.log(`[supervisor] restart failed: ${err.message}`);
+      });
     }, delayMs);
+    this.restartTimer = timer;
   }
 
-  private async waitForReady(port: number): Promise<number> {
+  private async waitForReady(
+    proc: ChildProcess,
+    generation: number,
+    port: number,
+  ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error(`Backend did not become ready within ${READY_TIMEOUT_MS}ms`));
+      const wait: ReadyWait = {
+        generation,
+        proc,
+        timeout: null,
+        probeTimer: null,
+        resolve,
+        reject,
+      };
+      this.readyWait = wait;
+      wait.timeout = setTimeout(() => {
+        this.rejectReady(
+          proc,
+          generation,
+          new Error(
+            `Backend did not become ready within ${READY_TIMEOUT_MS}ms`,
+          ),
+        );
       }, READY_TIMEOUT_MS);
-
-      this.readyResolve = (p) => {
-        clearTimeout(timeout);
-        resolve(p);
-      };
-      this.readyReject = (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      };
 
       // HTTP probe fallback: poll /api/health until 200
       const probe = async () => {
-        if (this.stopped) return;
+        if (!this.isCurrent(proc, generation) || this.readyWait !== wait)
+          return;
         try {
           const ok = await httpGetOk(`http://127.0.0.1:${port}/api/health`);
-          if (ok && this.readyResolve) {
-            this.readyResolve(port);
+          if (ok) {
+            this.resolveReady(proc, generation, port);
             return;
           }
         } catch {
           // not ready yet
         }
-        setTimeout(probe, READY_PROBE_INTERVAL_MS);
+        if (this.isCurrent(proc, generation) && this.readyWait === wait) {
+          wait.probeTimer = setTimeout(probe, READY_PROBE_INTERVAL_MS);
+        }
       };
-      setTimeout(probe, 300);
+      wait.probeTimer = setTimeout(probe, 300);
     });
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
     this.stopped = true;
+    ++this.generation;
+    this.cancelRestartTimer();
+    this.cancelReady(new Error('Backend stopped before ready'));
+    // A start still waiting on port selection belongs to the old generation.
+    // Detach it so a subsequent explicit start can create a fresh lifecycle.
+    this.startPromise = null;
+    this.ready = false;
+
+    const proc = this.proc;
     const port = this.port;
-    if (!this.proc || this.proc.exitCode !== null) {
+    const logStream = this.logStream;
+    this.proc = null;
+
+    if (this.stopPromise) return this.stopPromise;
+
+    const task = this.stopProcess(proc, port, logStream);
+    const tracked = task.finally(() => {
+      if (this.stopPromise === tracked) this.stopPromise = null;
+    });
+    this.stopPromise = tracked;
+    return tracked;
+  }
+
+  private async stopProcess(
+    proc: ChildProcess | null,
+    port: number | null,
+    logStream: fs.WriteStream | null,
+  ): Promise<void> {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
       // Even without a proc ref, kill anything still listening on the port
       if (port) killPortListeners(port, (l) => this.log(l));
-      this.logStream?.end();
+      logStream?.end();
+      if (this.logStream === logStream) this.logStream = null;
       return;
     }
     this.log('[supervisor] sending SIGTERM');
-    this.proc.kill('SIGTERM');
-    await waitExit(this.proc, 5000).catch(() => {
+    proc.kill('SIGTERM');
+    await waitExit(proc, 5000).catch(() => {
       this.log('[supervisor] SIGKILL after timeout');
-      this.proc?.kill('SIGKILL');
+      proc.kill('SIGKILL');
     });
     // Belt-and-suspenders: kill any descendant that escaped the process group
     // and is still holding the port (e.g. spawned Docker/agent subprocesses).
     if (port) killPortListeners(port, (l) => this.log(l));
-    this.logStream?.end();
+    logStream?.end();
+    if (this.logStream === logStream) this.logStream = null;
+  }
+
+  private isCurrent(proc: ChildProcess, generation: number): boolean {
+    return (
+      !this.stopped && this.generation === generation && this.proc === proc
+    );
+  }
+
+  private resolveReady(
+    proc: ChildProcess,
+    generation: number,
+    port: number,
+  ): void {
+    const wait = this.readyWait;
+    if (!wait || wait.proc !== proc || wait.generation !== generation) return;
+    if (!this.isCurrent(proc, generation)) return;
+    this.ready = true;
+    this.clearReadyWait(wait);
+    wait.resolve(port);
+  }
+
+  private rejectReady(
+    proc: ChildProcess,
+    generation: number,
+    err: Error,
+  ): void {
+    const wait = this.readyWait;
+    if (!wait || wait.proc !== proc || wait.generation !== generation) return;
+    this.clearReadyWait(wait);
+    wait.reject(err);
+  }
+
+  private cancelReady(err: Error): void {
+    const wait = this.readyWait;
+    if (!wait) return;
+    this.clearReadyWait(wait);
+    wait.reject(err);
+  }
+
+  private clearReadyWait(wait: ReadyWait): void {
+    if (wait.timeout) clearTimeout(wait.timeout);
+    if (wait.probeTimer) clearTimeout(wait.probeTimer);
+    if (this.readyWait === wait) this.readyWait = null;
+  }
+
+  private cancelRestartTimer(): void {
+    if (!this.restartTimer) return;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = null;
   }
 
   get currentPort(): number | null {
@@ -260,6 +442,10 @@ function resolveBackendPath(): string {
 
 function waitExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      resolve();
+      return;
+    }
     const t = setTimeout(() => reject(new Error('timeout')), timeoutMs);
     proc.once('exit', () => {
       clearTimeout(t);
