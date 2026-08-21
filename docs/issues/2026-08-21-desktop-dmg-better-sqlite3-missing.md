@@ -114,8 +114,18 @@ node -e "require('better-sqlite3')" 2>&1 | grep NODE_MODULE_VERSION
 - 打包机本地 node_modules 处于"无 binding"状态时：`npm rebuild better-sqlite3`（有 allowScripts 白名单后即可生效）。
 - 打包后本地 node_modules 的 binding 是 Node 22 ABI（127），本机 dev（Node 26）下次 `make dev` / `make start` 会由 `_ensure-native-abi` 自动重编译回本机 ABI，属预期行为。
 
-## 8. 经验沉淀 / 预防
+## 8. 验证记录（2026-08-21 14:05）
+
+修复后重新 `make desktop-pack-mac` 全链路验证：
+
+- 打包期：`desktop-rebuild-natives` 输出 `✅ [desktop] native binding 已通过内置 Node v22.11.0 加载校验`（新校验在打包链路中生效）
+- dmg 内容：`DeepThink.app/Contents/Resources/node_modules/better-sqlite3/build/Release/better_sqlite3.node` 存在
+- 负向用例：临时移走 `build/` 目录后，校验逻辑输出 `❌ better-sqlite3 rebuild 后仍无 ...`（fail loudly 生效）
+- 安装实测：覆盖安装到 `/Applications` 后启动，`main.log` 显示 `backend started on port 49281` + `main window ready`，`backend.log` 显示 `deepthink running` / `Web server started`，`curl /api/health` 返回 `{"status":"healthy","checks":{"database":true,...}}`
+
+## 9. 经验沉淀 / 预防
 
 - npm 12 的三类静默失败（EALLOWGIT 会报错、allow-scripts 只打 warning、rebuild 参数移除）里，**allow-scripts 拦截是最危险的**：install/rebuild 表面成功，产物缺失在运行时才爆。任何依赖原生模块的构建链路都必须有"产物存在 + 目标运行时可加载"两道校验。
 - 时间线教训：修复 allowScripts 白名单（13:08）后没有触发"受影响产物需要重建"的后续动作（rebuild + 重打包 + 实测安装），导致用户拿到的还是坏包。修复涉及构建产物时，验收必须是**重新构建产物并实测**，而不是"代码改了"。
 - 巡检建议（已内建于 Makefile）：`desktop-rebuild-natives` 的校验即打包期巡检；如需 CI 化，可在 desktop-pack 后追加一步用 dmg 内的 node 加载校验 binding。
+- 遗留风险（本次未改，待观察）：`desktop/` 目录 `npm install` 时 npm 12 拦截了 `electron@32.3.3` 的 postinstall（下载 Electron 二进制）。本机因 node_modules 已有缓存未受影响，但**全新机器**上 `make desktop-build` 可能因 Electron 二进制缺失而失败。届时需在 `desktop/package.json` 增加 `"allowScripts": {"electron": true}`。
