@@ -627,7 +627,7 @@ desktop-fetch-node: ## 拉取当前平台的 Node.js 二进制到 dev-resources/
 
 desktop-rebuild-natives: desktop-fetch-node ## 用内置 Node ABI 重新编译根 node_modules 的 native 模块（better-sqlite3 等），避免运行时 ABI 不匹配
 	@echo "[desktop] rebuilding native modules against node $(DESKTOP_NODE_VERSION)..."
-	npm rebuild --target=$(DESKTOP_NODE_VERSION) --runtime=node $(NPM_FLAGS)
+	npm_config_target=$(DESKTOP_NODE_VERSION) npm_config_runtime=node npm rebuild $(NPM_FLAGS)
 
 desktop-dev: desktop-build ## 桌面版开发模式：启动 Electron 壳，加载本机后端
 	cd $(DESKTOP_DIR) && npm run dev
