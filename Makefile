@@ -639,7 +639,7 @@ desktop-rebuild-natives: desktop-fetch-node ## 用内置 Node ABI 重新编译�
 	  echo "   多半是 install 脚本被 npm 12 allow-scripts 拦截，检查根 package.json 的 allowScripts 白名单"; \
 	  exit 1; \
 	fi
-	@if ! ./desktop/dev-resources/node/node -e "require('better-sqlite3')(':memory:').exec('select 1')" >/dev/null 2>&1; then \
+	@if ! ./dev-resources/node/node -e "require('better-sqlite3')(':memory:').exec('select 1')" >/dev/null 2>&1; then \
 	  echo "❌ better-sqlite3 binding 无法在内置 Node $(DESKTOP_NODE_VERSION) 下加载（ABI 不匹配）"; \
 	  exit 1; \
 	fi
