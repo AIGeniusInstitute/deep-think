@@ -70,5 +70,10 @@
     "url": "git+https://github.com/AIGeniusInstitute/deepthink.git",
     "directory": "web"
   },
-  "author": "aigeniusinstitute"
+  "author": "aigeniusinstitute",
+  "allowScripts": {
+    "sharp@0.34.5": true,
+    "esbuild@0.25.12": true,
+    "fsevents@2.3.3": true
+  }
 }

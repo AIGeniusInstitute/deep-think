@@ -30,5 +30,8 @@
     "agent-runner",
     "mcp",
     "deepthink"
-  ]
+  ],
+  "allowScripts": {
+    "@anthropic-ai/claude-code": true
+  }
 }

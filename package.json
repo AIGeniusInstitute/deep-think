@@ -82,5 +82,12 @@
     "chatbot",
     "docker",
     "mcp"
-  ]
+  ],
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "node-pty@1.1.0": true,
+    "protobufjs@7.6.5": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
 }

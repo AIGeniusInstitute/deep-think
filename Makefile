@@ -463,7 +463,10 @@ install-host-tools: ## 安装宿主机模式所需的外部工具（feishu-cli�
 	@./scripts/install-host-tools.sh
 
 install: ## 安装全部依赖并编译 agent-runner
-	$(PKG) install $(NPM_FLAGS)
+	@# --allow-git=all：npm 12 起默认禁用 git 依赖（EALLOWGIT），而 @whiskeysockets/baileys
+	@# 的 dependencies 里有 github:WhiskeySockets/libsignal-node 和
+	@# github:whiskeysockets/eslint-config（上游打包 bug）两个 git 依赖，必须显式放行
+	$(PKG) install $(NPM_FLAGS) --allow-git=all
 	@# node-pty 的 spawn-helper 预构建二进制可能缺少可执行权限，导致 PTY 模式失败
 	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
 	cd container/agent-runner && $(PKG) install $(NPM_FLAGS)
