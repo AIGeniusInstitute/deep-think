@@ -631,6 +631,19 @@ desktop-fetch-node: ## 拉取当前平台的 Node.js 二进制到 dev-resources/
 desktop-rebuild-natives: desktop-fetch-node ## 用内置 Node ABI 重新编译根 node_modules 的 native 模块（better-sqlite3 等），避免运行时 ABI 不匹配
 	@echo "[desktop] rebuilding native modules against node $(DESKTOP_NODE_VERSION)..."
 	npm_config_target=$(DESKTOP_NODE_VERSION) npm_config_runtime=node npm rebuild $(NPM_FLAGS)
+	@# rebuild 后必须校验产物：npm 12 默认 allow-scripts 拦截 install 脚本时，npm rebuild
+	@# 会"成功"但 better-sqlite3 不产出 binding，打进 dmg 后后端启动即崩（见
+	@# docs/issues/2026-08-21-desktop-dmg-better-sqlite3-missing.md）
+	@if [ ! -f node_modules/better-sqlite3/build/Release/better_sqlite3.node ]; then \
+	  echo "❌ better-sqlite3 rebuild 后仍无 build/Release/better_sqlite3.node"; \
+	  echo "   多半是 install 脚本被 npm 12 allow-scripts 拦截，检查根 package.json 的 allowScripts 白名单"; \
+	  exit 1; \
+	fi
+	@if ! ./desktop/dev-resources/node/node -e "require('better-sqlite3')(':memory:').exec('select 1')" >/dev/null 2>&1; then \
+	  echo "❌ better-sqlite3 binding 无法在内置 Node $(DESKTOP_NODE_VERSION) 下加载（ABI 不匹配）"; \
+	  exit 1; \
+	fi
+	@echo "✅ [desktop] native binding 已通过内置 Node $(DESKTOP_NODE_VERSION) 加载校验"
 
 desktop-dev: desktop-build ## 桌面版开发模式：启动 Electron 壳，加载本机后端
 	cd $(DESKTOP_DIR) && npm run dev
