@@ -17,6 +17,7 @@ import {
   listGraphNodeRuns,
   listGraphDefinitions,
   listGraphNodeTraceNodes,
+  listGraphNodeTimeline,
   listTraceToolCalls,
   repointGraphRunDefinition,
 } from '../db.js';
@@ -31,6 +32,7 @@ import {
   pauseGraphRun,
   rerunGraphNode,
 } from '../graph-engineering/graph-orchestrator.js';
+import { planAndRegister } from '../graph-engineering/graph-planner.js';
 import { logger } from '../logger.js';
 
 export const graphRoutes = new Hono<{ Variables: Variables }>();
@@ -97,6 +99,66 @@ graphRoutes.get('/runs', (c) => {
   return c.json({ runs });
 });
 
+/**
+ * POST /api/graph/plan — DSL v2 auto-planner.
+ * Body: { task, background?, acceptanceCriteria?, template?, groupFolder, chatJid, autorun? }
+ * Calls planAndRegister (LLM → validate → template fallback), optionally
+ * starts a run when autorun=true. Returns the registered definition + runId.
+ */
+graphRoutes.post('/plan', async (c) => {
+  const authUser = c.get('user') as import('../types.js').AuthUser;
+  const body = await c.req.json().catch(() => null);
+  if (!body?.task || !body.groupFolder || !body.chatJid) {
+    return c.json({ error: 'Missing task/groupFolder/chatJid' }, 400);
+  }
+  try {
+    const result = await planAndRegister({
+      task: body.task,
+      background: body.background,
+      acceptanceCriteria: body.acceptanceCriteria,
+      template: body.template,
+      ownerUserId: authUser.id,
+      groupFolder: body.groupFolder,
+      userLanguage: 'zh-CN',
+    });
+    let runId: string | undefined;
+    if (body.autorun) {
+      const webDeps = getWebDeps();
+      if (!webDeps?.startGraphRun) {
+        return c.json({
+          ok: true,
+          definitionId: result.definition.id,
+          version: result.definition.version,
+          source: result.source,
+          warnings: result.warnings,
+          error: 'autorun requested but graph execution not initialized',
+        });
+      }
+      const startResult = webDeps.startGraphRun({
+        definitionId: result.definition.id,
+        ownerUserId: authUser.id,
+        groupFolder: body.groupFolder,
+        chatJid: body.chatJid,
+        goalText: body.task,
+        maxParallel: body.maxParallel,
+        initialState: body.initialState,
+      });
+      if (startResult.success) runId = startResult.runId;
+    }
+    return c.json({
+      ok: true,
+      definitionId: result.definition.id,
+      version: result.definition.version,
+      source: result.source,
+      warnings: result.warnings,
+      runId,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Graph plan failed');
+    return c.json({ error: (err as Error).message }, 400);
+  }
+});
+
 /** POST /api/graph/runs — start a new graph run (AC3.4 start). */
 graphRoutes.post('/runs', async (c) => {
   const authUser = c.get('user') as import('../types.js').AuthUser;
@@ -134,6 +196,23 @@ graphRoutes.get('/runs/:id', (c) => {
   }
   const nodes = listGraphNodeRuns(id);
   return c.json({ run, nodeRuns: nodes });
+});
+
+/**
+ * GET /api/graph/runs/:id/timeline — DSL v2 history-replay timeline.
+ * Returns node status-change events ordered by start time, for the frontend
+ * ReplayPlayer to rebuild canvas state at a given timestamp.
+ */
+graphRoutes.get('/runs/:id/timeline', (c) => {
+  const authUser = c.get('user') as import('../types.js').AuthUser;
+  const id = c.req.param('id');
+  const run = getGraphRun(id);
+  if (!run) return c.json({ error: 'Graph run not found' }, 404);
+  if (run.owner_user_id !== authUser.id && authUser.role !== 'admin') {
+    return c.json({ error: 'Graph run not found' }, 404);
+  }
+  const timeline = listGraphNodeTimeline(id);
+  return c.json({ runId: id, timeline });
 });
 
 /** POST /api/graph/runs/:id/resume — resume from checkpoint (AC3.4). */

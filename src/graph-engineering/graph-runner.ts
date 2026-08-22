@@ -18,6 +18,8 @@
  */
 
 import type { ChildProcess } from 'child_process';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   addGraphRunUsage,
@@ -40,6 +42,7 @@ import { runScript } from '../script-runner.js';
 import { scoreAssertion } from '../harness-eval.js';
 import type { ExecutionMode, RegisteredGroup } from '../types.js';
 import type { StreamEvent } from '../stream-event.types.js';
+import { buildEvalContext, resolveExpr, resolveValue } from './graph-expr.js';
 import type {
   GraphAssertion,
   GraphDefinition,
@@ -216,8 +219,35 @@ export async function runGraphNode(
   }
 }
 
-/** Type-specific dispatch. */
+/** Type-specific dispatch. Wraps execution in a per-node timeout when set. */
 async function dispatchByType(
+  ctx: GraphRunContext,
+  deps: GraphDeps,
+  node: GraphNode,
+): Promise<NodeRunOutcome> {
+  const exec = dispatchByTypeInner(ctx, deps, node);
+  if (node.timeoutMs && node.timeoutMs > 0) {
+    const timeout = new Promise<NodeRunOutcome>((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            status: 'failed',
+            output: '',
+            inputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+            error: `node ${node.id} timed out after ${node.timeoutMs}ms`,
+          }),
+        node.timeoutMs,
+      ),
+    );
+    return Promise.race([exec, timeout]);
+  }
+  return exec;
+}
+
+/** Inner dispatch — the actual node-type handlers. */
+async function dispatchByTypeInner(
   ctx: GraphRunContext,
   deps: GraphDeps,
   node: GraphNode,
@@ -244,6 +274,21 @@ async function dispatchByType(
         outputTokens: 0,
         costUsd: 0,
       };
+    // ---- DSL v2 node kinds (graph-task-planning-execution) ----
+    case 'llm':
+      return runLlmNode(ctx, node);
+    case 'tool':
+      return runToolNode(ctx, node);
+    case 'start':
+    case 'parallel':
+      // Semantic-sugar / lifecycle markers: no-op, immediately completed.
+      // 'parallel' fans out via its multiple outgoing plain edges (scheduler).
+      // 'start' just records graph input has been consumed.
+      return { status: 'completed', output: '', inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    case 'end':
+      return runEndNode(ctx, node);
+    case 'aggregate':
+      return runAggregateNode(ctx, node);
     default:
       return {
         status: 'failed',
@@ -461,7 +506,10 @@ async function runGateNode(
   // 1+2. Behavioral evidence (shellCheck + assertions) via the pure evaluator.
   let shellResult: { exitCode: number; stdout: string; stderr: string } | null = null;
   if (node.shellCheck) {
-    const res = await runScript(node.shellCheck, ctx.groupFolder);
+    // P0: run shellCheck in the node's isolated workspace so parallel gates /
+    // tool nodes don't race on the owner folder's working tree.
+    const ws = resolveNodeWorkspace(ctx, node);
+    const res = await runScript(node.shellCheck, ws);
     shellResult = { exitCode: res.exitCode ?? 1, stdout: res.stdout, stderr: res.stderr };
   }
   const hasEvidence = !!node.shellCheck || !!(node.assertions && node.assertions.length > 0);
@@ -519,6 +567,144 @@ function runBranchNode(node: GraphNode, state: GraphState): NodeRunOutcome {
     status: 'completed',
     output: `branch → ${branchResult}`,
     branchResult,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DSL v2 node runners (graph-task-planning-execution)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an isolated workspace directory for a node. P0 isolates gate/tool/
+ * llm nodes (which have no group-identity dependency) under
+ * `<groupFolder>/graph-workspaces/<runId>/<nodeId>/`. Agent nodes still run in
+ * the owner group folder (they depend on RegisteredGroup lookup + container
+ * runner internals — full agent isolation is P1, see SOLUTION §5.2).
+ */
+function resolveNodeWorkspace(ctx: GraphRunContext, node: GraphNode): string {
+  const ws = join(ctx.groupFolder, 'graph-workspaces', ctx.graphRunId, node.id);
+  try {
+    mkdirSync(ws, { recursive: true });
+  } catch {
+    // best-effort; the owner folder is the fallback for agents.
+  }
+  return ws;
+}
+
+/** Run an 'llm' node — pure model inference (no agent runner, no tools). */
+async function runLlmNode(ctx: GraphRunContext, node: GraphNode): Promise<NodeRunOutcome> {
+  const evalCtx = buildEvalContext(ctx.state);
+  const prompt = resolveExpr(node.prompt ?? node.title ?? '', evalCtx);
+  const raw = await lightweightSdkQuery(prompt, {
+    timeout: GATE_REVIEW_TIMEOUT_MS,
+    ...(node.model ? { model: node.model } : {}),
+  });
+  const output = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
+  return {
+    status: 'completed',
+    output,
+    statePatch: { [`node_${node.id}_output`]: output.slice(0, 8000) },
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  };
+}
+
+/**
+ * Run a 'tool' node — direct platform tool invocation. P0 supports the
+ * `run_script` tool (mirrors gate shellCheck, in the node's isolated workspace)
+ * plus `web_search` / `web_fetch` via the lightweight SDK query path. Other
+ * tool names fail clearly rather than silently no-op'ing.
+ */
+async function runToolNode(ctx: GraphRunContext, node: GraphNode): Promise<NodeRunOutcome> {
+  const evalCtx = buildEvalContext(ctx.state);
+  const toolInput = resolveValue(node.toolInput ?? {}, evalCtx);
+  const toolName = node.toolName ?? '';
+  if (toolName === 'run_script') {
+    const cmd = typeof toolInput.command === 'string' ? toolInput.command : '';
+    const ws = resolveNodeWorkspace(ctx, node);
+    const res = await runScript(cmd, ws);
+    const ok = (res.exitCode ?? 1) === 0;
+    const output = `$ ${cmd}\n[exit ${res.exitCode}]\n${res.stdout}${res.stderr ? `\n${res.stderr}` : ''}`;
+    return {
+      status: ok ? 'completed' : 'failed',
+      output,
+      statePatch: { [`node_${node.id}_output`]: output.slice(0, 8000) },
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      error: ok ? undefined : `run_script exit ${res.exitCode}`,
+    };
+  }
+  // web_search / web_fetch: delegate to a one-shot LLM-style query is NOT a
+  // real tool call; instead surface clearly as unsupported in P0 so the planner
+  // / author gets a precise failure rather than silent success.
+  return {
+    status: 'failed',
+    output: '',
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    error: `tool node ${node.id}: tool "${toolName}" not supported in P0 (only run_script)`,
+  };
+}
+
+/** Run an 'end' node — resolve the output template against the final state. */
+function runEndNode(ctx: GraphRunContext, node: GraphNode): NodeRunOutcome {
+  if (!node.outputTemplate) {
+    return { status: 'completed', output: '', inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  }
+  const evalCtx = buildEvalContext(ctx.state);
+  const output = resolveExpr(node.outputTemplate, evalCtx);
+  return {
+    status: 'completed',
+    output,
+    statePatch: { [`node_${node.id}_output`]: output, __graph_result: output },
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+  };
+}
+
+/**
+ * Run an 'aggregate' node — converging multiple branch outputs. With
+ * mergeStrategy='all' (default) it's a join no-op (the scheduler already
+ * waited for all predecessors). With 'arbitrate' it calls an LLM to merge the
+ * upstream outputs into one. 'any' completes as soon as ANY predecessor output
+ * exists (the scheduler still waits for all completed predecessors; 'any'
+ * governs which output is surfaced).
+ */
+async function runAggregateNode(ctx: GraphRunContext, node: GraphNode): Promise<NodeRunOutcome> {
+  // Collect upstream outputs from state (node_<id>_output for each predecessor).
+  const preds = ctx.definition.edges.filter((e) => e.to === node.id).map((e) => e.from);
+  const outputs: Record<string, unknown> = {};
+  for (const pid of preds) {
+    const key = `node_${pid}_output`;
+    if (ctx.state[key] !== undefined) outputs[pid] = ctx.state[key];
+  }
+  const strategy = node.mergeStrategy ?? 'all';
+  if (strategy === 'arbitrate') {
+    const prompt = `${node.arbitratePrompt ?? '请合并以下各分支产出为统一结论'}\n\n${JSON.stringify(outputs, null, 2).slice(0, 8000)}`;
+    const raw = await lightweightSdkQuery(prompt, { timeout: GATE_REVIEW_TIMEOUT_MS });
+    const output = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
+    return {
+      status: 'completed',
+      output,
+      statePatch: { [`node_${node.id}_output`]: output.slice(0, 8000) },
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+    };
+  }
+  // 'all' / 'any': surface merged JSON.
+  const output = JSON.stringify(outputs);
+  return {
+    status: 'completed',
+    output,
+    statePatch: { [`node_${node.id}_output`]: output.slice(0, 8000) },
     inputTokens: 0,
     outputTokens: 0,
     costUsd: 0,

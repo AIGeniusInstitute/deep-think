@@ -10,11 +10,18 @@
  * See SOLUTION.md §4 for the algorithm.
  */
 
-import type { GraphDefinition, GraphNode } from './graph-types.js';
+import type { GraphDefinition, GraphEdge, GraphNode } from './graph-types.js';
+import type { EvalContext } from './graph-expr.js';
+import { evalCondition } from './graph-expr.js';
 
 /** Get all predecessors (incoming edges) of a node. */
-function predecessors(def: GraphDefinition, nodeId: string) {
+function predecessors(def: GraphDefinition, nodeId: string): GraphEdge[] {
   return def.edges.filter((e) => e.to === nodeId);
+}
+
+/** All outgoing edges of a node (siblings), used for default-edge fallback logic. */
+function outgoing(def: GraphDefinition, nodeId: string): GraphEdge[] {
+  return def.edges.filter((e) => e.from === nodeId);
 }
 
 /** Source nodes (no incoming edges) — initial ready set. */
@@ -24,20 +31,66 @@ export function sourceNodes(def: GraphDefinition): GraphNode[] {
 }
 
 /**
+ * Is a single edge "active" (its data/control may flow)? An edge is active iff:
+ *  - its source is completed, AND
+ *  - for a plain edge (no condition/expression/default): always active once source completed;
+ *  - for an `expression` edge: the expression evaluates truthy against evalCtx;
+ *  - for a `condition` edge (legacy branch string equality): branchDecisions[from] === condition;
+ *  - for a `default` edge: NONE of the sibling conditional edges (same `from`)
+ *    are active — i.e. it is the fallback when no condition/expression matched.
+ *
+ * @param evalCtx  when null, expression/default edges degrade to legacy behavior
+ *                 (expression treated as always-active, default ignored). This
+ *                 keeps the scheduler unit-testable without a full runtime
+ *                 context while preserving backward compatibility for callers
+ *                 that haven't built an EvalContext.
+ */
+function edgeActive(
+  edge: GraphEdge,
+  def: GraphDefinition,
+  completed: Set<string>,
+  branchDecisions: Map<string, string>,
+  evalCtx: EvalContext | null,
+): boolean {
+  if (!completed.has(edge.from)) return false;
+  // Plain edge.
+  if (!edge.condition && !edge.expression && !edge.isDefault) return true;
+
+  // Expression edge: evaluate against the runtime context.
+  if (edge.expression) {
+    if (!evalCtx) return true; // degrade: no context → treat as active (legacy callers)
+    return evalCondition(edge.expression, evalCtx);
+  }
+  // Legacy condition edge: string equality against recorded branch decision.
+  if (edge.condition) {
+    return branchDecisions.get(edge.from) === edge.condition;
+  }
+  // Default edge: active iff no sibling conditional edge is active.
+  if (edge.isDefault) {
+    if (!evalCtx) return false; // no context → default edges never activate (legacy)
+    for (const sib of outgoing(def, edge.from)) {
+      if (sib.isDefault) continue;
+      if (edgeActive(sib, def, completed, branchDecisions, evalCtx)) return false;
+    }
+    return true;
+  }
+  return true;
+}
+
+/**
  * Compute the set of node ids that are ready to run.
- * A node is ready iff:
- *  - it is not yet completed
- *  - every incoming edge's source is completed, AND
- *  - for conditional edges (leaving a branch node), the branch decision
- *    matches the edge's condition (i.e. this edge was "taken")
+ * A node is ready iff every incoming edge is active (source completed + any
+ * conditional/default routing condition satisfied).
  *
  * @param completed  node ids that reached 'completed'
- * @param branchDecisions  branchNodeId → chosen condition value
+ * @param branchDecisions  branchNodeId → chosen condition value (legacy)
+ * @param evalCtx  runtime context for expression/default edges (optional, backward compat)
  */
 export function computeReadyNodes(
   def: GraphDefinition,
   completed: Set<string>,
   branchDecisions: Map<string, string>,
+  evalCtx: EvalContext | null = null,
 ): GraphNode[] {
   const ready: GraphNode[] = [];
   for (const node of def.nodes) {
@@ -50,22 +103,37 @@ export function computeReadyNodes(
     }
     let allSatisfied = true;
     for (const edge of preds) {
-      if (!completed.has(edge.from)) {
+      if (!edgeActive(edge, def, completed, branchDecisions, evalCtx)) {
         allSatisfied = false;
         break;
-      }
-      // Conditional edge: only active if the branch chose this edge's condition.
-      if (edge.condition) {
-        const chosen = branchDecisions.get(edge.from);
-        if (chosen !== edge.condition) {
-          allSatisfied = false;
-          break;
-        }
       }
     }
     if (allSatisfied) ready.push(node);
   }
   return ready;
+}
+
+/**
+ * Edges that were "taken" in this scheduling step — the conditional/default
+ * edges whose source just completed and whose condition matched. Emitted as
+ * `graph_edge_taken` stream events by the orchestrator for the data-flow view.
+ */
+export function takenEdges(
+  def: GraphDefinition,
+  newlyCompleted: GraphNode[],
+  completed: Set<string>,
+  branchDecisions: Map<string, string>,
+  evalCtx: EvalContext | null = null,
+): GraphEdge[] {
+  const result: GraphEdge[] = [];
+  for (const node of newlyCompleted) {
+    for (const edge of outgoing(def, node.id)) {
+      if (edgeActive(edge, def, completed, branchDecisions, evalCtx)) {
+        result.push(edge);
+      }
+    }
+  }
+  return result;
 }
 
 /**

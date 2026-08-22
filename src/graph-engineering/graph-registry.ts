@@ -33,6 +33,7 @@ export function computeManifestHash(def: GraphDefinition): string {
     nodes: def.nodes,
     edges: def.edges,
     stateSchema: def.stateSchema ?? [],
+    budget: def.budget ?? null,
   };
   return crypto.createHash('sha256').update(canonicalJson(payload)).digest('hex');
 }
@@ -42,11 +43,13 @@ export function serializeDefinition(def: GraphDefinition): {
   nodes_json: string;
   edges_json: string;
   state_schema_json: string;
+  budget_json: string;
 } {
   return {
     nodes_json: JSON.stringify(def.nodes),
     edges_json: JSON.stringify(def.edges),
     state_schema_json: def.stateSchema ? JSON.stringify(def.stateSchema) : '',
+    budget_json: def.budget ? JSON.stringify(def.budget) : '',
   };
 }
 
@@ -59,6 +62,7 @@ export function deserializeDefinition(row: {
   nodes_json: string;
   edges_json: string;
   state_schema_json: string | null;
+  budget_json?: string | null;
 }): GraphDefinition {
   return {
     id: row.id,
@@ -69,6 +73,9 @@ export function deserializeDefinition(row: {
     edges: JSON.parse(row.edges_json) as GraphEdge[],
     stateSchema: row.state_schema_json
       ? (JSON.parse(row.state_schema_json) as GraphDefinition['stateSchema'])
+      : undefined,
+    budget: row.budget_json
+      ? (JSON.parse(row.budget_json) as GraphDefinition['budget'])
       : undefined,
   };
 }
@@ -98,6 +105,16 @@ export function validateDefinition(def: GraphDefinition): GraphValidationResult 
     if ((n.type === 'agent' || n.type === 'gate') && !n.prompt && !n.successCriteria) {
       errors.push(`${n.type} node ${n.id} missing prompt/successCriteria`);
     }
+    // DSL v2: required fields for the new node kinds.
+    if (n.type === 'llm' && !n.prompt) {
+      errors.push(`llm node ${n.id} missing prompt`);
+    }
+    if (n.type === 'tool' && !n.toolName) {
+      errors.push(`tool node ${n.id} missing toolName`);
+    }
+    if (n.type === 'aggregate' && n.mergeStrategy === 'arbitrate' && !n.arbitratePrompt) {
+      errors.push(`aggregate node ${n.id} with mergeStrategy=arbitrate missing arbitratePrompt`);
+    }
   }
 
   // Edges
@@ -105,6 +122,22 @@ export function validateDefinition(def: GraphDefinition): GraphValidationResult 
     if (!nodeIds.has(e.from)) errors.push(`edge ${e.id}: from '${e.from}' not found`);
     if (!nodeIds.has(e.to)) errors.push(`edge ${e.id}: to '${e.to}' not found`);
     if (e.from === e.to) errors.push(`edge ${e.id}: self-loop not allowed (P0)`);
+    // DSL v2: an edge may declare condition OR expression OR be default, not
+    // conflicting combinations. (condition + expression is tolerated with
+    // expression taking precedence, but flag for author clarity.)
+    if (e.expression && e.condition) {
+      errors.push(`edge ${e.id}: both condition and expression set — ambiguous`);
+    }
+  }
+  // DSL v2: at most one default edge per from-node.
+  const defaultByFrom = new Map<string, number>();
+  for (const e of def.edges) {
+    if (e.isDefault) {
+      defaultByFrom.set(e.from, (defaultByFrom.get(e.from) ?? 0) + 1);
+    }
+  }
+  for (const [from, cnt] of defaultByFrom) {
+    if (cnt > 1) errors.push(`node ${from}: multiple default edges (${cnt})`);
   }
 
   // Cycle detection (3-color DFS). P0 forbids cycles.
@@ -168,7 +201,7 @@ export function registerDefinition(
   }
   const latest = getLatestGraphDefinition(def.id);
   const version = latest ? latest.version + 1 : def.version;
-  const { nodes_json, edges_json, state_schema_json } = serializeDefinition(def);
+  const { nodes_json, edges_json, state_schema_json, budget_json } = serializeDefinition(def);
   const hash = computeManifestHash({ ...def, version });
   const key = createGraphDefinition({
     id: def.id,
@@ -179,6 +212,7 @@ export function registerDefinition(
     nodes_json,
     edges_json,
     state_schema_json: state_schema_json || null,
+    budget_json: budget_json || null,
     manifest_hash: hash,
     status: 'active',
   });

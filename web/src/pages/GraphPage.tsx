@@ -4,7 +4,11 @@
  */
 import { useEffect, useState } from 'react';
 import { GraphDagView } from '../components/graph/GraphDagView';
+import { GanttView } from '../components/graph/GanttView';
+import { ReplayPlayer } from '../components/graph/ReplayPlayer';
 import { useGraphStore } from '../stores/graph';
+
+type DetailTab = 'dag' | 'gantt' | 'replay';
 
 export function GraphPage() {
   const runs = useGraphStore((s) => s.runs);
@@ -13,6 +17,7 @@ export function GraphPage() {
   const pauseRun = useGraphStore((s) => s.pauseRun);
   const resumeRun = useGraphStore((s) => s.resumeRun);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [tab, setTab] = useState<DetailTab>('dag');
 
   useEffect(() => {
     void fetchRuns();
@@ -21,7 +26,7 @@ export function GraphPage() {
   if (selectedId) {
     return (
       <div className="flex flex-col h-full">
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border">
           <button
             onClick={() => {
               setSelectedId(null);
@@ -31,9 +36,26 @@ export function GraphPage() {
           >
             ← 返回列表
           </button>
+          <div className="flex gap-1">
+            {(['dag', 'gantt', 'replay'] as DetailTab[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`text-xs px-3 py-1 rounded ${
+                  tab === t
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                {t === 'dag' ? '执行图' : t === 'gantt' ? '甘特图' : '历史回放'}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex-1 min-h-0">
-          <GraphDagView runId={selectedId} />
+          {tab === 'dag' && <GraphDagView runId={selectedId} />}
+          {tab === 'gantt' && <GanttView runId={selectedId} />}
+          {tab === 'replay' && <ReplayPlayer runId={selectedId} />}
         </div>
       </div>
     );

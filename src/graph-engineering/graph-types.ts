@@ -9,8 +9,18 @@
  * See docs/tech_solution/graph-engineering/SOLUTION.md for the full design.
  */
 
-/** Node kinds. Mirrors graph_node_runs.node_type CHECK constraint in db.ts. */
-export type GraphNodeType = 'agent' | 'gate' | 'branch' | 'join' | 'human';
+/**
+ * Node kinds. Mirrors graph_node_runs.node_type CHECK constraint in db.ts.
+ *
+ * DSL v2 extensions (graph-task-planning-execution): adds pure-reasoning
+ * (llm), direct-tool (tool), lifecycle markers (start/end), and fan-out /
+ * fan-in semantic sugar (parallel/aggregate). All new kinds are optional —
+ * existing graphs using only agent/gate/branch/join/human keep working.
+ */
+export type GraphNodeType =
+  | 'agent' | 'gate' | 'branch' | 'join' | 'human'
+  | 'llm' | 'tool' | 'start' | 'end'
+  | 'parallel' | 'aggregate';
 
 /** Edge kinds. A data edge carries state dependency; a control edge only gates. */
 export type GraphEdgeType = 'data' | 'control';
@@ -111,6 +121,26 @@ export interface GraphNode {
    *  (default `node_<id>_approval`). Downstream agent/branch nodes read this
    *  key to route on the approval decision. */
   approvalStateKey?: string;
+
+  // ---- DSL v2 extensions (graph-task-planning-execution) ----
+  /** 'llm' node: model id override (null/undefined = inherit global). */
+  model?: string;
+  /** 'llm'/'tool' node: declared output shape (documentation / validation). */
+  outputSchema?: Record<string, unknown>;
+  /** Declared input shape for any node (documentation / validation). */
+  inputSchema?: Record<string, unknown>;
+  /** 'tool' node: platform tool name to invoke (e.g. 'web_search','web_fetch','run_script'). */
+  toolName?: string;
+  /** 'tool' node: tool arguments; values may contain ${var} references resolved at run time. */
+  toolInput?: Record<string, unknown>;
+  /** 'aggregate' node: how to combine the outputs of converging branches. */
+  mergeStrategy?: 'all' | 'any' | 'arbitrate';
+  /** 'aggregate' node with mergeStrategy='arbitrate': prompt for the LLM that merges branch outputs. */
+  arbitratePrompt?: string;
+  /** 'start' node: declared graph-level input parameters (mirrors stateSchema but owned by the start node). */
+  inputParams?: GraphStateField[];
+  /** 'end' node: output template with ${var} references resolved against graph state at run end. */
+  outputTemplate?: string;
 }
 
 /**
@@ -135,6 +165,25 @@ export interface GraphEdge {
    * predicate must return to activate this edge. Omit for unconditional edges.
    */
   condition?: string;
+  /**
+   * DSL v2: a condition expression evaluated at run time (e.g.
+   * "${node_a.output.score} > 0.8" or "${node_b.status} == 'ok'"). When set,
+   * `condition` (string equality) is ignored. Evaluated by graph-expr against
+   * the shared graph state + node outputs + graph inputs.
+   */
+  expression?: string;
+  /**
+   * DSL v2: default fallback edge. Activated only when none of the sibling
+   * conditional edges (expression/condition) leaving the same `from` node
+   * match. At most one default edge per `from` node is recommended.
+   */
+  isDefault?: boolean;
+  /**
+   * DSL v2: data mapping / transformation rules. Keys are target variable
+   * names in downstream state, values are ${var} reference templates resolved
+   * against the upstream node output. Applied by the runner when the edge is taken.
+   */
+  dataMapping?: Record<string, string>;
 }
 
 /** Shared mutable state passed between nodes. Nodes return patches merged in. */
@@ -157,6 +206,19 @@ export interface GraphDefinition {
   nodes: GraphNode[];
   edges: GraphEdge[];
   stateSchema?: GraphStateField[];
+  /**
+   * DSL v2: execution budget. When any limit is exceeded the orchestrator
+   * hard-fails the run (circuit breaker). All fields optional; missing → no
+   * limit on that dimension. Persisted in graph_definitions.budget_json.
+   */
+  budget?: GraphBudget;
+}
+
+/** Execution budget limits for a graph run (circuit breaker). */
+export interface GraphBudget {
+  maxTokens?: number;
+  maxCostUsd?: number;
+  maxDurationMs?: number;
 }
 
 /** Result of validating a graph definition. */

@@ -22,6 +22,7 @@ import {
   getCompletedGraphNodeIds,
   getGraphDefinition,
   getGraphRun,
+  getGraphRunUsage,
   getLatestGraphNodeRun,
   listGraphNodeRuns,
   resetGraphNodeAndDownstream,
@@ -36,12 +37,23 @@ import {
   computeReadyNodes,
   downstreamNodeIds,
   nextReadyBatch,
+  takenEdges,
 } from './graph-scheduler.js';
 import {
   deserializeDefinition,
   loadLatestDefinition,
+  computeManifestHash,
 } from './graph-registry.js';
 import { runGraphNode, type GraphDeps, type GraphRunContext } from './graph-runner.js';
+import { buildEvalContext } from './graph-expr.js';
+import {
+  graphStartEvent,
+  graphNodeStartEvent,
+  graphNodeEndEvent,
+  graphEdgeTakenEvent,
+  graphEndEvent,
+} from './graph-events.js';
+import type { StreamEvent } from '../stream-event.types.js';
 import type { GraphDefinition, GraphNode, GraphState, NodeRunOutcome } from './graph-types.js';
 
 const BRANCH_STATE_PREFIX = '__branch_';
@@ -65,6 +77,19 @@ export async function buildRunContext(
     return null;
   }
   const definition = deserializeDefinition(defRow);
+  // DSL v2: detect version drift on resume. The run captured the definition's
+  // manifest_hash at start; if the definition row's hash now differs (e.g. the
+  // row was mutated out-of-band), refuse resume so the caller reruns from
+  // scratch rather than replaying a half-changed graph. Defense-in-depth on
+  // top of the immutable (id, version) append-only versioning. Old runs
+  // (pre-v55, manifest_hash null) skip the check — backward compatible.
+  if (run.manifest_hash && defRow.manifest_hash && run.manifest_hash !== defRow.manifest_hash) {
+    logger.error(
+      { runId, stored: run.manifest_hash, computed: defRow.manifest_hash },
+      'Graph definition manifest hash mismatch — refusing resume',
+    );
+    return null;
+  }
   const ctx: GraphRunContext = {
     graphRunId: run.id,
     ownerUserId: run.owner_user_id,
@@ -100,6 +125,12 @@ async function runNodeWithRetry(
   let lastOutcome: NodeRunOutcome = {
     status: 'failed', output: '', inputTokens: 0, outputTokens: 0, costUsd: 0,
   };
+  const nodeStartedAt = Date.now();
+  // DSL v2: emit a node-start event so the frontend can light the node running
+  // the moment the runner picks it up (before the attempt loop).
+  try {
+    deps.broadcastStreamEvent?.(ctx.chatJid, graphNodeStartEvent(ctx.graphRunId, node));
+  } catch { /* never block control flow */ }
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     // Re-check run status between attempts (pause/cancel).
     const run = getGraphRun(ctx.graphRunId);
@@ -107,7 +138,20 @@ async function runNodeWithRetry(
     if (run?.status === 'paused') return { ...lastOutcome, status: 'paused' };
 
     lastOutcome = await runGraphNode(ctx, deps, node, parentNodeRunId);
-    if (lastOutcome.status === 'completed') return lastOutcome;
+    if (lastOutcome.status === 'completed') {
+      try {
+        deps.broadcastStreamEvent?.(
+          ctx.chatJid,
+          graphNodeEndEvent(ctx.graphRunId, node, 'completed', {
+            tokens: lastOutcome.inputTokens + lastOutcome.outputTokens,
+            costUsd: lastOutcome.costUsd,
+            durationMs: Date.now() - nodeStartedAt,
+            output: lastOutcome.output,
+          }),
+        );
+      } catch { /* ignore */ }
+      return lastOutcome;
+    }
     if (lastOutcome.status === 'paused') return lastOutcome; // human node
     if (lastOutcome.status === 'skipped') return lastOutcome;
     // failed → retry with backoff (unless last attempt)
@@ -117,6 +161,16 @@ async function runNodeWithRetry(
       await sleep(backoff * Math.pow(2, attempt));
     }
   }
+  // All attempts exhausted → emit a node-end failed event.
+  try {
+    deps.broadcastStreamEvent?.(
+      ctx.chatJid,
+      graphNodeEndEvent(ctx.graphRunId, node, 'failed', {
+        durationMs: Date.now() - nodeStartedAt,
+        error: lastOutcome.error,
+      }),
+    );
+  } catch { /* ignore */ }
   return lastOutcome;
 }
 
@@ -155,8 +209,20 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
     logger.warn({ errors: coverageErrors }, 'Graph branch edge coverage warnings');
   }
 
+  /** Broadcast a graph_* event over WebSocket (never throws). */
+  const broadcast = (ev: StreamEvent) => {
+    try {
+      deps.broadcastStreamEvent?.(ctx.chatJid, ev);
+    } catch (err) {
+      logger.error({ err, graphRunId: ctx.graphRunId }, 'graph event broadcast failed');
+    }
+  };
+
   updateGraphRunStatus(ctx.graphRunId, 'running');
   logger.info({ graphRunId: ctx.graphRunId, defId: def.id }, 'Graph run started');
+  broadcast(graphStartEvent(ctx.graphRunId, def.id, def.nodes.length));
+
+  const runStartedAt = Date.now();
 
   // Resume: rebuild completed-set + branch decisions from persisted state.
   const completed = getCompletedGraphNodeIds(ctx.graphRunId);
@@ -167,11 +233,33 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
   // Up to GATE_RETRY_MAX re-runs before the run is marked failed.
   const gateRetryCount = new Map<string, number>();
 
+  /** DSL v2: budget circuit breaker. Hard-fails the run when any budget limit
+   *  (tokens / cost / duration) is exceeded. Returns an error reason or null. */
+  const budgetBreached = (): string | null => {
+    if (!def.budget) return null;
+    if (def.budget.maxDurationMs) {
+      if (Date.now() - runStartedAt > def.budget.maxDurationMs) {
+        return `budget exceeded: duration > ${def.budget.maxDurationMs}ms`;
+      }
+    }
+    if (def.budget.maxTokens || def.budget.maxCostUsd) {
+      const usage = getGraphRunUsage(ctx.graphRunId);
+      if (def.budget.maxTokens && usage.totalTokens > def.budget.maxTokens) {
+        return `budget exceeded: tokens ${usage.totalTokens} > ${def.budget.maxTokens}`;
+      }
+      if (def.budget.maxCostUsd && usage.totalCostUsd > def.budget.maxCostUsd) {
+        return `budget exceeded: cost $${usage.totalCostUsd.toFixed(4)} > $${def.budget.maxCostUsd}`;
+      }
+    }
+    return null;
+  };
+
   try {
     while (true) {
       const run = getGraphRun(ctx.graphRunId);
       if (run?.status === 'cancelled') {
         logger.info({ graphRunId: ctx.graphRunId }, 'Graph cancelled by user');
+        broadcast(graphEndEvent(ctx.graphRunId, 'cancelled'));
         return;
       }
       if (run?.status === 'paused') {
@@ -179,14 +267,45 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
         return;
       }
 
+      // DSL v2: budget circuit breaker — checked every loop iteration so a
+      // long run is failed promptly when the ceiling is crossed.
+      const breach = budgetBreached();
+      if (breach) {
+        persistState(ctx.graphRunId, ctx.state);
+        updateGraphRunStatus(ctx.graphRunId, 'failed', {
+          endedAt: new Date().toISOString(),
+          cancelReason: breach,
+        });
+        logger.error({ graphRunId: ctx.graphRunId, breach }, 'Graph run failed — budget exceeded');
+        broadcast(graphEndEvent(ctx.graphRunId, 'failed', { error: breach }));
+        emitExecutionOutcome(ctx, false, breach);
+        return;
+      }
+
       if (allCompleted(def, completed)) {
         updateGraphRunStatus(ctx.graphRunId, 'completed', { endedAt: new Date().toISOString() });
         logger.info({ graphRunId: ctx.graphRunId }, 'Graph run completed');
+        // graph_end totals are telemetry — never let a usage-read failure crash
+        // the run after it's already marked completed. Tolerate missing impl
+        // (e.g. tests that mock db without getGraphRunUsage).
+        let endTotals: { totalTokens?: number; totalCostUsd?: number; durationMs?: number } = {};
+        try {
+          const usage = getGraphRunUsage(ctx.graphRunId);
+          endTotals = {
+            totalTokens: usage.totalTokens,
+            totalCostUsd: usage.totalCostUsd,
+            durationMs: Date.now() - runStartedAt,
+          };
+        } catch { /* tolerate */ }
+        broadcast(graphEndEvent(ctx.graphRunId, 'completed', endTotals));
         emitExecutionOutcome(ctx, true);
         return;
       }
 
-      const ready = computeReadyNodes(def, completed, branchDecisions);
+      // DSL v2: build an EvalContext from the live state so expression/default
+      // edges route on current node outputs + branch decisions.
+      const evalCtx = buildEvalContext(ctx.state);
+      const ready = computeReadyNodes(def, completed, branchDecisions, evalCtx);
       if (ready.length === 0) {
         // No ready nodes but not all completed → deadlock or waiting on paused.
         const anyRunning = listGraphNodeRuns(ctx.graphRunId).some(
@@ -198,6 +317,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
             cancelReason: 'deadlock: no ready nodes and none running',
           });
           logger.error({ graphRunId: ctx.graphRunId }, 'Graph deadlocked');
+          broadcast(graphEndEvent(ctx.graphRunId, 'failed', { error: 'deadlock' }));
           emitExecutionOutcome(ctx, false, 'deadlock');
           return;
         }
@@ -208,13 +328,15 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
 
       // P0: self-limit to maxParallel. The true global ceiling
       // (MAX_CONCURRENT_CONTAINERS / HOST_PROCESSES) is enforced downstream by
-      // runHostAgent/runContainerAgent + GroupQueue.
+      // runHostAgent/runContainerAgent + GroupQueue; the per-run ceiling is
+      // maxParallel (awaited per batch, so in-flight is bounded by batch size).
       const batch = nextReadyBatch(ready, ctx.maxParallel, ctx.maxParallel);
       updateGraphRunStatus(ctx.graphRunId, 'running', {
         currentNodeId: batch[0]?.id ?? null,
       });
 
-      // Fan-out: run the batch concurrently.
+      // Fan-out: run the batch concurrently. runNodeWithRetry emits
+      // graph_node_start / graph_node_end events around each node.
       const results = await Promise.all(
         batch.map((node) => runNodeWithRetry(ctx, deps, node, null)),
       );
@@ -283,8 +405,29 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
           });
           logger.error({ graphRunId: ctx.graphRunId, nodeId: node.id, err: outcome.error },
             'Graph run failed at node');
+          broadcast(
+            graphEndEvent(ctx.graphRunId, 'failed', {
+              error: `node ${node.id} failed: ${outcome.error ?? 'unknown'}`,
+            }),
+          );
           emitExecutionOutcome(ctx, false, `node ${node.id} failed`);
           return;
+        }
+      }
+      // DSL v2: emit edge_taken events for the conditional / default edges
+      // activated by the nodes that just completed (for the data-flow view).
+      const justCompleted = batch.filter((n) => completed.has(n.id));
+      for (const edge of takenEdges(def, justCompleted, completed, branchDecisions, evalCtx)) {
+        if (edge.condition || edge.expression || edge.isDefault) {
+          broadcast(
+            graphEdgeTakenEvent(
+              ctx.graphRunId,
+              edge.from,
+              edge.to,
+              edge.id,
+              edge.expression ?? edge.condition ?? (edge.isDefault ? 'default' : undefined),
+            ),
+          );
         }
       }
       persistState(ctx.graphRunId, ctx.state);
@@ -297,6 +440,7 @@ export async function executeGraph(ctx: GraphRunContext, deps: GraphDeps): Promi
       cancelReason: `orchestrator crash: ${errMsg}`,
     });
     persistState(ctx.graphRunId, ctx.state);
+    broadcast(graphEndEvent(ctx.graphRunId, 'failed', { error: `orchestrator crash: ${errMsg}` }));
     emitExecutionOutcome(ctx, false, `orchestrator crash: ${errMsg}`);
   }
 }
@@ -342,6 +486,7 @@ export function startGraphRun(opts: {
     goal_text: opts.goalText ?? null,
     max_parallel: opts.maxParallel ?? 4,
     state_json: JSON.stringify(opts.initialState ?? {}),
+    manifest_hash: computeManifestHash(def),
     started_at: new Date().toISOString(),
   });
   return { runId, definition: def };

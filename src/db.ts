@@ -487,6 +487,7 @@ export function initDatabase(): void {
       nodes_json TEXT NOT NULL,
       edges_json TEXT NOT NULL,
       state_schema_json TEXT,
+      budget_json TEXT,
       manifest_hash TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','deprecated')),
       created_at TEXT NOT NULL,
@@ -510,6 +511,7 @@ export function initDatabase(): void {
       total_input_tokens INTEGER NOT NULL DEFAULT 0,
       total_output_tokens INTEGER NOT NULL DEFAULT 0,
       total_cost_usd REAL NOT NULL DEFAULT 0,
+      manifest_hash TEXT,
       started_at TEXT NOT NULL,
       ended_at TEXT,
       cancel_reason TEXT,
@@ -584,7 +586,7 @@ export function initDatabase(): void {
       graph_run_id TEXT NOT NULL,
       node_id TEXT NOT NULL,
       node_type TEXT NOT NULL
-        CHECK(node_type IN ('agent','gate','branch','join','human')),
+        CHECK(node_type IN ('agent','gate','branch','join','human','llm','tool','start','end','parallel','aggregate')),
       status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','running','completed','failed','skipped','paused')),
       attempt INTEGER NOT NULL DEFAULT 0,
@@ -2092,7 +2094,68 @@ export function initDatabase(): void {
     );
   `);
 
-  const SCHEMA_VERSION = '54';
+  // v54 → v55: Graph Task Planning — DSL v2 extensions.
+  // 1) graph_definitions.budget_json (execution budget / circuit breaker).
+  // 2) graph_runs.manifest_hash (captured at start so resume detects drift).
+  // Both are additive nullable columns — backward compatible.
+  ensureColumn('graph_definitions', 'budget_json', 'TEXT');
+  ensureColumn('graph_runs', 'manifest_hash', 'TEXT');
+  // 3) graph_node_runs.node_type CHECK constraint must accept the new node
+  //    kinds (llm/tool/start/end/parallel/aggregate). SQLite cannot ALTER a
+  //    CHECK in place, so we rebuild the table (drop+recreate+copy), mirroring
+  //    the registered_groups migration at line ~1428. Safe because node runs
+  //    are execution records (regenerable) and the table is empty between runs
+  //    in normal operation; a transaction preserves any in-flight rows.
+  const graphNodeRunCheckOk = (
+    db
+      .prepare(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_node_runs'`,
+      )
+      .get() as { sql: string } | undefined
+  )?.sql;
+  if (
+    graphNodeRunCheckOk &&
+    !graphNodeRunCheckOk.includes("'parallel'") &&
+    !graphNodeRunCheckOk.includes("'aggregate'")
+  ) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE graph_node_runs_new (
+          id TEXT PRIMARY KEY,
+          graph_run_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          node_type TEXT NOT NULL
+            CHECK(node_type IN ('agent','gate','branch','join','human','llm','tool','start','end','parallel','aggregate')),
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','running','completed','failed','skipped','paused')),
+          attempt INTEGER NOT NULL DEFAULT 0,
+          input_summary TEXT,
+          output_summary TEXT,
+          state_patch_json TEXT,
+          parent_node_run_id TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL NOT NULL DEFAULT 0,
+          error TEXT,
+          is_idempotent INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (graph_run_id) REFERENCES graph_runs(id)
+        );
+        INSERT INTO graph_node_runs_new
+          SELECT id, graph_run_id, node_id, node_type, status, attempt, input_summary,
+                 output_summary, state_patch_json, parent_node_run_id, started_at, ended_at,
+                 input_tokens, output_tokens, cost_usd, error, is_idempotent
+          FROM graph_node_runs;
+        DROP TABLE graph_node_runs;
+        ALTER TABLE graph_node_runs_new RENAME TO graph_node_runs;
+        CREATE INDEX IF NOT EXISTS idx_graph_node_runs_run ON graph_node_runs(graph_run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_graph_node_runs_parent ON graph_node_runs(parent_node_run_id);
+      `);
+    })();
+  }
+
+  const SCHEMA_VERSION = '55';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3239,6 +3302,7 @@ export interface GraphDefinitionRow {
   nodes_json: string;
   edges_json: string;
   state_schema_json: string | null;
+  budget_json: string | null;
   manifest_hash: string;
   status: 'active' | 'deprecated';
   created_at: string;
@@ -3262,6 +3326,9 @@ export interface GraphRunRow {
   started_at: string;
   ended_at: string | null;
   cancel_reason: string | null;
+  /** DSL v2: definition manifest hash captured at run start, so resume can
+   *  detect version drift (defense-in-depth on top of immutable version rows). */
+  manifest_hash: string | null;
 }
 
 /** 异步 team build 任务行（POST /api/team/runs 立即创建，后台 buildTeam 回写）。 */
@@ -3315,7 +3382,10 @@ export interface GraphNodeRunRow {
   id: string;
   graph_run_id: string;
   node_id: string;
-  node_type: 'agent' | 'gate' | 'branch' | 'join' | 'human';
+  node_type:
+    | 'agent' | 'gate' | 'branch' | 'join' | 'human'
+    | 'llm' | 'tool' | 'start' | 'end'
+    | 'parallel' | 'aggregate';
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'paused';
   attempt: number;
   input_summary: string | null;
@@ -3873,8 +3943,8 @@ export function createGraphDefinition(
   db.prepare(
     `INSERT INTO graph_definitions
       (id, version, parent_version_id, name, description, nodes_json, edges_json,
-       state_schema_json, manifest_hash, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       state_schema_json, budget_json, manifest_hash, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     version,
@@ -3884,6 +3954,7 @@ export function createGraphDefinition(
     row.nodes_json,
     row.edges_json,
     row.state_schema_json ?? null,
+    row.budget_json ?? null,
     row.manifest_hash,
     row.status ?? 'active',
     created_at,
@@ -3934,14 +4005,15 @@ export function createGraphRun(row: {
   goal_text?: string | null;
   max_parallel?: number;
   state_json?: string;
+  manifest_hash?: string | null;
   started_at: string;
 }): string {
   db.prepare(
     `INSERT INTO graph_runs
       (id, definition_id, definition_version, owner_user_id, group_folder, chat_jid,
        goal_text, status, current_node_id, state_json, max_parallel, started_at,
-       total_input_tokens, total_output_tokens, total_cost_usd)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, 0, 0, 0)`,
+       total_input_tokens, total_output_tokens, total_cost_usd, manifest_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, 0, 0, 0, ?)`,
   ).run(
     row.id,
     row.definition_id,
@@ -3953,6 +4025,7 @@ export function createGraphRun(row: {
     row.state_json ?? '{}',
     row.max_parallel ?? 4,
     row.started_at,
+    row.manifest_hash ?? null,
   );
   return row.id;
 }
@@ -4279,6 +4352,29 @@ export function listNonTerminalGraphRuns(): GraphRunRow[] {
     .all() as GraphRunRow[];
 }
 
+/**
+ * DSL v2: aggregated usage for a run (input + output tokens + cost). Read from
+ * the run-level cumulative columns maintained by addGraphRunUsage. Used by the
+ * orchestrator's budget circuit breaker (maxTokens / maxCostUsd).
+ */
+export function getGraphRunUsage(id: string): {
+  totalTokens: number;
+  totalCostUsd: number;
+} {
+  const row = db
+    .prepare(
+      'SELECT total_input_tokens, total_output_tokens, total_cost_usd FROM graph_runs WHERE id = ?',
+    )
+    .get(id) as
+    | { total_input_tokens: number; total_output_tokens: number; total_cost_usd: number }
+    | undefined;
+  if (!row) return { totalTokens: 0, totalCostUsd: 0 };
+  return {
+    totalTokens: (row.total_input_tokens ?? 0) + (row.total_output_tokens ?? 0),
+    totalCostUsd: row.total_cost_usd ?? 0,
+  };
+}
+
 // --- graph_node_runs ---
 
 export function createGraphNodeRun(row: {
@@ -4321,6 +4417,48 @@ export function listGraphNodeRuns(graphRunId: string): GraphNodeRunRow[] {
       'SELECT * FROM graph_node_runs WHERE graph_run_id = ? ORDER BY started_at ASC',
     )
     .all(graphRunId) as GraphNodeRunRow[];
+}
+
+/**
+ * DSL v2: timeline of node status changes for a run, ordered by start time.
+ * Each row is one node's run (start → end window + terminal status). Used by
+ * the frontend history-replay player to rebuild the canvas state at a given
+ * timestamp. Filters out pending (never-started) rows.
+ */
+export function listGraphNodeTimeline(graphRunId: string): Array<{
+  nodeId: string;
+  nodeType: GraphNodeRunRow['node_type'];
+  title: string | null;
+  status: GraphNodeRunRow['status'];
+  startedAt: string | null;
+  endedAt: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  error: string | null;
+}> {
+  return db
+    .prepare(
+      `SELECT node_id AS nodeId, node_type AS nodeType, NULL AS title,
+              status, started_at AS startedAt, ended_at AS endedAt,
+              input_tokens AS inputTokens, output_tokens AS outputTokens,
+              cost_usd AS costUsd, error
+       FROM graph_node_runs
+       WHERE graph_run_id = ? AND started_at IS NOT NULL
+       ORDER BY started_at ASC`,
+    )
+    .all(graphRunId) as Array<{
+      nodeId: string;
+      nodeType: GraphNodeRunRow['node_type'];
+      title: string | null;
+      status: GraphNodeRunRow['status'];
+      startedAt: string | null;
+      endedAt: string | null;
+      inputTokens: number;
+      outputTokens: number;
+      costUsd: number;
+      error: string | null;
+    }>;
 }
 
 /** Latest node_run for a given (run, node_id), regardless of status. */

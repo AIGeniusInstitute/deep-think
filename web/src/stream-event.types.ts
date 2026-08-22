@@ -25,7 +25,9 @@ export type StreamEventType =
   | 'human_approval_request' | 'human_approval_result'
   | 'reminder_injected'
   | 'autonomous_started' | 'autonomous_continued' | 'autonomous_aborted' | 'autonomous_brake'
-  | 'autonomous_recovering' | 'autonomous_recovered';
+  | 'autonomous_recovering' | 'autonomous_recovered'
+  | 'graph_start' | 'graph_node_start' | 'graph_node_status'
+  | 'graph_node_end' | 'graph_edge_taken' | 'graph_end';
 
 export type StreamAgentScope = 'main' | 'task' | 'subagent' | 'system';
 export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
@@ -234,6 +236,29 @@ export interface StreamEvent {
     optionId?: string;
     note?: string;
     byUserId?: string;
+  };
+  /** Graph engineering real-time events (graph_start / graph_node_start /
+   *  graph_node_status / graph_node_end / graph_edge_taken / graph_end).
+   *  Emitted by graph-orchestrator over the existing WsManager so the DAG
+   *  canvas can update incrementally with <2s latency instead of polling. */
+  graphEvent?: {
+    runId: string;
+    definitionId?: string;
+    nodeId?: string;
+    nodeType?: string;
+    title?: string;
+    status?: string;
+    tokens?: number;
+    costUsd?: number;
+    durationMs?: number;
+    fromNodeId?: string;
+    toNodeId?: string;
+    edgeId?: string;
+    edgeLabel?: string;
+    totalTokens?: number;
+    totalCostUsd?: number;
+    output?: string;
+    error?: string;
   };
   /** Autonomous mode metadata. Present on autonomous_* events emitted by the
    *  agent-runner's autonomous block: started (entering autonomous run),
