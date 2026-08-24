@@ -17,7 +17,7 @@
 
 ## 验证结论
 
-- 后端 `tsc --noEmit`：exit 0
+- 后端 `tsc --noEmit`（真实，安装 typescript@5.9.3 + @types/node@22 后）：全仓 4 个**既有环境错误**（qrcode/better-sqlite3 缺 @types 声明、web.ts:2922 headersTimeout 预存）——**本特性代码零新增错误**。
 - 前端 `tsc --noEmit`：exit 0
 - 前端 `vite build`：成功（PWA 产物生成，无转译错误）
 - `npx vitest run`（全量）：**1486 passed / 6 skipped / 0 failed**（含新增 `workflows.test.ts` 11 例 + 修正 trace schema 断言 55→56）

@@ -8,7 +8,7 @@
 
 | 验证手段 | 命令 | 结果 |
 |----------|------|------|
-| 后端类型检查 | `npx tsc --noEmit` | ✅ exit 0 |
+| 后端类型检查 | `tsc --noEmit`（装 typescript@5.9.3 + @types/node@22 后） | ✅ 全仓 4 个既有环境错误（qrcode/better-sqlite3 缺 @types、web.ts:2922 headersTimeout），本特性代码零新增 |
 | 前端类型检查 | `cd web && npx tsc --noEmit` | ✅ exit 0 |
 | 前端生产构建 | `cd web && npx vite build` | ✅ 成功（PWA 产物 94 entries，无转译错误） |
 | 全量单元测试 | `npx vitest run` | ✅ 1486 passed / 6 skipped / 0 failed |
@@ -40,7 +40,16 @@
 | TC19 | 浏览器 E2E 模式B 全链路 | ⚠️ 未执行（同上） | ⏳ 待合并后人工补测 |
 | TC20 | `make test` 全绿不回归 | `npx vitest run` 全量 1486 passed / 0 failed | ✅ 通过 |
 
-## 3. 新增测试明细（`tests/units/workflows.test.ts`）
+## 3. 后端类型检查明细
+
+真实 `tsc --noEmit`（安装 typescript@5.9.3 + @types/node@22.10.0 后）全仓 4 个错误，**均非本特性引入**：
+- `src/routes/config.ts:6` / `src/whatsapp.ts:23`：`qrcode` 模块无 @types 声明（既有，可选依赖）。
+- `src/sqlite-compat.ts:18`：`better-sqlite3` 无 @types 声明（既有，环境缺声明）。
+- `src/web.ts:2922`：`headersTimeout` 不在 ServerOptions 类型上（既有 server 配置，非本特性 diff —— 本特性对 web.ts 仅 +1 import / +1 app.route）。
+
+本特性新增/修改文件（db.ts、routes/workflows.ts、team-builder.ts、team-plan.ts、graph-registry.ts、graph-types.ts、web-context.ts、routes/team.ts、agent-team/team-commands.ts）**零类型错误**。
+
+## 4. 新增测试明细（`tests/units/workflows.test.ts`）
 
 | 用例 | 验证点 |
 |------|--------|
@@ -56,7 +65,7 @@
 | TC7 failWorkflowBuild | 写 error，置 failed |
 | TC8 registerDefinition owner | 透传 owner_user_id + 返回 version |
 
-## 4. 修复的 bug
+## 5. 修复的 bug
 
 | Bug | 根因 | 修复 |
 |-----|------|------|
@@ -65,7 +74,7 @@
 | autobuild 轮询状态/字段不匹配 | api 返回 `status:'completed'` + `definitionId`，前端误用 `'done'`+`definition` | 改为 `completed`+`definitionId` 后再 `workflowsApi.get` 取定义 |
 | 测试 DB 污染生产库 | ESM import 提升，`process.env.DEEPTHINK_DATA_DIR` 在 config.ts 加载后才赋值 | 改用 `vi.hoisted` 在 import 前设置隔离 tmpdir |
 
-## 5. 结论
+## 6. 结论
 
 - **P0 后端 + 前端 + 自动化测试全部通过**：类型检查、生产构建、全量 vitest（0 回归）。
 - **TC1–TC17、TC20** 经单测/build/既有逻辑覆盖验证通过。
