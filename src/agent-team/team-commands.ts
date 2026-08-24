@@ -43,7 +43,8 @@ export async function handleTeamStartCommand(
   }
 
   const { runId, plan } = result;
-  const run = getGraphRun(runId);
+  // /team command never sets draft:true, so runId is always present here.
+  const run = getGraphRun(runId!);
   const memberLines = (plan.members as Array<{ name: string; role: string }>)
     .map((m) => `  • ${m.name} — ${m.role}`)
     .join('\n');

@@ -96,14 +96,25 @@ export interface TeamTaskInput {
    * = no extra gates. Missing → 'auto' (backward compat).
    */
   executionMode?: 'auto' | 'semi-auto';
+  /**
+   * Agent Workflow editor (mode B): when true, buildTeam performs decompose +
+   * create members + assemble + register the graph definition but does NOT
+   * start a run. Instead it returns the definitionId + plan so the visual
+   * editor can load the draft for per-node editing before the user explicitly
+   * runs it. Missing → false (legacy "build and immediately run" behavior).
+   */
+  draft?: boolean;
 }
 
 export interface TeamBuildResult {
-  runId: string;
+  /** Present only when draft=false (default). Draft mode registers a
+   * definition but does not start a run, so runId is omitted. */
+  runId?: string;
   definitionId: string;
   definitionVersion: number;
   plan: TeamPlan;
   memberDefIds: Record<string, string>;
+  draft?: boolean;
 }
 
 export interface TeamBuildError {

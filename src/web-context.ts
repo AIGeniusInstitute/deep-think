@@ -181,8 +181,13 @@ export interface WebDeps {
     maxTeamSize?: number;
     toolset?: string[];
     executionMode?: 'auto' | 'semi-auto';
+    /**
+     * Agent Workflow editor mode B: register the definition + create members
+     * but do not start a run; return definitionId + plan for the editor to load.
+     */
+    draft?: boolean;
   }) => Promise<
-    | { runId: string; definitionId: string; definitionVersion: number; plan: unknown; memberDefIds: Record<string, string> }
+    | { runId?: string; definitionId: string; definitionVersion: number; plan: unknown; memberDefIds: Record<string, string>; draft?: boolean }
     | { error: string; detail?: string }
   >;
   handleSpawnCommand?: (

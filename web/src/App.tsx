@@ -26,6 +26,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ defa
 const LoopsPage = lazy(() => import('./pages/LoopsPage').then(m => ({ default: m.LoopsPage })));
 const GraphPage = lazy(() => import('./pages/GraphPage').then(m => ({ default: m.GraphPage })));
 const TeamPage = lazy(() => import('./pages/TeamPage').then(m => ({ default: m.TeamPage })));
+const WorkflowEditorPage = lazy(() => import('./pages/WorkflowEditorPage').then(m => ({ default: m.WorkflowEditorPage })));
 const OpcPage = lazy(() => import('./pages/OpcPage').then(m => ({ default: m.OpcPage })));
 const SupervisorPage = lazy(() => import('./pages/SupervisorPage').then(m => ({ default: m.SupervisorPage })));
 const HarnessPage = lazy(() => import('./pages/HarnessPage').then(m => ({ default: m.HarnessPage })));
@@ -76,6 +77,8 @@ export function App() {
           <Route path="/loops" element={<Suspense fallback={null}><LoopsPage /></Suspense>} />
           <Route path="/graphs" element={<Suspense fallback={null}><GraphPage /></Suspense>} />
           <Route path="/team" element={<Suspense fallback={null}><TeamPage /></Suspense>} />
+          <Route path="/workflows" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
+          <Route path="/workflows/:id" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
           <Route path="/opc" element={<Suspense fallback={null}><OpcPage /></Suspense>} />
           <Route path="/supervisor" element={<Suspense fallback={null}><SupervisorPage /></Suspense>} />
           <Route path="/harness" element={<Suspense fallback={null}><HarnessPage /></Suspense>} />

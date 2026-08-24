@@ -490,6 +490,7 @@ export function initDatabase(): void {
       budget_json TEXT,
       manifest_hash TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','deprecated')),
+      owner_user_id TEXT,
       created_at TEXT NOT NULL,
       UNIQUE(id, version)
     );
@@ -2100,6 +2101,38 @@ export function initDatabase(): void {
   // Both are additive nullable columns — backward compatible.
   ensureColumn('graph_definitions', 'budget_json', 'TEXT');
   ensureColumn('graph_runs', 'manifest_hash', 'TEXT');
+  // v55 → v56: Agent Workflow orchestration — graph_definitions.owner_user_id so
+  // regular users can save/load their own workflow definitions (the existing
+  // /api/graph/definitions admin route keeps owner_user_id NULL = global).
+  // Backward compatible: existing rows backfill NULL (visible to everyone as
+  // shared/global templates).
+  ensureColumn('graph_definitions', 'owner_user_id', 'TEXT');
+  // idx_graph_def_owner is created here (after ensureColumn) rather than in the
+  // CREATE TABLE block so existing databases that predate the owner_user_id
+  // column don't fail the index build before the migration adds the column.
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_graph_def_owner ON graph_definitions(owner_user_id, created_at DESC);',
+  );
+  // workflow_builds: async draft-generation jobs for the "编排 Agent" auto-build
+  // mode (mirrors team_builds but stores a definition_id instead of a run_id,
+  // because draft mode registers a definition without starting a run).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_builds (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      goal_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','failed')),
+      definition_id TEXT,
+      plan_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_builds_owner ON workflow_builds(owner_user_id, created_at DESC);
+  `);
   // 3) graph_node_runs.node_type CHECK constraint must accept the new node
   //    kinds (llm/tool/start/end/parallel/aggregate). SQLite cannot ALTER a
   //    CHECK in place, so we rebuild the table (drop+recreate+copy), mirroring
@@ -2155,7 +2188,7 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '55';
+  const SCHEMA_VERSION = '56';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3305,6 +3338,7 @@ export interface GraphDefinitionRow {
   budget_json: string | null;
   manifest_hash: string;
   status: 'active' | 'deprecated';
+  owner_user_id: string | null;
   created_at: string;
 }
 
@@ -3346,7 +3380,20 @@ export interface TeamBuildRow {
   updated_at: number;
 }
 
-// --- OPC（一人公司）行类型 ---
+/** Async draft-generation job for the Agent Workflow auto-build (编排 Agent) mode. */
+export interface WorkflowBuildRow {
+  id: string;
+  owner_user_id: string;
+  group_folder: string;
+  chat_jid: string;
+  goal_text: string;
+  status: 'running' | 'completed' | 'failed';
+  definition_id: string | null;
+  plan_json: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
 export interface OpcCompanyRow {
   id: string;
   owner_user_id: string;
@@ -3943,8 +3990,8 @@ export function createGraphDefinition(
   db.prepare(
     `INSERT INTO graph_definitions
       (id, version, parent_version_id, name, description, nodes_json, edges_json,
-       state_schema_json, budget_json, manifest_hash, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       state_schema_json, budget_json, manifest_hash, status, owner_user_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     version,
@@ -3957,6 +4004,7 @@ export function createGraphDefinition(
     row.budget_json ?? null,
     row.manifest_hash,
     row.status ?? 'active',
+    row.owner_user_id ?? null,
     created_at,
   );
   return `${row.id}@${version}`;
@@ -3991,6 +4039,37 @@ export function listGraphDefinitions(): GraphDefinitionRow[] {
        ORDER BY created_at DESC`,
     )
     .all() as GraphDefinitionRow[];
+}
+
+/**
+ * List workflow definitions visible to a user: their own (owner_user_id = ?)
+ * plus shared/global ones (owner_user_id IS NULL, e.g. admin-registered or
+ * team-builder-produced without an owner). Latest active version per id.
+ */
+export function listWorkflowDefinitions(userId: string): GraphDefinitionRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM graph_definitions
+       WHERE status = 'active' AND (owner_user_id = ? OR owner_user_id IS NULL)
+       GROUP BY id HAVING version = MAX(version)
+       ORDER BY created_at DESC`,
+    )
+    .all(userId) as GraphDefinitionRow[];
+}
+
+/**
+ * Get the latest active version of a definition by id, scoped to a user.
+ * Returns undefined when the definition doesn't exist OR is owned by another
+ * user (404-not-leak-existence, mirroring graph route convention).
+ */
+export function getWorkflowDefinition(
+  id: string,
+  userId: string,
+): GraphDefinitionRow | undefined {
+  const row = getLatestGraphDefinition(id);
+  if (!row) return undefined;
+  if (row.owner_user_id !== null && row.owner_user_id !== userId) return undefined;
+  return row;
 }
 
 // --- graph_runs ---
@@ -4105,6 +4184,61 @@ export function listTeamBuilds(
       `SELECT * FROM team_builds WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ?`,
     )
     .all(ownerUserId, limit) as TeamBuildRow[];
+}
+
+// --- workflow_builds（编排 Agent 草稿生成任务） ---
+
+/** 创建一条 status='running' 的 workflow build 任务，返回 id。 */
+export function createWorkflowBuild(row: {
+  id: string;
+  owner_user_id: string;
+  group_folder: string;
+  chat_jid: string;
+  goal_text: string;
+}): string {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO workflow_builds
+      (id, owner_user_id, group_folder, chat_jid, goal_text, status,
+       definition_id, plan_json, error, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, ?, ?)`,
+  ).run(
+    row.id,
+    row.owner_user_id,
+    row.group_folder,
+    row.chat_jid,
+    row.goal_text,
+    now,
+    now,
+  );
+  return row.id;
+}
+
+export function getWorkflowBuild(id: string): WorkflowBuildRow | undefined {
+  return db.prepare('SELECT * FROM workflow_builds WHERE id = ?').get(id) as
+    | WorkflowBuildRow
+    | undefined;
+}
+
+/** 后台 buildTeam({draft:true}) 成功后回写 plan + definitionId，置 status='completed'。 */
+export function completeWorkflowBuild(
+  id: string,
+  result: { plan_json: string; definition_id: string },
+): void {
+  db.prepare(
+    `UPDATE workflow_builds
+     SET status = 'completed', plan_json = ?, definition_id = ?, error = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(result.plan_json, result.definition_id, Date.now(), id);
+}
+
+/** 后台 buildTeam({draft:true}) 失败后回写 error，置 status='failed'。 */
+export function failWorkflowBuild(id: string, error: string): void {
+  db.prepare(
+    `UPDATE workflow_builds
+     SET status = 'failed', error = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(error, Date.now(), id);
 }
 
 // --- OPC（一人公司）CRUD ---
