@@ -495,7 +495,6 @@ export function initDatabase(): void {
       UNIQUE(id, version)
     );
     CREATE INDEX IF NOT EXISTS idx_graph_def_status ON graph_definitions(status);
-    CREATE INDEX IF NOT EXISTS idx_graph_def_owner ON graph_definitions(owner_user_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS graph_runs (
       id TEXT PRIMARY KEY,
@@ -2108,6 +2107,12 @@ export function initDatabase(): void {
   // Backward compatible: existing rows backfill NULL (visible to everyone as
   // shared/global templates).
   ensureColumn('graph_definitions', 'owner_user_id', 'TEXT');
+  // idx_graph_def_owner is created here (after ensureColumn) rather than in the
+  // CREATE TABLE block so existing databases that predate the owner_user_id
+  // column don't fail the index build before the migration adds the column.
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_graph_def_owner ON graph_definitions(owner_user_id, created_at DESC);',
+  );
   // workflow_builds: async draft-generation jobs for the "编排 Agent" auto-build
   // mode (mirrors team_builds but stores a definition_id instead of a run_id,
   // because draft mode registers a definition without starting a run).
