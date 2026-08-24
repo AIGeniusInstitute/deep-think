@@ -25,7 +25,9 @@ export type StreamEventType =
   | 'human_approval_request' | 'human_approval_result'
   | 'reminder_injected'
   | 'autonomous_started' | 'autonomous_continued' | 'autonomous_aborted' | 'autonomous_brake'
-  | 'autonomous_recovering' | 'autonomous_recovered';
+  | 'autonomous_recovering' | 'autonomous_recovered'
+  | 'graph_start' | 'graph_node_start' | 'graph_node_status' | 'graph_node_end'
+  | 'graph_edge_taken' | 'graph_end';
 
 export type StreamAgentScope = 'main' | 'task' | 'subagent' | 'system';
 export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
@@ -251,5 +253,31 @@ export interface StreamEvent {
     strategy?: string;
     /** Recoverable-brake: 1-based recovery attempt count for this brake type. */
     attempt?: number;
+  };
+  /** Graph Task Planning (DSL v2): real-time graph execution events pushed over
+   *  WebSocket so the frontend canvas can render node status changes with < 2s
+   *  latency (replacing the 5s polling fallback). Emitted by the orchestrator at
+   *  graph / node / edge lifecycle boundaries. */
+  graphEvent?: {
+    runId: string;
+    definitionId?: string;
+    nodeId?: string;
+    nodeType?: string;
+    title?: string;
+    status?: string;
+    tokens?: number;
+    costUsd?: number;
+    durationMs?: number;
+    /** For graph_edge_taken: which edge was activated. */
+    fromNodeId?: string;
+    toNodeId?: string;
+    edgeId?: string;
+    edgeLabel?: string;
+    /** For graph_end: run-level totals. */
+    totalTokens?: number;
+    totalCostUsd?: number;
+    /** Node output summary (for the detail drawer). */
+    output?: string;
+    error?: string;
   };
 }

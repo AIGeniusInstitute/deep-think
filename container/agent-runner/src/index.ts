@@ -172,10 +172,35 @@ function resolveBundledClaudeCli(): string | undefined {
     if (!fs.existsSync(binPath)) return undefined;
     // postinstall replaces the ~500-byte shell stub with the real native binary;
     // if it hasn't run, the stub is still there — skip so we fall through to which/where.
-    const size = fs.statSync(binPath).size;
-    return size > 4096 ? binPath : undefined;
+    return isRealExecutable(binPath) ? binPath : undefined;
   } catch {
     return undefined;
+  }
+}
+
+// 校验文件是否为可直接 exec 的真实可执行体：原生二进制（Mach-O / ELF / PE）或带
+// shebang 的脚本。npm tarball 里的 @anthropic-ai/claude-code bin/claude.exe 是一个
+// ~500 字节、无 shebang 的文本占位符（postinstall 被拦截时残留）——直接 spawn 它
+// 会以 ENOEXEC 失败，Node 报 "spawn Unknown system error -8"（libuv 负 errno）。
+// Windows 的 .cmd/.ps1 shim 是无魔数的纯文本，故本函数仅在非 win32 上用于兜底校验。
+function isRealExecutable(binPath: string): boolean {
+  try {
+    const fd = fs.openSync(binPath, 'r');
+    try {
+      const buf = Buffer.alloc(4);
+      const n = fs.readSync(fd, buf, 0, 4, 0);
+      if (n < 4) return false;
+      if (buf[0] === 0xcf && buf[1] === 0xfa) return true; // Mach-O 64-bit LE
+      if (buf[0] === 0xca && buf[1] === 0xfe && buf[2] === 0xba && buf[3] === 0xbe) return true; // Mach-O fat
+      if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return true; // ELF
+      if (buf[0] === 0x4d && buf[1] === 0x5a) return true; // PE (MZ)
+      if (buf[0] === 0x23 && buf[1] === 0x21) return true; // '#!' 脚本
+      return false;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
   }
 }
 
@@ -1657,6 +1682,23 @@ async function runQuery(
         }
       }
     }
+  }
+  // 非 Windows 上校验解析结果确实是可 exec 的真实可执行体。npm 12 的 allowScripts
+  // 安全机制（或 --ignore-scripts）会拦截 @anthropic-ai/claude-code 的 postinstall，
+  // 残留的 ~500 字节文本占位符经 which 解析后被 SDK 直接 spawn，以 ENOEXEC 失败
+  // （表现为 "Host agent exited with code 1: spawn Unknown system error -8"）。
+  // 校验失败时依次回退：本地依赖的真实 binary → SDK 自带平台包（pathToClaudeCodeExecutable
+  // 留空时 SDK 内部解析）。Windows 的 .cmd/.ps1 shim 无魔数，跳过校验。
+  if (
+    pathToClaudeCodeExecutable &&
+    process.platform !== 'win32' &&
+    !isRealExecutable(pathToClaudeCodeExecutable)
+  ) {
+    log(
+      `[claude-cli] ${pathToClaudeCodeExecutable} 不是真实可执行文件（疑似 npm allowScripts 拦截 postinstall 残留的占位 stub），` +
+        `回退到内置 CLI。修复全局安装：npm config set allow-scripts=@anthropic-ai/claude-code && npm install -g @anthropic-ai/claude-code`,
+    );
+    pathToClaudeCodeExecutable = resolveBundledClaudeCli();
   }
 
   // Claude Code plugins injected by DeepThink main process via ContainerInput.
