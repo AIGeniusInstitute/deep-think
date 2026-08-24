@@ -191,10 +191,13 @@ export function toMermaid(def: GraphDefinition): string {
 /**
  * Register a new version of a graph definition. Auto-increments version from
  * the latest existing one. Refuses to register an invalid definition.
+ * ownerUserId (optional) scopes the definition to a user for the visual
+ * workflow editor; omit/undefined for global admin definitions (legacy behavior).
  */
 export function registerDefinition(
   def: GraphDefinition,
-): { key: string; hash: string } {
+  ownerUserId?: string,
+): { key: string; hash: string; version: number } {
   const validation = validateDefinition(def);
   if (!validation.ok) {
     throw new Error(`Invalid graph definition: ${validation.errors.join('; ')}`);
@@ -215,8 +218,9 @@ export function registerDefinition(
     budget_json: budget_json || null,
     manifest_hash: hash,
     status: 'active',
+    owner_user_id: ownerUserId ?? null,
   });
-  return { key, hash };
+  return { key, hash, version };
 }
 
 /** Load the latest active version of a definition by id. */

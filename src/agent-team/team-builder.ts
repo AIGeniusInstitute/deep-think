@@ -330,11 +330,25 @@ export async function buildTeam(
 
   // 4. Register + start (reuse graph-engineering).
   try {
-    const registered = registerDefinition(def);
+    const registered = registerDefinition(def, input.ownerUserId);
     logger.info(
       { defId: def.id, hash: registered.hash.slice(0, 12), members: plan.members.length },
       'Team graph definition registered',
     );
+
+    // Draft mode (Agent Workflow editor mode B): register only, do not start a
+    // run. Return the definition id + version + plan so the visual editor can
+    // load the draft for per-node editing before the user explicitly runs it.
+    if (input.draft) {
+      return {
+        definitionId: def.id,
+        definitionVersion: registered.version,
+        plan,
+        memberDefIds,
+        draft: true,
+      };
+    }
+
     const started = startGraphRun({
       definitionId: def.id,
       ownerUserId: input.ownerUserId,

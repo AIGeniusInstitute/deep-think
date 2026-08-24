@@ -131,7 +131,8 @@ teamRoutes.post('/runs', async (c) => {
         }
         completeTeamBuild(buildId, {
           plan_json: JSON.stringify(result.plan),
-          run_id: result.runId,
+          // This route never sets draft:true, so runId is always present here.
+          run_id: result.runId!,
         });
         logger.info({ buildId, runId: result.runId }, 'team build completed');
       })

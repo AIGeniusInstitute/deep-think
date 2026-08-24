@@ -63,8 +63,14 @@ export interface GraphNode {
    * against current state and activates matching conditional outgoing edges.
    */
   branchKey?: string;
-  /** Mark this node idempotent so resume auto-replays it without confirmation. */
+/** Mark this node idempotent so resume auto-replays it without confirmation. */
   isIdempotent?: boolean;
+  /**
+   * Editor-only: canvas position persisted by the visual workflow editor so a
+   * re-opened workflow keeps its layout. Purely a UI hint — the execution
+   * engine ignores it. Missing → the editor auto-layouts the node.
+   */
+  position?: { x: number; y: number };
   /** Max attempts on failure (default 3). */
   maxAttempts?: number;
   /** Per-attempt backoff base in ms (default 5000, mirrors loop MAX_RETRIES). */
