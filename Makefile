@@ -350,11 +350,15 @@ DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/
 
 _ensure-docker-image: ## (内部) 检测 Docker 镜像是否需要构建/重建
 	@if command -v docker >/dev/null 2>&1; then \
-	  if ! docker version --format '{{.Client.APIVersion}}|{{.Server.APIVersion}}' 2>/dev/null | grep -q '|'; then \
-	    echo "❌ docker CLI 无法与 daemon 通信（常见原因：客户端 API 版本过旧，被 daemon 拒绝）。"; \
-	    echo "   诊断：docker version  —— 若报 'client version X is too old' 即命中此问题"; \
-	    echo "   修复：见 docs/issues/2026-07-18-docker-cli-too-old.md §6.1（用现代 docker CLI 顶掉旧版）"; \
-	    exit 1; \
+	  if ! docker info >/dev/null 2>&1; then \
+	    if docker version 2>&1 | grep -q 'too old'; then \
+	      echo "❌ docker CLI 无法与 daemon 通信（常见原因：客户端 API 版本过旧，被 daemon 拒绝）。"; \
+	      echo "   诊断：docker version  —— 若报 'client version X is too old' 即命中此问题"; \
+	      echo "   修复：见 docs/issues/2026-07-18-docker-cli-too-old.md §6.1（用现代 docker CLI 顶掉旧版）"; \
+	      exit 1; \
+	    fi; \
+	    echo "⚠️ Docker daemon 未运行，跳过镜像检查（admin 宿主机模式不受影响；member 容器模式需启动 Docker 后重新 make）"; \
+	    exit 0; \
 	  fi; \
 	  if ! docker image inspect deepthink-agent:latest >/dev/null 2>&1; then \
 	    echo "🐳 Docker 镜像不存在，正在构建..."; \
@@ -387,6 +391,10 @@ sandbox-build: ## 构建沙箱镜像 deepthink-sandbox:latest（用于代码执�
 
 _ensure-sandbox-image: ## (内部) 检测沙箱镜像是否需要构建/重建
 	@if command -v docker >/dev/null 2>&1; then \
+	  if ! docker info >/dev/null 2>&1; then \
+	    echo "⚠️ Docker daemon 未运行，跳过沙箱镜像检查（代码执行/浏览器自动化沙箱将不可用）"; \
+	    exit 0; \
+	  fi; \
 	  if ! docker image inspect deepthink-sandbox:latest >/dev/null 2>&1; then \
 	    echo "🐳 沙箱镜像不存在，正在构建..."; \
 	    $(MAKE) sandbox-build; \
