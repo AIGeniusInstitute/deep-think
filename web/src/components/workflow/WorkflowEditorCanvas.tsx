@@ -95,17 +95,21 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
     event.dataTransfer.dropEffect = 'move';
   }, []);
 
-  if (!nodes.length && !children) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8 border border-dashed border-border rounded-md m-3">
-        <p className="text-sm">从左侧拖拽节点到这里开始编排</p>
-        <p className="text-xs mt-1 text-muted-foreground/70">支持 Agent / 验收门 / 分支 / 人工等节点</p>
-      </div>
-    );
-  }
+  // Empty-state hint rendered as an overlay INSIDE the wrapper (not an early
+  // return). The wrapper carries onDrop/onDragOver; if we early-returned a
+  // bare placeholder div (as before), the empty canvas had no drop target and
+  // HTML5 DnD rejected the very first node drag. pointer-events-none keeps the
+  // overlay from swallowing the drop, which must land on the wrapper.
+  const isEmpty = !nodes.length && !children;
 
   return (
     <div ref={wrapperRef} className="flex-1 min-h-0 relative" onDrop={onDrop} onDragOver={onDragOver}>
+      {isEmpty && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-muted-foreground p-8">
+          <p className="text-sm">从左侧拖拽节点到这里开始编排</p>
+          <p className="text-xs mt-1 text-muted-foreground/70">支持 Agent / 验收门 / 分支 / 人工等节点</p>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}

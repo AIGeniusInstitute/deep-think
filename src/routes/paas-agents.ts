@@ -50,6 +50,7 @@ import type { AgentDefinition, AgentMount, ResourceType, RegisteredGroup } from 
 import { logger } from '../logger.js';
 import { getWebDeps } from '../web-context.js';
 import { GROUPS_DIR } from '../config.js';
+import { generateAgentContent, optimizeAgentContent } from '../agent-ai.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { discoverSkills, type Skill } from './skills.js';
@@ -112,6 +113,29 @@ paasAgentsRoute.get('/:id', (c) => {
   const def = serializeAgentDef(row);
   const mounts = listAgentMounts(row.id).map(serializeMount);
   return c.json({ ...def, mounts });
+});
+
+// POST /generate — AI-generate a structured Agent config from name + description.
+// Returns fields for preview/editing; does NOT persist to DB (caller POSTs to /
+// to actually create once the user confirms/edits).
+paasAgentsRoute.post('/generate', async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({})) as {
+    description?: unknown;
+    name?: unknown;
+  };
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  if (description.length < 10) {
+    return c.json({ error: 'description must be at least 10 characters' }, 400);
+  }
+  const suggestedName =
+    typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined;
+
+  const result = await generateAgentContent(description, suggestedName);
+  if ('error' in result) {
+    return c.json({ error: result.error }, 502);
+  }
+  return c.json({ fields: result.fields });
 });
 
 paasAgentsRoute.post('/', async (c) => {
@@ -508,6 +532,61 @@ paasAgentsRoute.get('/:id/versions/:vid/diff', (c) => {
     promptDiff,
     promptSame: snapshot.system_prompt === current.system_prompt,
   });
+});
+
+// POST /:id/optimize — AI-optimize the agent's description + system_prompt.
+// Returns a preview; does NOT write.
+paasAgentsRoute.post('/:id/optimize', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const row = getAgentDefinition(id, user.id);
+  if (!row) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+  const body = await c.req.json().catch(() => ({})) as { feedback?: unknown };
+  const feedback = typeof body.feedback === 'string' && body.feedback.trim()
+    ? body.feedback.trim()
+    : undefined;
+
+  const result = await optimizeAgentContent(
+    { name: row.name, description: row.description, system_prompt: row.system_prompt },
+    feedback,
+  );
+  if ('error' in result) {
+    return c.json({ error: result.error }, 502);
+  }
+  return c.json({
+    optimized_description: result.fields.description,
+    optimized_system_prompt: result.fields.system_prompt,
+    original_description: row.description,
+    original_system_prompt: row.system_prompt,
+  });
+});
+
+// POST /:id/optimize/apply — apply a previously-previewed optimization.
+// Writes back the provided description/system_prompt (only soft fields).
+paasAgentsRoute.post('/:id/optimize/apply', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const row = getAgentDefinition(id, user.id);
+  if (!row) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+  const body = await c.req.json().catch(() => ({})) as {
+    description?: unknown;
+    system_prompt?: unknown;
+  };
+  const patch: { description?: string; system_prompt?: string } = {};
+  if (typeof body.description === 'string') patch.description = body.description;
+  if (typeof body.system_prompt === 'string') patch.system_prompt = body.system_prompt;
+  if (!Object.keys(patch).length) {
+    return c.json({ error: 'No fields to apply' }, 400);
+  }
+  const updated = updateAgentDefinition(id, user.id, patch);
+  if (!updated) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+  return c.json({ agent: serializeAgentDef(updated) });
 });
 
 // POST /api/paas/agents/:id/test-chat
