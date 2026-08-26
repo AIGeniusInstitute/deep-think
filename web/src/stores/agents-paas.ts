@@ -65,6 +65,25 @@ export interface AvailableResource {
   skills: Array<{ id: string; name: string; description: string }>;
 }
 
+export type AgentEngine = 'claude' | 'atomcode' | 'codex' | 'opencode' | 'pi';
+
+export interface GeneratedAgentFields {
+  name: string;
+  description: string;
+  system_prompt: string;
+  model: string | null;
+  engine: AgentEngine;
+  max_turns: number | null;
+  temperature: number | null;
+}
+
+export interface OptimizedAgentPreview {
+  optimized_description: string;
+  optimized_system_prompt: string;
+  original_description: string;
+  original_system_prompt: string;
+}
+
 interface AgentsState {
   list: AgentDefinition[];
   quota: number;
@@ -103,6 +122,12 @@ interface AgentsState {
   addCollaborator: (agentId: string, userId: string, role: 'editor' | 'viewer') => Promise<boolean>;
   removeCollaborator: (agentId: string, userId: string) => Promise<boolean>;
   testChat: (agentId: string) => Promise<{ jid: string; folder: string; name: string } | null>;
+  generateAgent: (data: { name?: string; description: string }) => Promise<GeneratedAgentFields | null>;
+  optimizeAgent: (agentId: string, feedback?: string) => Promise<OptimizedAgentPreview | null>;
+  applyOptimizedAgent: (
+    agentId: string,
+    patch: { description?: string; system_prompt?: string },
+  ) => Promise<boolean>;
 }
 
 export const useAgentsPaasStore = create<AgentsState>((set, get) => ({
@@ -264,6 +289,34 @@ export const useAgentsPaasStore = create<AgentsState>((set, get) => ({
       return res;
     } catch {
       return null;
+    }
+  },
+  generateAgent: async (data) => {
+    try {
+      const res = await api.post<{ fields: GeneratedAgentFields }>('/api/paas/agents/generate', data);
+      return res.fields ?? null;
+    } catch {
+      return null;
+    }
+  },
+  optimizeAgent: async (agentId, feedback) => {
+    try {
+      const res = await api.post<OptimizedAgentPreview>(
+        `/api/paas/agents/${agentId}/optimize`,
+        feedback ? { feedback } : {},
+      );
+      return res;
+    } catch {
+      return null;
+    }
+  },
+  applyOptimizedAgent: async (agentId, patch) => {
+    try {
+      await api.post(`/api/paas/agents/${agentId}/optimize/apply`, patch);
+      await get().load();
+      return true;
+    } catch {
+      return false;
     }
   },
 }));

@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAgentsPaasStore, type AgentDefinition, type ResourceType, type AvailableResource, type AgentVersion, type AgentShare, type AgentCollaborator, type AgentVersionDiff } from '../stores/agents-paas';
+import { useAgentsPaasStore, type AgentDefinition, type ResourceType, type AvailableResource, type AgentVersion, type AgentShare, type AgentCollaborator, type AgentVersionDiff, type GeneratedAgentFields } from '../stores/agents-paas';
 import { useGroupsStore } from '../stores/groups';
 import { api } from '../api/client';
 import { PageHeader } from '@/components/common/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { toast } from 'sonner';
-import { Bot, Plus, Trash2, Link as LinkIcon, Folder, History, RotateCcw, Share2, Users, GitCompare, MessageSquare } from 'lucide-react';
+import { Bot, Plus, Trash2, Link as LinkIcon, Folder, History, RotateCcw, Share2, Users, GitCompare, MessageSquare, Wand2, Loader2 } from 'lucide-react';
+import { OptimizeAgentDialog } from '@/components/agents/OptimizeAgentDialog';
 
 const RESOURCE_LABEL: Record<ResourceType, string> = {
   mcp_server: 'MCP Server',
@@ -27,7 +28,7 @@ const DIFF_FIELD_LABEL: Record<string, string> = {
 };
 
 export function AgentStudioPage() {
-  const { list, quota, used, loading, load, loadAvailable, available, create, remove, addMount, removeMount, update, restoreVersion, versions, createShare, listShares, deleteShare, shares, listCollaborators, addCollaborator, removeCollaborator, collaborators, diffVersion, testChat } = useAgentsPaasStore();
+  const { list, quota, used, loading, load, loadAvailable, available, create, remove, addMount, removeMount, update, restoreVersion, versions, createShare, listShares, deleteShare, shares, listCollaborators, addCollaborator, removeCollaborator, collaborators, diffVersion, testChat, generateAgent } = useAgentsPaasStore();
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
@@ -35,9 +36,13 @@ export function AgentStudioPage() {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [model, setModel] = useState('');
   const [engine, setEngine] = useState<'claude' | 'atomcode'>('claude');
+  const [maxTurns, setMaxTurns] = useState<string>('');
+  const [temperature, setTemperature] = useState<string>('');
+  const [generating, setGenerating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showVersions, setShowVersions] = useState(false);
   const [diffVersionId, setDiffVersionId] = useState<string | null>(null);
+  const [showOptimize, setShowOptimize] = useState(false);
 
   useEffect(() => { load(); loadAvailable(); }, [load, loadAvailable]);
   const groups = useGroupsStore((s) => s.groups);
@@ -61,14 +66,45 @@ export function AgentStudioPage() {
       system_prompt: systemPrompt || undefined,
       model: model || null,
       engine,
+      max_turns: maxTurns ? Number(maxTurns) : null,
+      temperature: temperature ? Number(temperature) : null,
       enabled: true,
     });
     if (ag) {
       toast.success('Agent created');
-      setName(''); setDescription(''); setSystemPrompt(''); setModel(''); setEngine('claude'); setShowCreate(false);
+      setName(''); setDescription(''); setSystemPrompt(''); setModel(''); setEngine('claude'); setMaxTurns(''); setTemperature(''); setShowCreate(false);
       setSelectedId(ag.id);
     } else toast.error('Create failed');
   };
+
+  const handleGenerate = async () => {
+    if (description.trim().length < 10) {
+      toast.error('请先填写至少 10 字符的描述，再点 AI 生成');
+      return;
+    }
+    setGenerating(true);
+    try {
+      const fields = await generateAgent({ name: name.trim() || undefined, description: description.trim() });
+      if (!fields) {
+        toast.error('AI 生成失败（provider 可能不可用或超时）');
+        return;
+      }
+      applyGeneratedFields(fields);
+      toast.success('已填入 AI 生成结果，可继续编辑后创建');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  function applyGeneratedFields(f: GeneratedAgentFields) {
+    if (f.name) setName(f.name);
+    if (f.description) setDescription(f.description);
+    if (f.system_prompt) setSystemPrompt(f.system_prompt);
+    setModel(f.model ?? '');
+    setEngine(f.engine === 'atomcode' ? 'atomcode' : 'claude');
+    setMaxTurns(f.max_turns != null ? String(f.max_turns) : '');
+    setTemperature(f.temperature != null ? String(f.temperature) : '');
+  }
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
@@ -157,6 +193,14 @@ export function AgentStudioPage() {
                     />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setShowOptimize(true)}
+                      title="AI 优化当前 Agent 的 description 与 system prompt"
+                    >
+                      <Wand2 className="size-4 mr-1" /> AI 优化
+                    </Button>
                     <Button
                       size="sm"
                       onClick={async () => {
@@ -322,10 +366,24 @@ export function AgentStudioPage() {
               <textarea
                 className="w-full px-3 py-2 border rounded-md bg-background text-sm"
                 rows={2}
-                placeholder="描述（可空，留空则后续在详情面板编辑）"
+                placeholder="描述（用于 AI 生成的关键输入，至少 10 字符）"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleGenerate}
+                  disabled={generating}
+                  title="根据名称+描述，AI 自动生成专业 system prompt 等字段"
+                >
+                  {generating ? <Loader2 className="size-4 mr-1 animate-spin" /> : <Wand2 className="size-4 mr-1" />}
+                  AI 生成
+                </Button>
+                <span className="text-xs text-muted-foreground">生成后可编辑再创建</span>
+              </div>
               <div className="flex gap-2 items-center">
                 <select
                   className="px-3 py-2 border rounded-md bg-background text-sm"
@@ -342,10 +400,27 @@ export function AgentStudioPage() {
                   onChange={(e) => setModel(e.target.value)}
                 />
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="number"
+                  className="px-3 py-2 border rounded-md bg-background text-sm"
+                  placeholder="max_turns（可空）"
+                  value={maxTurns}
+                  onChange={(e) => setMaxTurns(e.target.value)}
+                />
+                <input
+                  type="number"
+                  step="0.1"
+                  className="px-3 py-2 border rounded-md bg-background text-sm"
+                  placeholder="temperature（可空）"
+                  value={temperature}
+                  onChange={(e) => setTemperature(e.target.value)}
+                />
+              </div>
               <textarea
                 className="w-full px-3 py-2 border rounded-md bg-background text-sm"
                 rows={6}
-                placeholder="System Prompt（可空，留空则继承平台默认）"
+                placeholder="System Prompt（可空，留空则继承平台默认；点 AI 生成可自动填充）"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
               />
@@ -364,6 +439,15 @@ export function AgentStudioPage() {
           versionId={diffVersionId}
           onClose={() => setDiffVersionId(null)}
           fetch={diffVersion}
+        />
+      )}
+
+      {selected && (
+        <OptimizeAgentDialog
+          open={showOptimize}
+          onClose={() => setShowOptimize(false)}
+          agentId={selected.id}
+          agentName={selected.name}
         />
       )}
     </div>
