@@ -1296,6 +1296,41 @@ export function initDatabase(): void {
       FOREIGN KEY (session_id) REFERENCES sandbox_sessions(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_sandbox_executions_session ON sandbox_executions(session_id, created_at);
+
+    -- MCP Server 注册中心：把 HTTP 接口聚合为 MCP 工具透出给 Agent
+    CREATE TABLE IF NOT EXISTS mcp_registry_servers (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_reg_srv_user ON mcp_registry_servers(user_id);
+
+    CREATE TABLE IF NOT EXISTS mcp_registry_tools (
+      id TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      input_schema TEXT NOT NULL,
+      http_binding TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (server_id) REFERENCES mcp_registry_servers(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_reg_tool_srv ON mcp_registry_tools(server_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_reg_tool_user ON mcp_registry_tools(user_id);
+
+    CREATE TABLE IF NOT EXISTS mcp_registry_tokens (
+      user_id TEXT PRIMARY KEY,
+      token TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Phase 2 columns
@@ -9175,6 +9210,29 @@ export type AgentMountRow = {
   created_at: string;
 };
 
+export type McpRegistryServerRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type McpRegistryToolRow = {
+  id: string;
+  server_id: string;
+  user_id: string;
+  name: string;
+  description: string;
+  input_schema: string;
+  http_binding: string;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+};
+
 function isoNow(): string {
   return new Date().toISOString();
 }
@@ -10380,4 +10438,181 @@ export function resolveReviewReport(
 export function deleteMarketplaceReview(reviewId: string): boolean {
   const r = db.prepare('DELETE FROM marketplace_reviews WHERE id = ?').run(reviewId);
   return r.changes > 0;
+}
+
+// ─────────────────────────────────────────────────────────────
+// MCP Server 注册中心 — 访问器
+// ─────────────────────────────────────────────────────────────
+
+export function listRegistryServers(
+  userId: string,
+): McpRegistryServerRow[] {
+  return db
+    .prepare('SELECT * FROM mcp_registry_servers WHERE user_id = ? ORDER BY created_at DESC')
+    .all(userId) as McpRegistryServerRow[];
+}
+
+export function getRegistryServer(
+  id: string,
+  userId: string,
+): McpRegistryServerRow | null {
+  const row = db
+    .prepare('SELECT * FROM mcp_registry_servers WHERE id = ? AND user_id = ?')
+    .get(id, userId) as McpRegistryServerRow | undefined;
+  return row ?? null;
+}
+
+export function createRegistryServer(
+  userId: string,
+  input: { name: string; description?: string; enabled?: boolean },
+): McpRegistryServerRow {
+  const id = crypto.randomUUID();
+  const now = isoNow();
+  db.prepare(
+    `INSERT INTO mcp_registry_servers (id, user_id, name, description, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, userId, input.name, input.description ?? '', input.enabled === false ? 0 : 1, now, now);
+  return getRegistryServer(id, userId)!;
+}
+
+export function updateRegistryServer(
+  id: string,
+  userId: string,
+  patch: { name?: string; description?: string | null; enabled?: boolean },
+): McpRegistryServerRow | null {
+  const existing = getRegistryServer(id, userId);
+  if (!existing) return null;
+  const now = isoNow();
+  const fields: string[] = [];
+  const values: (string | number)[] = [];
+  if (patch.name !== undefined) { fields.push('name = ?'); values.push(patch.name); }
+  if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description ?? ''); }
+  if (patch.enabled !== undefined) { fields.push('enabled = ?'); values.push(patch.enabled ? 1 : 0); }
+  if (fields.length === 0) return existing;
+  fields.push('updated_at = ?'); values.push(now);
+  values.push(id, userId);
+  db.prepare(`UPDATE mcp_registry_servers SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`).run(...values);
+  return getRegistryServer(id, userId);
+}
+
+export function deleteRegistryServer(id: string, userId: string): boolean {
+  const r = db
+    .prepare('DELETE FROM mcp_registry_servers WHERE id = ? AND user_id = ?')
+    .run(id, userId);
+  return r.changes > 0;
+}
+
+export function listRegistryToolsByServer(
+  serverId: string,
+  userId: string,
+): McpRegistryToolRow[] {
+  return db
+    .prepare('SELECT * FROM mcp_registry_tools WHERE server_id = ? AND user_id = ? ORDER BY created_at DESC')
+    .all(serverId, userId) as McpRegistryToolRow[];
+}
+
+export function listEnabledRegistryTools(userId: string): McpRegistryToolRow[] {
+  return db
+    .prepare(
+      `SELECT t.* FROM mcp_registry_tools t
+       JOIN mcp_registry_servers s ON t.server_id = s.id
+       WHERE t.user_id = ? AND t.enabled = 1 AND s.enabled = 1
+       ORDER BY s.name, t.name`,
+    )
+    .all(userId) as McpRegistryToolRow[];
+}
+
+export function getRegistryTool(
+  id: string,
+  userId: string,
+): McpRegistryToolRow | null {
+  const row = db
+    .prepare('SELECT * FROM mcp_registry_tools WHERE id = ? AND user_id = ?')
+    .get(id, userId) as McpRegistryToolRow | undefined;
+  return row ?? null;
+}
+
+export function createRegistryTool(
+  userId: string,
+  input: {
+    server_id: string;
+    name: string;
+    description?: string;
+    input_schema: string;
+    http_binding: string;
+    enabled?: boolean;
+  },
+): McpRegistryToolRow | null {
+  // 校验 server 归属
+  const server = getRegistryServer(input.server_id, userId);
+  if (!server) return null;
+  const id = crypto.randomUUID();
+  const now = isoNow();
+  db.prepare(
+    `INSERT INTO mcp_registry_tools (id, server_id, user_id, name, description, input_schema, http_binding, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, input.server_id, userId, input.name, input.description ?? '', input.input_schema, input.http_binding, input.enabled === false ? 0 : 1, now, now);
+  return getRegistryTool(id, userId);
+}
+
+export function updateRegistryTool(
+  id: string,
+  userId: string,
+  patch: {
+    name?: string;
+    description?: string | null;
+    input_schema?: string;
+    http_binding?: string;
+    enabled?: boolean;
+  },
+): McpRegistryToolRow | null {
+  const existing = getRegistryTool(id, userId);
+  if (!existing) return null;
+  const now = isoNow();
+  const fields: string[] = [];
+  const values: (string | number)[] = [];
+  if (patch.name !== undefined) { fields.push('name = ?'); values.push(patch.name); }
+  if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description ?? ''); }
+  if (patch.input_schema !== undefined) { fields.push('input_schema = ?'); values.push(patch.input_schema); }
+  if (patch.http_binding !== undefined) { fields.push('http_binding = ?'); values.push(patch.http_binding); }
+  if (patch.enabled !== undefined) { fields.push('enabled = ?'); values.push(patch.enabled ? 1 : 0); }
+  if (fields.length === 0) return existing;
+  fields.push('updated_at = ?'); values.push(now);
+  values.push(id, userId);
+  db.prepare(`UPDATE mcp_registry_tools SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`).run(...values);
+  return getRegistryTool(id, userId);
+}
+
+export function deleteRegistryTool(id: string, userId: string): boolean {
+  const r = db
+    .prepare('DELETE FROM mcp_registry_tools WHERE id = ? AND user_id = ?')
+    .run(id, userId);
+  return r.changes > 0;
+}
+
+export function getOrCreateRegistryToken(userId: string): string {
+  const existing = db
+    .prepare('SELECT token FROM mcp_registry_tokens WHERE user_id = ?')
+    .get(userId) as { token: string } | undefined;
+  if (existing) return existing.token;
+  const token = crypto.randomUUID();
+  db.prepare(
+    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, created_at) VALUES (?, ?, ?)',
+  ).run(userId, token, isoNow());
+  return token;
+}
+
+export function rotateRegistryToken(userId: string): string {
+  const token = crypto.randomUUID();
+  db.prepare(
+    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, created_at) VALUES (?, ?, ?)',
+  ).run(userId, token, isoNow());
+  return token;
+}
+
+export function getUserIdByRegistryToken(token: string): string | null {
+  const row = db
+    .prepare('SELECT user_id FROM mcp_registry_tokens WHERE token = ?')
+    .get(token) as { user_id: string } | undefined;
+  return row?.user_id ?? null;
 }

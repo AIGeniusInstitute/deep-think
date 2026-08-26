@@ -1015,3 +1015,97 @@ export const WhatsAppConfigSchema = z
       typeof data.enabled === 'boolean',
     { message: 'At least one config field must be provided' },
   );
+
+// ─────────────────────────────────────────────────────────────
+// MCP Server 注册中心 — zod schemas
+// ─────────────────────────────────────────────────────────────
+
+export const REGISTRY_TOOL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+export const RegistryHttpBindingSchema = z
+  .object({
+    method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
+    url: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((u) => /^https?:\/\//i.test(u), {
+        message: 'url must be an http(s) URL',
+      }),
+    headers: z.record(z.string(), z.string().max(4096)).optional(),
+    paramMapping: z
+      .object({
+        path: z.record(z.string(), z.string().max(256)).optional(),
+        query: z.record(z.string(), z.string().max(256)).optional(),
+        header: z.record(z.string(), z.string().max(256)).optional(),
+        body: z.record(z.string(), z.string().max(256)).optional(),
+      })
+      .optional(),
+    bodyTemplate: z.record(z.string(), z.unknown()).optional(),
+    authHeader: z
+      .object({
+        name: z.string().min(1).max(256),
+        value: z.string().min(1).max(4096),
+      })
+      .nullable()
+      .optional(),
+    responseMapping: z
+      .object({
+        extract: z.string().max(1024).optional(),
+        toText: z.string().max(4096).optional(),
+        truncate: z.number().int().min(100).max(200000).optional(),
+      })
+      .optional(),
+    timeoutMs: z.number().int().min(500).max(60000).optional(),
+  })
+  .strict();
+
+export const RegistryInputSchemaObject = z
+  .object({
+    type: z.literal('object'),
+    properties: z.record(z.string(), z.unknown()).optional(),
+    required: z.array(z.string()).optional(),
+    description: z.string().max(1024).optional(),
+  })
+  .passthrough();
+
+export const RegistryToolCreateSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(REGISTRY_TOOL_NAME_RE, 'name must match /^[a-zA-Z_][a-zA-Z0-9_]*$/'),
+  description: z.string().max(1024).optional(),
+  inputSchema: RegistryInputSchemaObject,
+  httpBinding: RegistryHttpBindingSchema,
+  enabled: z.boolean().optional(),
+});
+
+export const RegistryToolUpdateSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(REGISTRY_TOOL_NAME_RE)
+    .optional(),
+  description: z.string().max(1024).nullable().optional(),
+  inputSchema: RegistryInputSchemaObject.optional(),
+  httpBinding: RegistryHttpBindingSchema.optional(),
+  enabled: z.boolean().optional(),
+});
+
+export const RegistryServerCreateSchema = z.object({
+  name: z.string().min(1).max(128),
+  description: z.string().max(4096).optional(),
+  enabled: z.boolean().optional(),
+});
+
+export const RegistryServerUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(128).optional(),
+    description: z.string().max(4096).nullable().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine((d) => d.name !== undefined || d.description !== undefined || d.enabled !== undefined, {
+    message: 'At least one field must be provided',
+  });

@@ -13,7 +13,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
+import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, TIMEZONE, WEB_PORT } from './config.js';
 import { logger } from './logger.js';
 import { resolveHostNodeBinary } from './node-resolver.js';
 import {
@@ -711,7 +711,11 @@ export function buildVolumeMounts(
     mountUserSkills,
   });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const mcpServers = ownerId ? loadUserMcpServers(ownerId) : {};
+  // Docker mode: container reaches the host via host.docker.internal alias
+  // (added in buildContainerArgs via --add-host=host.docker.internal:host-gateway).
+  const mcpServers = ownerId
+    ? loadUserMcpServers(ownerId, { baseUrl: `http://host.docker.internal:${WEB_PORT}` })
+    : {};
   ensureSettingsJson(settingsFile, mcpServers);
 
   mounts.push({
@@ -1085,6 +1089,11 @@ function buildContainerArgs(
   tz: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Allow containers to reach the host's DeepThink web server (e.g. the MCP
+  // Registry endpoint at /api/mcp-registry/mcp) via the host.docker.internal
+  // alias. Standard Docker idiom; harmless for containers that don't use it.
+  args.push('--add-host', 'host.docker.internal:host-gateway');
 
   // Set timezone so container Node.js processes use local time (Asia/Shanghai)
   args.push('-e', `TZ=${tz}`);
@@ -1836,6 +1845,9 @@ export async function runHostAgent(
 
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
   // Load user's global MCP servers (same logic as Docker mode).
+  // Host mode: agent-runner runs as a subprocess, so 127.0.0.1 reaches the
+  // main server directly. Registry auto-injection still applies via
+  // loadUserMcpServers (opts.baseUrl defaults to 127.0.0.1).
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   const hostMcpServers = group.created_by ? loadUserMcpServers(group.created_by) : {};
   ensureSettingsJson(settingsFile, hostMcpServers);
