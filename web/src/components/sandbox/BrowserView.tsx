@@ -11,10 +11,8 @@ interface BrowserViewProps {
 
 export function BrowserView({ sessionId }: BrowserViewProps) {
   const frame = useSandboxStore((s) => s.browserFrames[sessionId] ?? null);
-  const subscribe = useSandboxStore((s) => s.subscribeBrowser);
-  const unsubscribe = useSandboxStore((s) => s.unsubscribeBrowser);
-  const isSubscribed = useSandboxStore((s) => s.subscribedSessions.has(sessionId));
-  const [started, setStarted] = useState(false);
+  const started = useSandboxStore((s) => s.browserStartedSessions.has(sessionId));
+  const requestBrowserStart = useSandboxStore((s) => s.startBrowser);
   const [fps, setFps] = useState(0);
   const [url, setUrl] = useState('');
   const [interactMode, setInteractMode] = useState(false);
@@ -22,24 +20,26 @@ export function BrowserView({ sessionId }: BrowserViewProps) {
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!started) return;
     const offFrame = wsManager.on('sandbox_browser_frame', (data: any) => {
       if (data?.sessionId === sessionId) {
         frameCountRef.current += 1;
       }
     });
-    const offStarted = wsManager.on('sandbox_browser_started', (data: any) => {
-      if (data?.sessionId === sessionId) setStarted(true);
-    });
-    const offStopped = wsManager.on('sandbox_browser_stopped', (data: any) => {
-      if (data?.sessionId === sessionId) setStarted(false);
-    });
     const offErr = wsManager.on('sandbox_error', (data: any) => {
       if (data?.sessionId === sessionId) console.error('[sandbox browser]', data.error);
     });
 
-    if (!isSubscribed) {
-      subscribe(sessionId);
+    return () => {
+      offFrame();
+      offErr();
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!started) {
+      frameCountRef.current = 0;
+      setFps(0);
+      return;
     }
     const fpsTimer = setInterval(() => {
       setFps(frameCountRef.current);
@@ -47,15 +47,13 @@ export function BrowserView({ sessionId }: BrowserViewProps) {
     }, 1000);
 
     return () => {
-      offFrame();
-      offStarted();
-      offStopped();
-      offErr();
-      unsubscribe(sessionId);
       clearInterval(fpsTimer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, started]);
+  }, [started]);
+
+  useEffect(() => () => {
+    useSandboxStore.getState().unsubscribeBrowser(sessionId);
+  }, [sessionId]);
 
   // 同步当前 URL（启动后取一次）
   useEffect(() => {
@@ -139,7 +137,7 @@ export function BrowserView({ sessionId }: BrowserViewProps) {
 
   const startBrowser = async () => {
     try {
-      await sandboxApi.browserStart(sessionId);
+      await requestBrowserStart(sessionId);
     } catch (e: any) {
       showToast('启动浏览器失败', e?.message ?? '');
     }
