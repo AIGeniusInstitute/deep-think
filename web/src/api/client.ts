@@ -2,10 +2,15 @@ import { replaceInApp, stripBasePath, withBasePath } from '../utils/url';
 
 const REQUEST_TIMEOUT_MS = 8000;
 
-export interface ApiError {
-  status: number;
-  message: string;
-  body?: Record<string, unknown>;
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+    public body?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
 }
 
 export async function apiFetch<T>(path: string, options?: RequestInit & { timeoutMs?: number }): Promise<T> {
@@ -33,9 +38,9 @@ export async function apiFetch<T>(path: string, options?: RequestInit & { timeou
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw { status: 408, message: 'Request timeout' } as ApiError;
+      throw new ApiError(408, 'Request timeout');
     }
-    throw { status: 0, message: 'Network error' } as ApiError;
+    throw new ApiError(0, 'Network error');
   } finally {
     clearTimeout(timeout);
   }
@@ -46,7 +51,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit & { timeou
     if (!currentPath.startsWith('/login')) {
       replaceInApp('/login');
     }
-    throw new Error('Unauthorized');
+    throw new ApiError(401, 'Unauthorized');
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -56,7 +61,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit & { timeou
         replaceInApp('/settings');
       }
     }
-    throw { status: res.status, message: body.error || res.statusText, body } as ApiError;
+    throw new ApiError(res.status, body.error || res.statusText, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
