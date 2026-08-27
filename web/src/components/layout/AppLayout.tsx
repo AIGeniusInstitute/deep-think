@@ -37,6 +37,7 @@ export function AppLayout() {
   // 应用级别建立 WebSocket 连接，确保所有页面（非仅 ChatView）都有连接
   useEffect(() => {
     wsManager.connect();
+    return () => wsManager.disconnect();
   }, []);
 
   // 加载计费状态（控制导航栏是否显示账单入口）
