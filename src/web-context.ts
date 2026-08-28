@@ -17,6 +17,11 @@ import {
   getSessionWithUser,
 } from './db.js';
 import type { WhatsAppConnectionState } from './whatsapp.js';
+import type {
+  OrchestratorRunInput,
+  OrchestratorRunResult,
+  OrchestratorRunError,
+} from './agent-orchestration/orchestrator-plan.js';
 
 export interface WsClientInfo {
   sessionId: string;
@@ -195,6 +200,17 @@ export interface WebDeps {
     message: string,
     sourceImJid?: string,
   ) => Promise<string>;
+  /**
+   * Agent Orchestrator–Workers: run a user-created orchestrator agent on a
+   * complex task. The orchestrator's own system prompt plans a dispatch across
+   * its linked workers (pre-existing agent_definitions), then the plan is
+   * assembled into a graph run and executed detached. Wired in index.ts where
+   * full GraphDeps are in scope. Returns runId + plan, or an error. See
+   * src/agent-orchestration/orchestrator-runner.ts.
+   */
+  runOrchestrator?: (
+    input: OrchestratorRunInput,
+  ) => Promise<OrchestratorRunResult | OrchestratorRunError>;
   applyAutoIsolateContext?: (userId: string, enable: boolean) => number;
   /**
    * Resolve a registered group to its effective sibling-aware form. For non-home

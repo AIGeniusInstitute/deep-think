@@ -195,6 +195,7 @@ import {
 import type { GraphDeps } from './graph-engineering/graph-runner.js';
 import { buildTeam } from './agent-team/team-builder.js';
 import { handleTeamStartCommand } from './agent-team/team-commands.js';
+import { runOrchestrator } from './agent-orchestration/orchestrator-runner.js';
 import { setSupervisorDeps } from './routes/supervisor.js';
 import { seedMarketplaceIfEmpty } from './marketplace-seed.js';
 import {
@@ -11716,6 +11717,10 @@ async function main(): Promise<void> {
     // decompose a complex task + create agent members + assemble + start a
     // graph run with full GraphDeps in scope. See src/agent-team/team-builder.ts.
     webDeps.buildTeam = (input) => buildTeam(input, graphDeps);
+    // Agent Orchestrator–Workers: wire runOrchestrator so POST /api/paas/agents/
+    // :id/orchestrate can run a user-created orchestrator on its linked workers
+    // with full GraphDeps in scope. See src/agent-orchestration/orchestrator-runner.ts.
+    webDeps.runOrchestrator = (input) => runOrchestrator(input, graphDeps);
   }
 
   startIpcWatcher();
