@@ -8,7 +8,6 @@ import { SetupChannelsPage } from './pages/SetupChannelsPage';
 import { MemoryPage } from './pages/MemoryPage';
 import { SkillsPage } from './pages/SkillsPage';
 import { McpServersPage } from './pages/McpServersPage';
-import { McpRegistryPage } from './pages/McpRegistryPage';
 import { PluginsPage } from './pages/PluginsPage';
 import { AgentDefinitionsPage } from './pages/AgentDefinitionsPage';
 import { KnowledgeBasesPage } from './pages/KnowledgeBasesPage';
@@ -89,7 +88,7 @@ export function App() {
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/mcp-servers" element={<McpServersPage />} />
-          <Route path="/mcp-registry" element={<McpRegistryPage />} />
+          <Route path="/mcp-registry" element={<Navigate to="/mcp-servers?tab=registry" replace />} />
           <Route path="/plugins" element={<PluginsPage />} />
           <Route path="/agent-definitions" element={<AgentDefinitionsPage />} />
           <Route path="/agents" element={<AgentStudioPage />} />

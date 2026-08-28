@@ -9,6 +9,7 @@ import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
 import { checkMcpServerLimit } from '../billing.js';
+import { listMcpTools, callMcpTool } from '../mcp-client.js';
 
 // --- Types ---
 
@@ -365,6 +366,65 @@ mcpServersRoutes.delete('/:id', authMiddleware, async (c) => {
   delete file.servers[id];
   await writeMcpServersFile(authUser.id, file);
   return c.json({ success: true });
+});
+
+// GET /:id/tools — list the tools exposed by a single MCP server
+mcpServersRoutes.get('/:id/tools', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  const id = c.req.param('id');
+
+  if (!validateServerId(id)) {
+    return c.json({ error: 'Invalid server ID' }, 400);
+  }
+
+  const file = await readMcpServersFile(authUser.id);
+  const entry = file.servers[id];
+  if (!entry) {
+    return c.json({ error: 'Server not found' }, 404);
+  }
+
+  try {
+    const tools = await listMcpTools(entry);
+    return c.json({ tools });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+  }
+});
+
+// POST /:id/tools/call — test-call a single tool of an MCP server
+mcpServersRoutes.post('/:id/tools/call', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  const id = c.req.param('id');
+
+  if (!validateServerId(id)) {
+    return c.json({ error: 'Invalid server ID' }, 400);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const { toolName, args } = body as { toolName?: string; args?: Record<string, unknown> };
+
+  if (!toolName || typeof toolName !== 'string') {
+    return c.json({ error: 'toolName is required and must be a string' }, 400);
+  }
+  if (toolName.length > MAX_MCP_KEY_LEN) {
+    return c.json({ error: `toolName exceeds ${MAX_MCP_KEY_LEN} chars` }, 400);
+  }
+  if (args !== undefined && (typeof args !== 'object' || args === null || Array.isArray(args))) {
+    return c.json({ error: 'args must be a plain object' }, 400);
+  }
+
+  const file = await readMcpServersFile(authUser.id);
+  const entry = file.servers[id];
+  if (!entry) {
+    return c.json({ error: 'Server not found' }, 404);
+  }
+
+  try {
+    const result = await callMcpTool(entry, toolName, args ?? {});
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+  }
 });
 
 // POST /sync-host — sync from host MCP configs (admin only)

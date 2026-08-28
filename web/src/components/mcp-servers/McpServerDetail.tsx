@@ -6,6 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import type { McpServer } from '../../stores/mcp-servers';
 import { useMcpServersStore } from '../../stores/mcp-servers';
+import { McpServerTools } from './McpServerTools';
 
 interface McpServerDetailProps {
   server: McpServer | null;
@@ -459,6 +460,9 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
               添加时间：{new Date(server.addedAt).toLocaleString()}
             </div>
           </div>
+
+          {/* Tools (list + test call) */}
+          <McpServerTools server={server} />
 
           {/* Footer */}
           <div className="p-6 bg-muted">

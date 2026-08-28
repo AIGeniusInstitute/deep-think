@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Plus, RefreshCw, Server, Download } from 'lucide-react';
 import { SearchInput } from '@/components/common';
 import { PageHeader } from '@/components/common/PageHeader';
@@ -6,11 +7,15 @@ import { SkeletonCardList } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useMcpServersStore } from '../stores/mcp-servers';
 import { useAuthStore } from '../stores/auth';
 import { McpServerCard } from '../components/mcp-servers/McpServerCard';
 import { McpServerDetail } from '../components/mcp-servers/McpServerDetail';
 import { AddMcpServerDialog } from '../components/mcp-servers/AddMcpServerDialog';
+import { RegistryPanel } from '../components/mcp-servers/RegistryPanel';
+
+type TabKey = 'servers' | 'registry';
 
 export function McpServersPage() {
   const {
@@ -24,6 +29,12 @@ export function McpServersPage() {
   } = useMcpServersStore();
 
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: TabKey = searchParams.get('tab') === 'registry' ? 'registry' : 'servers';
+  const setTab = (v: string) => {
+    setSearchParams(v === 'servers' ? {} : { tab: v }, { replace: true });
+  };
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -76,117 +87,139 @@ export function McpServersPage() {
         {/* Header */}
         <div className="bg-background border-b border-border px-6 py-4">
           <PageHeader
-            title="MCP 服务器"
-            subtitle={`共 ${servers.length} 个${syncedServers.length > 0 ? `（含同步 ${syncedServers.length}）` : ''} · 启用 ${enabledCount}`}
+            title="MCP"
+            subtitle={
+              tab === 'servers'
+                ? `共 ${servers.length} 个${syncedServers.length > 0 ? `（含同步 ${syncedServers.length}）` : ''} · 启用 ${enabledCount}`
+                : '把外部 HTTP 接口一键转成 MCP 工具'
+            }
             actions={
-              <div className="flex items-center gap-3">
-                {isAdmin && (
-                  <Button variant="outline" onClick={handleSync} disabled={syncing}>
-                    <Download size={18} className={syncing ? 'animate-pulse' : ''} />
-                    {syncing ? '同步中...' : '同步宿主机'}
+              tab === 'servers' ? (
+                <div className="flex items-center gap-3">
+                  {isAdmin && (
+                    <Button variant="outline" onClick={handleSync} disabled={syncing}>
+                      <Download size={18} className={syncing ? 'animate-pulse' : ''} />
+                      {syncing ? '同步中...' : '同步宿主机'}
+                    </Button>
+                  )}
+                  <Button variant="outline" onClick={loadServers} disabled={loading}>
+                    <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+                    刷新
                   </Button>
-                )}
-                <Button variant="outline" onClick={loadServers} disabled={loading}>
-                  <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-                  刷新
-                </Button>
-                <Button onClick={() => setShowAddDialog(true)}>
-                  <Plus size={18} />
-                  添加
-                </Button>
-              </div>
+                  <Button onClick={() => setShowAddDialog(true)}>
+                    <Plus size={18} />
+                    添加
+                  </Button>
+                </div>
+              ) : undefined
             }
           />
         </div>
 
-        {/* Sync message toast */}
-        {syncMessage && (
-          <div className="mx-6 mt-4 p-3 bg-success-bg border border-success/20 rounded-lg text-sm text-success">
-            {syncMessage}
-          </div>
-        )}
+        {/* Tabs */}
+        <div className="px-6 pt-4">
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList>
+              <TabsTrigger value="servers">MCP 服务器</TabsTrigger>
+              <TabsTrigger value="registry">HTTP 注册中心</TabsTrigger>
+            </TabsList>
 
-        {/* Content */}
-        <div className="flex gap-6 p-4">
-          {/* Left list */}
-          <div className="w-full lg:w-1/2 xl:w-2/5">
-            <div className="mb-4">
-              <SearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="搜索 ID、命令或 URL"
-              />
-            </div>
-
-            <div className="space-y-6">
-              {loading && servers.length === 0 ? (
-                <SkeletonCardList count={3} />
-              ) : error ? (
-                <Card className="border-error/20">
-                  <CardContent className="text-center">
-                    <p className="text-error">{error}</p>
-                  </CardContent>
-                </Card>
-              ) : filtered.length === 0 ? (
-                <EmptyState
-                  icon={Server}
-                  title={searchQuery ? '没有找到匹配的 MCP 服务器' : '暂无 MCP 服务器'}
-                  description={searchQuery ? undefined : '点击"添加"按钮添加第一个 MCP 服务器'}
-                />
-              ) : (
-                <>
-                  {manualServers.length > 0 && (
-                    <div>
-                      <h2 className="text-sm font-semibold text-muted-foreground mb-3">
-                        手动添加 ({manualServers.length})
-                      </h2>
-                      <div className="space-y-2">
-                        {manualServers.map((server) => (
-                          <McpServerCard
-                            key={server.id}
-                            server={server}
-                            selected={selectedId === server.id}
-                            onSelect={() => setSelectedId(server.id)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {syncedServers.length > 0 && (
-                    <div>
-                      <h2 className="text-sm font-semibold text-muted-foreground mb-3">
-                        宿主机同步 ({syncedServers.length})
-                      </h2>
-                      <div className="space-y-2">
-                        {syncedServers.map((server) => (
-                          <McpServerCard
-                            key={server.id}
-                            server={server}
-                            selected={selectedId === server.id}
-                            onSelect={() => setSelectedId(server.id)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
+            <TabsContent value="servers" className="mt-4">
+              {/* Sync message toast */}
+              {syncMessage && (
+                <div className="mb-4 p-3 bg-success-bg border border-success/20 rounded-lg text-sm text-success">
+                  {syncMessage}
+                </div>
               )}
-            </div>
-          </div>
 
-          {/* Right detail (desktop) */}
-          <div className="hidden lg:block lg:w-1/2 xl:w-3/5">
-            <McpServerDetail server={selectedServer} onDeleted={() => setSelectedId(null)} />
-          </div>
+              {/* Content */}
+              <div className="flex gap-6 pb-4">
+                {/* Left list */}
+                <div className="w-full lg:w-1/2 xl:w-2/5">
+                  <div className="mb-4">
+                    <SearchInput
+                      value={searchQuery}
+                      onChange={setSearchQuery}
+                      placeholder="搜索 ID、命令或 URL"
+                    />
+                  </div>
+
+                  <div className="space-y-6">
+                    {loading && servers.length === 0 ? (
+                      <SkeletonCardList count={3} />
+                    ) : error ? (
+                      <Card className="border-error/20">
+                        <CardContent className="text-center">
+                          <p className="text-error">{error}</p>
+                        </CardContent>
+                      </Card>
+                    ) : filtered.length === 0 ? (
+                      <EmptyState
+                        icon={Server}
+                        title={searchQuery ? '没有找到匹配的 MCP 服务器' : '暂无 MCP 服务器'}
+                        description={searchQuery ? undefined : '点击"添加"按钮添加第一个 MCP 服务器'}
+                      />
+                    ) : (
+                      <>
+                        {manualServers.length > 0 && (
+                          <div>
+                            <h2 className="text-sm font-semibold text-muted-foreground mb-3">
+                              手动添加 ({manualServers.length})
+                            </h2>
+                            <div className="space-y-2">
+                              {manualServers.map((server) => (
+                                <McpServerCard
+                                  key={server.id}
+                                  server={server}
+                                  selected={selectedId === server.id}
+                                  onSelect={() => setSelectedId(server.id)}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {syncedServers.length > 0 && (
+                          <div>
+                            <h2 className="text-sm font-semibold text-muted-foreground mb-3">
+                              宿主机同步 ({syncedServers.length})
+                            </h2>
+                            <div className="space-y-2">
+                              {syncedServers.map((server) => (
+                                <McpServerCard
+                                  key={server.id}
+                                  server={server}
+                                  selected={selectedId === server.id}
+                                  onSelect={() => setSelectedId(server.id)}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right detail (desktop) */}
+                <div className="hidden lg:block lg:w-1/2 xl:w-3/5">
+                  <McpServerDetail server={selectedServer} onDeleted={() => setSelectedId(null)} />
+                </div>
+              </div>
+
+              {/* Mobile detail */}
+              {selectedId && selectedServer && (
+                <div className="lg:hidden pb-4">
+                  <McpServerDetail server={selectedServer} onDeleted={() => setSelectedId(null)} />
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="registry" className="mt-4 pb-6">
+              <RegistryPanel />
+            </TabsContent>
+          </Tabs>
         </div>
-
-        {/* Mobile detail */}
-        {selectedId && selectedServer && (
-          <div className="lg:hidden p-4">
-            <McpServerDetail server={selectedServer} onDeleted={() => setSelectedId(null)} />
-          </div>
-        )}
       </div>
 
       <AddMcpServerDialog
