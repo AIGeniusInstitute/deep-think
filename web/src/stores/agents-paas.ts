@@ -10,6 +10,8 @@ export interface AgentMount {
   resourceId: string;
 }
 
+export type AgentKind = 'assistant' | 'orchestrator';
+
 export interface AgentDefinition {
   id: string;
   userId: string;
@@ -23,6 +25,7 @@ export interface AgentDefinition {
   maxTurns: number | null;
   temperature: number | null;
   enabled: boolean;
+  kind: AgentKind;
   createdAt: string;
   updatedAt: string;
   mounts?: AgentMount[];
@@ -57,6 +60,17 @@ export interface AgentVersionDiff {
   fields: Array<{ name: string; before: string; after: string; same: boolean }>;
   promptDiff: Array<{ op: '+' | '-' | '='; line: string }>;
   promptSame: boolean;
+}
+
+export interface OrchestrateResult {
+  ok: true;
+  runId: string;
+  definitionId: string;
+  plan: {
+    planName: string;
+    steps: Array<{ id: string; title: string; workerId: string; task: string; dependsOn: string[] }>;
+    acceptanceCriteria: string;
+  };
 }
 
 export interface AvailableResource {
@@ -107,6 +121,7 @@ interface AgentsState {
     max_turns?: number | null;
     temperature?: number | null;
     enabled?: boolean;
+    kind?: AgentKind;
   }) => Promise<AgentDefinition | null>;
   update: (id: string, patch: Record<string, unknown>) => Promise<boolean>;
   remove: (id: string) => Promise<boolean>;
@@ -122,6 +137,12 @@ interface AgentsState {
   addCollaborator: (agentId: string, userId: string, role: 'editor' | 'viewer') => Promise<boolean>;
   removeCollaborator: (agentId: string, userId: string) => Promise<boolean>;
   testChat: (agentId: string) => Promise<{ jid: string; folder: string; name: string } | null>;
+  listWorkers: (agentId: string) => Promise<AgentDefinition[]>;
+  setWorkers: (agentId: string, workerIds: string[]) => Promise<AgentDefinition[]>;
+  orchestrate: (
+    agentId: string,
+    input: { task: string; background?: string; acceptanceCriteria?: string },
+  ) => Promise<OrchestrateResult | { error: string; detail?: string } | null>;
   generateAgent: (data: { name?: string; description: string }) => Promise<GeneratedAgentFields | null>;
   optimizeAgent: (agentId: string, feedback?: string) => Promise<OptimizedAgentPreview | null>;
   applyOptimizedAgent: (
@@ -289,6 +310,30 @@ export const useAgentsPaasStore = create<AgentsState>((set, get) => ({
       return res;
     } catch {
       return null;
+    }
+  },
+  listWorkers: async (agentId) => {
+    try {
+      const res = await api.get<{ workers: AgentDefinition[] }>(`/api/paas/agents/${agentId}/workers`);
+      return res.workers ?? [];
+    } catch {
+      return [];
+    }
+  },
+  setWorkers: async (agentId, workerIds) => {
+    const res = await api.put<{ workers: AgentDefinition[] }>(`/api/paas/agents/${agentId}/workers`, {
+      workerIds,
+    });
+    return res.workers ?? [];
+  },
+  orchestrate: async (agentId, input) => {
+    try {
+      const res = await api.post<OrchestrateResult>(`/api/paas/agents/${agentId}/orchestrate`, input);
+      return res;
+    } catch (e: any) {
+      const body = e?.body as { error?: string; detail?: string } | undefined;
+      if (body?.error) return { error: body.error, detail: body.detail };
+      return { error: e?.message ?? '编排启动失败' };
     }
   },
   generateAgent: async (data) => {

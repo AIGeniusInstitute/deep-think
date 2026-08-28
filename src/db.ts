@@ -1133,6 +1133,7 @@ export function initDatabase(): void {
       max_turns INTEGER,
       temperature REAL,
       enabled INTEGER NOT NULL DEFAULT 1,
+      kind TEXT NOT NULL DEFAULT 'assistant',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1251,6 +1252,19 @@ export function initDatabase(): void {
       FOREIGN KEY (agent_def_id) REFERENCES agent_definitions(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS agent_worker_links (
+      id TEXT PRIMARY KEY,
+      orchestrator_id TEXT NOT NULL,
+      worker_id TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      UNIQUE (orchestrator_id, worker_id),
+      FOREIGN KEY (orchestrator_id) REFERENCES agent_definitions(id) ON DELETE CASCADE,
+      FOREIGN KEY (worker_id) REFERENCES agent_definitions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_links_orch ON agent_worker_links(orchestrator_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_links_worker ON agent_worker_links(worker_id);
+
     CREATE TABLE IF NOT EXISTS marketplace_review_reports (
       id TEXT PRIMARY KEY,
       review_id TEXT NOT NULL,
@@ -1335,6 +1349,7 @@ export function initDatabase(): void {
 
   // Phase 2 columns
   ensureColumn('kb_documents', 'embedding', 'BLOB');
+  ensureColumn('agent_definitions', 'kind', "TEXT NOT NULL DEFAULT 'assistant'");
   ensureColumn('kb_documents', 'embedding_model', 'TEXT');
   ensureColumn('marketplace_items', 'status', "TEXT NOT NULL DEFAULT 'approved'");
   ensureColumn('marketplace_items', 'submitted_by', 'TEXT');
@@ -9198,6 +9213,7 @@ export type AgentDefinitionRow = {
   max_turns: number | null;
   temperature: number | null;
   enabled: number;
+  kind: string;
   created_at: string;
   updated_at: string;
 };
@@ -9273,13 +9289,14 @@ export function createAgentDefinition(
     max_turns?: number | null;
     temperature?: number | null;
     enabled?: boolean;
+    kind?: string;
   },
 ): AgentDefinitionRow {
   const id = crypto.randomUUID();
   const now = isoNow();
   db.prepare(
-    `INSERT INTO agent_definitions (id, user_id, name, description, system_prompt, model, engine, avatar_emoji, avatar_color, max_turns, temperature, enabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agent_definitions (id, user_id, name, description, system_prompt, model, engine, avatar_emoji, avatar_color, max_turns, temperature, enabled, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     userId,
@@ -9293,6 +9310,7 @@ export function createAgentDefinition(
     input.max_turns ?? null,
     input.temperature ?? null,
     input.enabled === false ? 0 : 1,
+    input.kind ?? 'assistant',
     now,
     now,
   );
@@ -9313,6 +9331,7 @@ export function updateAgentDefinition(
     max_turns?: number | null;
     temperature?: number | null;
     enabled?: boolean;
+    kind?: string;
   },
 ): AgentDefinitionRow | null {
   const existing = getAgentDefinition(id, userId);
@@ -9333,10 +9352,11 @@ export function updateAgentDefinition(
     max_turns: patch.max_turns !== undefined ? patch.max_turns : existing.max_turns,
     temperature: patch.temperature !== undefined ? patch.temperature : existing.temperature,
     enabled: patch.enabled !== undefined ? (patch.enabled ? 1 : 0) : existing.enabled,
+    kind: patch.kind ?? existing.kind,
     updated_at: isoNow(),
   };
   db.prepare(
-    `UPDATE agent_definitions SET name=?, description=?, system_prompt=?, model=?, engine=?, avatar_emoji=?, avatar_color=?, max_turns=?, temperature=?, enabled=?, updated_at=? WHERE id=? AND user_id=?`,
+    `UPDATE agent_definitions SET name=?, description=?, system_prompt=?, model=?, engine=?, avatar_emoji=?, avatar_color=?, max_turns=?, temperature=?, enabled=?, kind=?, updated_at=? WHERE id=? AND user_id=?`,
   ).run(
     next.name,
     next.description,
@@ -9348,6 +9368,7 @@ export function updateAgentDefinition(
     next.max_turns,
     next.temperature,
     next.enabled,
+    next.kind,
     next.updated_at,
     id,
     userId,
@@ -9404,6 +9425,62 @@ export function deleteAgentMount(
     .prepare('DELETE FROM agent_mounts WHERE id = ? AND agent_def_id = ?')
     .run(id, agentDefId);
   return result.changes > 0;
+}
+
+// ─── Agent Orchestrator–Workers (orchestrator-workers mode) ──────────
+
+export type AgentWorkerLinkRow = {
+  id: string;
+  orchestrator_id: string;
+  worker_id: string;
+  position: number;
+  created_at: string;
+};
+
+/**
+ * Replace an orchestrator's worker set (idempotent whole-set replace). Runs in
+ * a transaction so a partial failure never leaves a half-written set. Worker
+ * ids must already be validated by the caller (owner + non-orchestrator +
+ * not-self).
+ */
+export function setAgentWorkers(
+  orchestratorId: string,
+  workerIds: string[],
+): void {
+  const tx = db.transaction((ids: string[]) => {
+    db.prepare('DELETE FROM agent_worker_links WHERE orchestrator_id = ?').run(
+      orchestratorId,
+    );
+    const now = isoNow();
+    const insert = db.prepare(
+      'INSERT INTO agent_worker_links (id, orchestrator_id, worker_id, position, created_at) VALUES (?, ?, ?, ?, ?)',
+    );
+    ids.forEach((workerId, i) => {
+      insert.run(crypto.randomUUID(), orchestratorId, workerId, i, now);
+    });
+  });
+  tx(workerIds);
+}
+
+/** List an orchestrator's workers (agent_definition rows), ordered by position. */
+export function listAgentWorkers(orchestratorId: string): AgentDefinitionRow[] {
+  return db
+    .prepare(
+      `SELECT ad.* FROM agent_worker_links wl
+       JOIN agent_definitions ad ON ad.id = wl.worker_id
+       WHERE wl.orchestrator_id = ?
+       ORDER BY wl.position ASC`,
+    )
+    .all(orchestratorId) as AgentDefinitionRow[];
+}
+
+/** List the ids of orchestrators that a given worker belongs to (for deletion guard / visibility). */
+export function listWorkerLinksForAgent(agentId: string): AgentWorkerLinkRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM agent_worker_links WHERE worker_id = ? OR orchestrator_id = ?',
+    )
+    .all(agentId, agentId) as AgentWorkerLinkRow[];
 }
 
 // ─── Agent PaaS: Knowledge Bases ──────────────────────────

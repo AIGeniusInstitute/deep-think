@@ -268,6 +268,7 @@ export const AgentDefinitionCreateSchema = z.object({
   max_turns: z.number().int().min(1).max(200).optional().nullable(),
   temperature: z.number().min(0).max(2).optional().nullable(),
   enabled: z.boolean().optional(),
+  kind: z.enum(['assistant', 'orchestrator']).optional(),
 });
 
 export const AgentDefinitionPatchSchema = z.object({
@@ -281,6 +282,7 @@ export const AgentDefinitionPatchSchema = z.object({
   max_turns: z.number().int().min(1).max(200).optional().nullable(),
   temperature: z.number().min(0).max(2).optional().nullable(),
   enabled: z.boolean().optional(),
+  kind: z.enum(['assistant', 'orchestrator']).optional(),
 });
 
 export const AgentMountCreateSchema = z.object({

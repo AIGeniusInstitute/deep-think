@@ -99,9 +99,13 @@ export interface AgentDefinition {
   maxTurns: number | null;
   temperature: number | null;
   enabled: boolean;
+  /** Agent kind: 'assistant' (default) | 'orchestrator' (主 Agent 编排者). */
+  kind: AgentDefinitionKind;
   createdAt: string;
   updatedAt: string;
 }
+
+export type AgentDefinitionKind = 'assistant' | 'orchestrator';
 
 export interface AgentMount {
   id: string;

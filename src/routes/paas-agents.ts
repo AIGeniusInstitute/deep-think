@@ -17,6 +17,8 @@ import {
   listAgentMounts,
   addAgentMount,
   deleteAgentMount,
+  setAgentWorkers,
+  listAgentWorkers,
   countAgentDefinitions,
   getUserAgentQuota,
   listKnowledgeBases,
@@ -73,6 +75,7 @@ function serializeAgentDef(row: AgentDefinitionRow): AgentDefinition {
     maxTurns: row.max_turns,
     temperature: row.temperature,
     enabled: row.enabled === 1,
+    kind: row.kind === 'orchestrator' ? 'orchestrator' : 'assistant',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -165,6 +168,7 @@ paasAgentsRoute.post('/', async (c) => {
       max_turns: validation.data.max_turns ?? null,
       temperature: validation.data.temperature ?? null,
       enabled: validation.data.enabled,
+      kind: validation.data.kind,
     });
     return c.json({ agent: serializeAgentDef(row), mounts: [] }, 201);
   } catch (err) {
@@ -192,6 +196,7 @@ paasAgentsRoute.patch('/:id', async (c) => {
     max_turns: validation.data.max_turns,
     temperature: validation.data.temperature,
     enabled: validation.data.enabled,
+    kind: validation.data.kind,
   });
   if (!row) {
     return c.json({ error: 'Agent definition not found' }, 404);
@@ -242,6 +247,178 @@ paasAgentsRoute.delete('/:id/mounts/:mountId', (c) => {
     return c.json({ error: 'Mount not found' }, 404);
   }
   return c.json({ success: true });
+});
+
+// ─── Orchestrator–Workers（主 Agent 编排子 Agent）───────────────
+
+// GET /:id/workers — 列出编排者已关联的子 Agent（按 position 排序）。
+paasAgentsRoute.get('/:id/workers', (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const orchestrator = getAgentDefinition(id, user.id);
+  if (!orchestrator) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+  const workers = listAgentWorkers(id);
+  return c.json({ workers: workers.map(serializeAgentDef) });
+});
+
+// PUT /:id/workers — 整体替换编排者的 Worker 集合（幂等）。
+paasAgentsRoute.put('/:id/workers', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const orchestrator = getAgentDefinition(id, user.id);
+  if (!orchestrator) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const workerIds: unknown = body.workerIds;
+  if (!Array.isArray(workerIds) || !workerIds.every((w) => typeof w === 'string')) {
+    return c.json({ error: 'workerIds must be an array of strings' }, 400);
+  }
+
+  // 校验每个 worker：必须是当前用户自己的、非编排者自身、非编排者类型的 Agent。
+  const ids = workerIds as string[];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const wid of ids) {
+    if (wid === id) {
+      invalid.push(wid);
+      continue;
+    }
+    if (seen.has(wid)) continue; // 去重，允许重复传但只保留一个
+    seen.add(wid);
+    const w = getAgentDefinition(wid, user.id);
+    if (!w || w.kind === 'orchestrator') invalid.push(wid);
+  }
+  if (invalid.length) {
+    return c.json({ error: 'Invalid worker ids', invalid }, 400);
+  }
+
+  setAgentWorkers(id, [...seen]);
+  const workers = listAgentWorkers(id);
+  return c.json({ workers: workers.map(serializeAgentDef) });
+});
+
+/**
+ * 为编排者创建/复用确定性的运行工作区（web:agent-orch-{agentId}），与 test-chat
+ * 同构。编排运行（orchestrate）缺省 groupFolder/chatJid 时使用，前端无需感知
+ * 工作区概念即可一键运行。
+ */
+function ensureOrchestratorWorkspace(
+  agentId: string,
+  agentName: string,
+  user: { id: string; role?: string },
+): { jid: string; folder: string } {
+  const jid = `web:agent-orch-${agentId}`;
+  const folder = `agent-orch-${agentId}`;
+  const name = `编排: ${agentName}`;
+  const now = new Date().toISOString();
+
+  const existing = getRegisteredGroup(jid);
+  if (existing) {
+    if (existing.agentDefId !== agentId || existing.name !== name) {
+      const updated: RegisteredGroup = {
+        ...existing,
+        name,
+        agentDefId: agentId,
+      };
+      setRegisteredGroup(jid, updated);
+      updateChatName(jid, name);
+      const deps = getWebDeps();
+      if (deps) deps.getRegisteredGroups()[jid] = updated;
+    }
+    return { jid, folder: existing.folder };
+  }
+
+  const group: RegisteredGroup = {
+    name,
+    folder,
+    added_at: now,
+    executionMode: user.role === 'admin' ? 'host' : 'container',
+    created_by: user.id,
+    agentDefId: agentId,
+  };
+  setRegisteredGroup(jid, group);
+  ensureChatExists(jid);
+  updateChatName(jid, name);
+  addGroupMember(folder, user.id, 'owner', user.id);
+
+  try {
+    fs.mkdirSync(path.join(GROUPS_DIR, folder), { recursive: true });
+  } catch (err) {
+    logger.error({ folder, err }, 'Failed to create orchestrator workspace dir');
+  }
+
+  const deps = getWebDeps();
+  if (deps) deps.getRegisteredGroups()[jid] = group;
+
+  return { jid, folder };
+}
+
+// POST /:id/orchestrate — 运行编排者：拆解任务 → 分派给已关联 Workers → 启动 graph run。
+paasAgentsRoute.post('/:id/orchestrate', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const orchestrator = getAgentDefinition(id, user.id);
+  if (!orchestrator) {
+    return c.json({ error: 'Agent definition not found' }, 404);
+  }
+  if (orchestrator.kind !== 'orchestrator') {
+    return c.json({ error: 'This agent is not an orchestrator' }, 400);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const task = typeof body.task === 'string' ? body.task.trim() : '';
+  if (!task) {
+    return c.json({ error: 'task is required' }, 400);
+  }
+  const background =
+    typeof body.background === 'string' && body.background.trim()
+      ? body.background.trim()
+      : undefined;
+  const acceptanceCriteria =
+    typeof body.acceptanceCriteria === 'string' && body.acceptanceCriteria.trim()
+      ? body.acceptanceCriteria.trim()
+      : undefined;
+
+  let groupFolder =
+    typeof body.groupFolder === 'string' && body.groupFolder.trim()
+      ? body.groupFolder.trim()
+      : undefined;
+  let chatJid =
+    typeof body.chatJid === 'string' && body.chatJid.trim()
+      ? body.chatJid.trim()
+      : undefined;
+  if (!groupFolder || !chatJid) {
+    const ws = ensureOrchestratorWorkspace(id, orchestrator.name, user);
+    if (!groupFolder) groupFolder = ws.folder;
+    if (!chatJid) chatJid = ws.jid;
+  }
+
+  const webDeps = getWebDeps();
+  if (!webDeps?.runOrchestrator) {
+    return c.json({ error: 'Orchestrator runner not initialized' }, 503);
+  }
+  const result = await webDeps.runOrchestrator({
+    orchestratorId: id,
+    task,
+    background,
+    acceptanceCriteria,
+    ownerUserId: user.id,
+    groupFolder,
+    chatJid,
+  });
+  if ('error' in result) {
+    return c.json({ error: result.error, detail: result.detail }, 400);
+  }
+  return c.json({
+    ok: true,
+    runId: result.runId,
+    definitionId: result.definitionId,
+    plan: result.plan,
+  });
 });
 
 // Phase 2: 版本历史
