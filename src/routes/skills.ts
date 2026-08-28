@@ -11,7 +11,10 @@ import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
 import { getEffectiveExternalDir } from '../runtime-config.js';
-import { validateSafeHttpsUrl } from '../url-safety.js';
+import {
+  assertResolvesToPublicAddress,
+  validateSafeHttpsUrl,
+} from '../url-safety.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -763,12 +766,22 @@ async function installSkillForUser(
   if (!isNpmName && !isUrl) {
     return { success: false, error: 'Invalid package name format' };
   }
-  // SSRF 防护：URL 形式的 skill package 必须是 HTTPS + 非内网 hostname。
+  // SSRF 防护：URL 形式的 skill package 必须是 HTTPS + 非内网 hostname，
+  // 且 hostname 的 DNS 解析结果也不能落在内网 / 云元数据网段。
   // 仅以 npm `<scope>/<name>` 形式不需要这层校验（npm 注册中心走 npx 自带管线）。
   if (isUrl) {
     const reason = validateSafeHttpsUrl(pkg);
     if (reason) {
       return { success: false, error: `Refused skill URL: ${reason}` };
+    }
+    try {
+      await assertResolvesToPublicAddress(
+        new URL(pkg).hostname,
+        'Skill URL hostname',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: `Refused skill URL: ${msg}` };
     }
   }
 
