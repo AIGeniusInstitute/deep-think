@@ -15,6 +15,7 @@ import { AgentStudioPage } from './pages/AgentStudioPage';
 import { MarketplacePage } from './pages/MarketplacePage';
 import { SharePage } from './pages/SharePage';
 import { UsersPage } from './pages/UsersPage';
+import OpenPlatformPage from './pages/OpenPlatformPage';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { AppLayout } from './components/layout/AppLayout';
 import { APP_BASE, shouldUseHashRouter } from './utils/url';
@@ -80,6 +81,7 @@ export function App() {
           <Route path="/workflows" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
           <Route path="/workflows/:id" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
           <Route path="/opc" element={<Suspense fallback={null}><OpcPage /></Suspense>} />
+          <Route path="/open-platform" element={<OpenPlatformPage />} />
           <Route path="/supervisor" element={<Suspense fallback={null}><SupervisorPage /></Suspense>} />
           <Route path="/harness" element={<Suspense fallback={null}><HarnessPage /></Suspense>} />
           <Route path="/monitor" element={<Navigate to="/settings?tab=monitor" replace />} />

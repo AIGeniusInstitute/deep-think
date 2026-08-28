@@ -1120,6 +1120,33 @@ export function initDatabase(): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Agent Service 开放平台：开发者/应用 API Key。明文 key 仅创建时返回一次，
+    -- 落库只存 sha256(key_hash) 与展示前缀 key_prefix。scopes 为 JSON 数组（maas/agent）。
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      key_hash TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT '["maas","agent"]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      expires_at TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+
+    -- Agent Service 开放平台：模型定价（美元 / 每百万 token）。MaaS 直连 provider
+    -- 时据此计算成本；未配置的模型 cost=0（token 仍计量，不扣费）。
+    CREATE TABLE IF NOT EXISTS model_pricing (
+      model_id TEXT PRIMARY KEY,
+      input_price_per_mtok REAL NOT NULL DEFAULT 0,
+      output_price_per_mtok REAL NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS agent_definitions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -9262,6 +9289,206 @@ export function listAgentDefinitions(userId: string): AgentDefinitionRow[] {
   return db
     .prepare('SELECT * FROM agent_definitions WHERE user_id = ? ORDER BY updated_at DESC')
     .all(userId) as AgentDefinitionRow[];
+}
+
+// ─── Agent Service 开放平台：API Key ──────────────────────────
+
+export type ApiKeyRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  key_hash: string;
+  key_prefix: string;
+  scopes: string;
+  enabled: number;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+};
+
+export function createApiKey(input: {
+  userId: string;
+  name: string;
+  keyHash: string;
+  keyPrefix: string;
+  scopes?: string[];
+  expiresAt?: string | null;
+}): ApiKeyRow {
+  const id = crypto.randomUUID();
+  const now = isoNow();
+  db.prepare(
+    `INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, scopes, enabled, created_at, last_used_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?)`,
+  ).run(
+    id,
+    input.userId,
+    input.name,
+    input.keyHash,
+    input.keyPrefix,
+    JSON.stringify(input.scopes ?? ['maas', 'agent']),
+    now,
+    input.expiresAt ?? null,
+  );
+  return getApiKeyById(id)!;
+}
+
+export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
+  const row = db
+    .prepare('SELECT * FROM api_keys WHERE key_hash = ?')
+    .get(keyHash) as ApiKeyRow | undefined;
+  return row ?? null;
+}
+
+export function getApiKeyById(id: string): ApiKeyRow | null {
+  const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id) as
+    | ApiKeyRow
+    | undefined;
+  return row ?? null;
+}
+
+export function listApiKeys(userId: string, isAdmin = false): ApiKeyRow[] {
+  if (isAdmin) {
+    return db
+      .prepare('SELECT * FROM api_keys ORDER BY created_at DESC')
+      .all() as ApiKeyRow[];
+  }
+  return db
+    .prepare('SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC')
+    .all(userId) as ApiKeyRow[];
+}
+
+export function getApiKey(id: string, userId: string, isAdmin = false): ApiKeyRow | null {
+  const row = (isAdmin
+    ? db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id)
+    : db.prepare('SELECT * FROM api_keys WHERE id = ? AND user_id = ?').get(id, userId)) as
+    | ApiKeyRow
+    | undefined;
+  return row ?? null;
+}
+
+export function deleteApiKey(id: string, userId: string, isAdmin = false): boolean {
+  const result = isAdmin
+    ? db.prepare('DELETE FROM api_keys WHERE id = ?').run(id)
+    : db.prepare('DELETE FROM api_keys WHERE id = ? AND user_id = ?').run(id, userId);
+  return result.changes > 0;
+}
+
+export function touchApiKeyLastUsed(id: string, at: string): void {
+  db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(at, id);
+}
+
+// ─── Agent Service 开放平台：模型定价 ──────────────────────────
+
+export type ModelPricingRow = {
+  model_id: string;
+  input_price_per_mtok: number;
+  output_price_per_mtok: number;
+  updated_at: string;
+};
+
+export function getModelPricing(modelId: string): ModelPricingRow | null {
+  const row = db
+    .prepare('SELECT * FROM model_pricing WHERE model_id = ?')
+    .get(modelId) as ModelPricingRow | undefined;
+  return row ?? null;
+}
+
+export function listModelPricing(): ModelPricingRow[] {
+  return db
+    .prepare('SELECT * FROM model_pricing ORDER BY model_id ASC')
+    .all() as ModelPricingRow[];
+}
+
+export function upsertModelPricing(input: {
+  modelId: string;
+  inputPricePerMtok: number;
+  outputPricePerMtok: number;
+}): ModelPricingRow {
+  db.prepare(
+    `INSERT INTO model_pricing (model_id, input_price_per_mtok, output_price_per_mtok, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(model_id) DO UPDATE SET
+       input_price_per_mtok = excluded.input_price_per_mtok,
+       output_price_per_mtok = excluded.output_price_per_mtok,
+       updated_at = excluded.updated_at`,
+  ).run(input.modelId, input.inputPricePerMtok, input.outputPricePerMtok, isoNow());
+  return getModelPricing(input.modelId)!;
+}
+
+export function deleteModelPricing(modelId: string): boolean {
+  return db.prepare('DELETE FROM model_pricing WHERE model_id = ?').run(modelId).changes > 0;
+}
+
+// ─── Agent Service 开放平台：用量聚合（source='open-platform'）──
+
+export interface OpenPlatformUsageSummary {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export interface OpenPlatformUsageDaily extends OpenPlatformUsageSummary {
+  date: string;
+}
+
+export function getOpenPlatformUsage(
+  days: number,
+  userId?: string,
+): { summary: OpenPlatformUsageSummary; daily: OpenPlatformUsageDaily[] } {
+  const sinceDate = toLocalDateString(new Date(Date.now() - (days - 1) * 86400000));
+  const whereUser = userId ? 'AND user_id = ?' : '';
+  const args = userId ? [sinceDate, userId] : [sinceDate];
+
+  const rows = db
+    .prepare(
+      `SELECT date(created_at, 'localtime') AS date,
+              COUNT(*) AS requests,
+              COALESCE(SUM(input_tokens), 0) AS input_tokens,
+              COALESCE(SUM(output_tokens), 0) AS output_tokens,
+              COALESCE(SUM(cost_usd), 0) AS cost_usd
+       FROM usage_records
+       WHERE source = 'open-platform'
+         AND date(created_at, 'localtime') >= ?
+         ${whereUser}
+       GROUP BY date(created_at, 'localtime')
+       ORDER BY date ASC`,
+    )
+    .all(...args) as Array<{
+    date: string;
+    requests: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+  }>;
+
+  const daily = rows.map((r) => ({
+    date: r.date,
+    requests: r.requests,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    costUsd: r.cost_usd,
+  }));
+
+  const summary = daily.reduce(
+    (acc, d) => ({
+      requests: acc.requests + d.requests,
+      inputTokens: acc.inputTokens + d.inputTokens,
+      outputTokens: acc.outputTokens + d.outputTokens,
+      costUsd: acc.costUsd + d.costUsd,
+    }),
+    { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+  );
+
+  return { summary, daily };
+}
+
+/** 单参查询（供 Agent Service 用），不管属主。 */
+export function getAgentDefinitionById(id: string): AgentDefinitionRow | null {
+  const row = db
+    .prepare('SELECT * FROM agent_definitions WHERE id = ?')
+    .get(id) as AgentDefinitionRow | undefined;
+  return row ?? null;
 }
 
 export function getAgentDefinition(

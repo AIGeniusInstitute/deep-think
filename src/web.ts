@@ -83,6 +83,10 @@ import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
 import sandboxRoutes from './routes/sandbox.js';
 import { opcRoutes } from './routes/opc.js';
+import openPlatformRoutes from './routes/open-platform.js';
+import openPlatformKeysRoutes from './routes/open-platform-keys.js';
+import openPlatformAdminRoutes from './routes/open-platform-admin.js';
+import openPlatformDebugRoutes from './routes/open-platform-debug.js';
 import { getSandboxManager } from './sandbox/index.js';
 import {
   checkBillingAccess,
@@ -301,6 +305,10 @@ app.route('/api/billing', billingRoutes);
 app.route('/api/bug-report', bugReportRoutes);
 app.route('/api/sandbox', sandboxRoutes);
 app.route('/api/opc', opcRoutes);
+app.route('/v1', openPlatformRoutes);
+app.route('/api/open-platform/keys', openPlatformKeysRoutes);
+app.route('/api/open-platform/debug', openPlatformDebugRoutes);
+app.route('/api/open-platform', openPlatformAdminRoutes);
 
 // --- POST /api/messages ---
 
