@@ -27,6 +27,7 @@ import {
   listGraphNodeRuns,
   resetGraphNodeAndDownstream,
   updateGraphNodeRun,
+  updateGraphRunState,
   updateGraphRunStatus,
 } from '../db.js';
 import { logger } from '../logger.js';
@@ -182,7 +183,7 @@ function mergeStatePatch(state: GraphState, patch: NodeRunOutcome['statePatch'])
 
 /** Persist the current shared state back to graph_runs.state_json. */
 function persistState(runId: string, state: GraphState): void {
-  updateGraphRunStatus(runId, 'running', { stateJson: JSON.stringify(state) });
+  updateGraphRunState(runId, JSON.stringify(state));
 }
 
 /**
