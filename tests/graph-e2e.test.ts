@@ -106,21 +106,23 @@ function buildDeps(): GraphDeps {
   } as unknown as GraphDeps;
 }
 
-const E2E_DATA_DIR = process.env.DEEPTHINK_DATA_DIR || '/tmp/deepthink-e2e-graph';
+const E2E_DATA_DIR = process.env.DEEPTHINK_DATA_DIR;
 
-// SAFETY GUARD: only run against an isolated /tmp or *e2e* data dir. This
-// agent's shell INHERITS the live server's DEEPTHINK_DATA_DIR (the desktop
-// app's real messages.db). Running against it would fs.rmSync the real DB.
-// Skip unless the path is clearly a throwaway.
+// SAFETY GUARD: only run when DEEPTHINK_DATA_DIR points at a throwaway
+// (/tmp or *e2e*) dir. If unset, config.ts falls back to ~/.deepthink/data —
+// initDatabase() would then open the real server's messages.db while the
+// guard deleted a phantom /tmp path, leaking definition versions across runs.
+// So skip instead of running against the live DB.
 const ISOLATED =
-  E2E_DATA_DIR.startsWith('/tmp') || E2E_DATA_DIR.includes('e2e');
+  !!E2E_DATA_DIR &&
+  (E2E_DATA_DIR.startsWith('/tmp') || E2E_DATA_DIR.includes('e2e'));
 const describeE2E = ISOLATED ? describe : describe.skip;
 
 describeE2E('Graph E2E: dev-workflow', () => {
   beforeAll(() => {
     if (!ISOLATED) return;
     // Fresh temp DB so we never touch the real server's messages.db.
-    fs.rmSync(path.join(E2E_DATA_DIR, 'db', 'messages.db'), { force: true });
+    fs.rmSync(path.join(E2E_DATA_DIR!, 'db', 'messages.db'), { force: true });
     initDatabase();
   });
 

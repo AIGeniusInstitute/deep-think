@@ -24,6 +24,9 @@ vi.mock('../../src/db.js', () => ({
       try { Object.assign(stateSnapshot, JSON.parse(opts.stateJson)); } catch { /* ignore */ }
     }
   },
+  updateGraphRunState: (_id: string, stateJson: string) => {
+    try { Object.assign(stateSnapshot, JSON.parse(stateJson)); } catch { /* ignore */ }
+  },
 }));
 
 vi.mock('../../src/autonomy/autonomy-bus.js', () => ({
