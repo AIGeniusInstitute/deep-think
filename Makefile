@@ -626,7 +626,15 @@ web-install: ## 安装 web/ 子项目依赖（仅在 package.json 变化或 node
 	fi
 	@touch web/node_modules
 
-desktop-build-deps: build sync-types web-install ## 编译桌面版所需的所有产物（后端 + 前端 + agent-runner）
+root-install: ## 安装根目录后端依赖（仅在 package.json 变化或 node_modules 缺失时装）
+	@# --allow-git=all 同 install：@whiskeysockets/baileys 有 github: 依赖，npm 12 起默认 EALLOWGIT
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ]; then \
+		echo "▶ 根目录 node_modules 缺失或过期，执行 npm install..."; \
+		npm install --no-audit --no-fund $(NPM_FLAGS) --allow-git=all; \
+	fi
+	@touch node_modules
+
+desktop-build-deps: root-install build sync-types web-install ## 编译桌面版所需的所有产物（后端 + 前端 + agent-runner）
 	cd container/agent-runner && npm install --no-audit --no-fund $(NPM_FLAGS)
 	cd container/agent-runner && npm run build $(NPM_FLAGS)
 
