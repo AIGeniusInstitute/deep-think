@@ -71,12 +71,28 @@ export function WorkflowEditorPage() {
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-background flex-shrink-0">
         <Workflow size={16} className="text-muted-foreground" />
-        <input
-          className="text-sm font-medium bg-transparent border-none outline-none w-[220px]"
-          value={store.name}
-          onChange={(e) => store.setName(e.target.value)}
-          placeholder="工作流名称"
-        />
+        <label>
+          <span className="sr-only">工作流名称</span>
+          <input
+            aria-label="工作流名称"
+            title="编辑工作流名称"
+            className="w-[190px] rounded border border-border bg-background px-2 py-1 text-sm font-medium outline-none transition-colors hover:border-muted-foreground focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+            value={store.name}
+            onChange={(e) => store.setName(e.target.value)}
+            placeholder="工作流名称"
+          />
+        </label>
+        <label>
+          <span className="sr-only">工作流描述</span>
+          <input
+            aria-label="工作流描述"
+            title="编辑工作流描述"
+            className="w-[220px] rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground outline-none transition-colors hover:border-muted-foreground focus:border-blue-500 focus:text-foreground focus:ring-1 focus:ring-blue-500/30"
+            value={store.description}
+            onChange={(e) => store.setDescription(e.target.value)}
+            placeholder="工作流描述（可选）"
+          />
+        </label>
         <button
           onClick={() => setShowList(true)}
           className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 px-2 py-1 rounded hover:bg-muted"
