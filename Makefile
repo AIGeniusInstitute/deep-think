@@ -483,11 +483,11 @@ ensure-latest-sdk: ## 启动前自动检测并更新 SDK（agent-runner + 主服
 
 _ensure-native-abi: ## (内部) 探测 better-sqlite3 能否在当前 Node 下加载，ABI 不匹配则自动 npm rebuild
 	@if [ ! -d node_modules/better-sqlite3 ]; then :; \
-	elif node -e "require('better-sqlite3')" 2>/dev/null; then :; \
+	elif node -e "require('better-sqlite3')(':memory:').exec('select 1')" 2>/dev/null; then :; \
 	else \
 	  echo "🔄 检测到原生模块（better-sqlite3）ABI 与当前 Node $$(node --version) 不匹配，正在重新编译..."; \
 	  npm rebuild better-sqlite3 --no-progress 2>&1 | tail -5 | sed 's/^/   /'; \
-	  if ! node -e "require('better-sqlite3')" 2>/dev/null; then \
+	  if ! node -e "require('better-sqlite3')(':memory:').exec('select 1')" 2>/dev/null; then \
 	    echo "❌ better-sqlite3 重新编译后仍无法加载，请手动执行: npm rebuild better-sqlite3"; \
 	    exit 1; \
 	  fi; \
