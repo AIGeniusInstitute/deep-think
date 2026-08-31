@@ -337,6 +337,18 @@ typecheck-agent-runner:
 test: ## 运行单元测试
 	$(RUN) vitest run
 
+# test-smoke — 最小回归集（< 60s），CI pull-request 门禁用。只跑纯逻辑单测，
+# 跳过 e2e / 长任务 / 容器集成。SMOKE_PATTERN 用 -t 匹配文件名前缀，
+# 避免引入额外依赖。新增核心能力（trace / validation / eval）须补进此集。
+test-smoke: ## 最小回归测试集（CI 门禁，< 60s）
+	$(RUN) vitest run \
+	  tests/units/json-schema-validator.test.ts \
+	  tests/units/graph-validate-node.test.ts \
+	  tests/units/harness-eval.test.ts \
+	  tests/chat-trace-store.test.ts \
+	  tests/open-platform-validation.test.ts \
+	  tests/graph-expr.test.ts
+
 format: ## 格式化代码
 	$(PKG) run format
 

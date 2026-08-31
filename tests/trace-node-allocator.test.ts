@@ -168,4 +168,79 @@ describe('TraceNodeAllocator', () => {
     expect(e3.traceNode!.nodeId).toBeGreaterThan(e2.traceNode!.nodeId);
     expect(e2.traceNode!.nodeId).toBeGreaterThan(e1.traceNode!.nodeId);
   });
+
+  // ---- Atomic Step Trace (v57): thinking / compact / memory_recall + spans ----
+
+  test('thinking_delta allocates a thinking span and accumulates deltas', () => {
+    const alloc = new TraceNodeAllocator();
+    alloc.startTurn('q');
+    const e1: StreamEvent = {
+      eventType: 'thinking_delta',
+      text: 'Let me think',
+    } as StreamEvent;
+    alloc.decorate(e1);
+    expect(e1.traceNode!.nodeType).toBe('thinking');
+    expect(e1.traceNode!.outputSummary).toBe('Let me think');
+    expect(e1.traceNode!.status).toBe('running');
+    // second delta merges into the same span
+    const e2: StreamEvent = {
+      eventType: 'thinking_delta',
+      text: ' further',
+    } as StreamEvent;
+    alloc.decorate(e2);
+    expect(e2.traceNode!.nodeId).toBe(e1.traceNode!.nodeId);
+    expect(e2.traceNode!.outputSummary).toBe('Let me think further');
+  });
+
+  test('compact_boundary allocates a compact span (done)', () => {
+    const alloc = new TraceNodeAllocator();
+    alloc.startTurn();
+    const e: StreamEvent = {
+      eventType: 'compact_boundary',
+      summary: 'pre:8000 post:4000',
+    } as StreamEvent;
+    alloc.decorate(e);
+    expect(e.traceNode!.nodeType).toBe('compact');
+    expect(e.traceNode!.inputSummary).toBe('pre:8000 post:4000');
+    expect(e.traceNode!.status).toBe('done');
+  });
+
+  test('memory_recall allocates a memory_recall span (done)', () => {
+    const alloc = new TraceNodeAllocator();
+    alloc.startTurn();
+    const e: StreamEvent = {
+      eventType: 'memory_recall',
+      summary: 'recalled 3 memories',
+    } as StreamEvent;
+    alloc.decorate(e);
+    expect(e.traceNode!.nodeType).toBe('memory_recall');
+    expect(e.traceNode!.status).toBe('done');
+  });
+
+  test('turn carries traceId+spanId; thinking/tool inherit parentSpanId', () => {
+    const alloc = new TraceNodeAllocator();
+    const turn = alloc.startTurn('q');
+    expect(turn.traceId).toBeTruthy();
+    expect(turn.spanId).toBeTruthy();
+    expect(turn.parentSpanId).toBeNull();
+    const th: StreamEvent = { eventType: 'thinking_delta', text: 'h' } as StreamEvent;
+    alloc.decorate(th);
+    expect(th.traceNode!.traceId).toBe(turn.traceId);
+    expect(th.traceNode!.parentSpanId).toBe(turn.spanId);
+    const tool = makeToolStartEvent({ toolUseId: 'x' });
+    alloc.decorate(tool);
+    expect(tool.traceNode!.traceId).toBe(turn.traceId);
+    expect(tool.traceNode!.parentSpanId).toBe(turn.spanId);
+  });
+
+  test('atomic steps auto-start a turn if none active', () => {
+    const alloc = new TraceNodeAllocator();
+    const e: StreamEvent = {
+      eventType: 'memory_recall',
+      summary: 'recalled',
+    } as StreamEvent;
+    alloc.decorate(e);
+    expect(e.traceNode!.nodeType).toBe('memory_recall');
+    expect(e.traceNode!.parentSpanId).toBeTruthy();
+  });
 });

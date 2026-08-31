@@ -20,7 +20,8 @@
 export type GraphNodeType =
   | 'agent' | 'gate' | 'branch' | 'join' | 'human'
   | 'llm' | 'tool' | 'start' | 'end'
-  | 'parallel' | 'aggregate';
+  | 'parallel' | 'aggregate'
+  | 'validate';
 
 /** Edge kinds. A data edge carries state dependency; a control edge only gates. */
 export type GraphEdgeType = 'data' | 'control';
@@ -131,10 +132,19 @@ export interface GraphNode {
   // ---- DSL v2 extensions (graph-task-planning-execution) ----
   /** 'llm' node: model id override (null/undefined = inherit global). */
   model?: string;
-  /** 'llm'/'tool' node: declared output shape (documentation / validation). */
+  /** 'llm'/'tool'/'validate' node: declared output shape. For 'validate'
+   *  nodes this IS the JSON Schema (Draft-07) enforced against the upstream
+   *  node's output via ajv (v57) — no longer documentation-only. */
   outputSchema?: Record<string, unknown>;
   /** Declared input shape for any node (documentation / validation). */
   inputSchema?: Record<string, unknown>;
+  /** 'validate' node: action when schema or hook validation fails.
+   *  - 'fail' (default): node fails, graph routes via failed edge.
+   *  - 'retry': re-run the upstream node (up to GATE_RETRY_MAX).
+   *  - 'fallback': write fallbackValue to state and pass. */
+  onFail?: 'fail' | 'retry' | 'fallback';
+  /** 'validate' node with onFail='fallback': value written to state on failure. */
+  fallbackValue?: unknown;
   /** 'tool' node: platform tool name to invoke (e.g. 'web_search','web_fetch','run_script'). */
   toolName?: string;
   /** 'tool' node: tool arguments; values may contain ${var} references resolved at run time. */

@@ -37,6 +37,11 @@ import {
   optimizeSkillContent,
   debugSkill,
 } from '../skill-ai.js';
+import {
+  createSkillVersion,
+  listSkillVersions,
+  getSkillVersion,
+} from '../db.js';
 import { logger } from '../logger.js';
 
 // Re-export for backwards compatibility with existing IPC handler imports.
@@ -1365,7 +1370,7 @@ skillsRoutes.post('/upload', authMiddleware, async (c) => {
 skillsRoutes.post('/:id/debug', authMiddleware, async (c) => {
   const id = c.req.param('id');
   const authUser = c.get('user') as AuthUser;
-  const body = await c.req.json().catch(() => ({})) as { test_input?: unknown };
+  const body = await c.req.json().catch(() => ({})) as { test_input?: unknown; mode?: unknown };
 
   if (!validateSkillId(id)) {
     return c.json({ error: 'Invalid skill ID' }, 400);
@@ -1374,6 +1379,7 @@ skillsRoutes.post('/:id/debug', authMiddleware, async (c) => {
   if (testInput.length === 0) {
     return c.json({ error: 'test_input must be a non-empty string' }, 400);
   }
+  const mode = body.mode === 'real' ? 'real' : 'ai';
 
   // Search user / project / external for the skill content (read-only)
   const skill = getSkillDetail(id, authUser.id, authUser.role);
@@ -1381,12 +1387,61 @@ skillsRoutes.post('/:id/debug', authMiddleware, async (c) => {
     return c.json({ error: 'Skill not found' }, 404);
   }
 
-  const result = await debugSkill(skill.content, testInput);
+  const result = await debugSkill(skill.content, testInput, mode);
   if ('error' in result) {
     return c.json({ error: result.error }, 502);
   }
 
-  return c.json({ output: result.output, duration_ms: result.durationMs });
+  return c.json({ output: result.output, duration_ms: result.durationMs, mode: result.mode });
+});
+
+// ─── v58: skill_versions — version history / rollback ──────────
+
+// GET /api/skills/:id/versions — list version snapshots (newest first)
+skillsRoutes.get('/:id/versions', authMiddleware, (c) => {
+  const id = c.req.param('id');
+  const authUser = c.get('user') as AuthUser;
+  if (!validateSkillId(id)) return c.json({ error: 'Invalid skill ID' }, 400);
+  const versions = listSkillVersions(id, authUser.id);
+  return c.json({ versions });
+});
+
+// POST /api/skills/:id/versions — snapshot the current SKILL.md content as a
+// new version. Body: { notes?: string }. Returns the new version row.
+skillsRoutes.post('/:id/versions', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const authUser = c.get('user') as AuthUser;
+  if (!validateSkillId(id)) return c.json({ error: 'Invalid skill ID' }, 400);
+  const body = await c.req.json().catch(() => ({})) as { notes?: unknown };
+  const skill = getSkillDetail(id, authUser.id, authUser.role);
+  if (!skill) return c.json({ error: 'Skill not found' }, 404);
+  const notes = typeof body.notes === 'string' ? body.notes : null;
+  const row = createSkillVersion({
+    skillId: id,
+    userId: authUser.id,
+    content: skill.content,
+    notes,
+  });
+  return c.json({ version: row }, 201);
+});
+
+// POST /api/skills/:id/versions/:version/restore — restore a prior version's
+// content to the live SKILL.md (writes via writeSkillContent; the restore
+// itself is a content mutation, so it lands in the user's skills dir).
+skillsRoutes.post('/:id/versions/:version/restore', authMiddleware, async (c) => {
+  const id = c.req.param('id');
+  const versionNum = Number(c.req.param('version'));
+  const authUser = c.get('user') as AuthUser;
+  if (!validateSkillId(id)) return c.json({ error: 'Invalid skill ID' }, 400);
+  if (!Number.isInteger(versionNum) || versionNum < 1) {
+    return c.json({ error: 'Invalid version' }, 400);
+  }
+  const row = getSkillVersion(id, authUser.id, versionNum);
+  if (!row) return c.json({ error: 'Version not found' }, 404);
+  // Backup current content before overwriting (safety net).
+  backupSkillContent(authUser.id, id);
+  writeSkillContent(authUser.id, id, row.content);
+  return c.json({ ok: true, restored_version: versionNum });
 });
 
 export { getUserSkillsDir, installSkillForUser, deleteSkillForUser };

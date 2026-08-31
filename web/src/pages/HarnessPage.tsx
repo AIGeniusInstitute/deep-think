@@ -6,6 +6,7 @@ import {
   type HarnessVersion,
   type VersionDiff,
 } from '../stores/harness';
+import { EvalDashboard } from '../components/harness/EvalDashboard';
 
 const STATUS_COLORS: Record<string, string> = {
   experimental: 'bg-yellow-100 text-yellow-700',
@@ -22,6 +23,7 @@ const VERDICT_COLORS: Record<string, string> = {
 };
 
 export function HarnessPage() {
+  const [tab, setTab] = useState<'harness' | 'dashboard'>('harness');
   const {
     versions,
     promotedId,
@@ -44,7 +46,31 @@ export function HarnessPage() {
   }, []);
 
   return (
-    <div className="flex h-full">
+    <div className="flex flex-col h-full">
+      {/* Tab bar (v58 评测看板) */}
+      <div className="flex border-b bg-white">
+        <button
+          onClick={() => setTab('harness')}
+          className={`px-4 py-2 text-sm border-b-2 ${
+            tab === 'harness' ? 'border-teal-500 text-teal-600 font-medium' : 'border-transparent text-gray-500'
+          }`}
+        >
+          Self-Evolving Harness
+        </button>
+        <button
+          onClick={() => setTab('dashboard')}
+          className={`px-4 py-2 text-sm border-b-2 ${
+            tab === 'dashboard' ? 'border-teal-500 text-teal-600 font-medium' : 'border-transparent text-gray-500'
+          }`}
+        >
+          评测看板
+        </button>
+      </div>
+
+      {tab === 'dashboard' ? (
+        <EvalDashboard />
+      ) : (
+  <div className="flex h-full">
       <div className="w-1/2 border-r overflow-y-auto p-4">
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -98,6 +124,8 @@ export function HarnessPage() {
           <ProposalFormPanel />
         )}
       </div>
+    </div>
+      )}
     </div>
   );
 }

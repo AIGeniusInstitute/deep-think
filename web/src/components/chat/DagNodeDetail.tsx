@@ -32,6 +32,15 @@ const NODE_TYPE_LABELS: Record<TraceNodeEntry['node_type'], string> = {
   subagent: 'Sub-Agent (子代理)',
   review: 'Review (审查)',
   goal_check: 'Goal Check (目标检查)',
+  thinking: 'Thinking (推理)',
+  compact: 'Compact (压缩)',
+  memory_recall: 'Memory Recall (记忆召回)',
+  memory_write: 'Memory Write (记忆写入)',
+  tool_select: 'Tool Select (工具选择)',
+  llm_call: 'LLM Call (模型调用)',
+  permission_check: 'Permission Check (权限校验)',
+  context_audit: 'Context Audit (上下文审计)',
+  validation: 'Validation (结果校验)',
 };
 
 export function DagNodeDetail({ chatJid, node }: DagNodeDetailProps) {
@@ -266,6 +275,50 @@ export function DagNodeDetail({ chatJid, node }: DagNodeDetailProps) {
               )}
             </div>
           </details>
+        )}
+
+        {/* Evidence list (v57 atomic steps) — every judgment is traceable */}
+        {node.evidence_json && (
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+              证据链 (Evidence)
+            </summary>
+            <div className="mt-2 space-y-1.5">
+              {(() => {
+                try {
+                  const items = JSON.parse(node.evidence_json!) as Array<{
+                    type?: string;
+                    ref?: string;
+                    detail?: string;
+                    stage?: string;
+                    passed?: boolean;
+                  }>;
+                  if (!Array.isArray(items)) return <span className="text-[10px] text-muted-foreground">无</span>;
+                  return items.map((ev, i) => (
+                    <div key={i} className="text-[10px] font-mono bg-muted p-1.5 rounded break-all">
+                      <span className="text-muted-foreground">[{ev.type ?? ev.stage ?? 'evidence'}]</span>{' '}
+                      {ev.ref && <span className="text-primary">{ev.ref} </span>}
+                      {ev.detail ?? JSON.stringify(ev)}
+                      {typeof ev.passed === 'boolean' && (
+                        <span className={ev.passed ? 'text-green-600 ml-1' : 'text-red-500 ml-1'}>
+                          {ev.passed ? '✓' : '✗'}
+                        </span>
+                      )}
+                    </div>
+                  ));
+                } catch {
+                  return <span className="text-[10px] text-muted-foreground">证据解析失败</span>;
+                }
+              })()}
+            </div>
+          </details>
+        )}
+
+        {/* Large I/O offload reference (v57) */}
+        {node.output_ref && (
+          <div className="text-[10px] text-muted-foreground break-all">
+            <span className="font-medium">大 I/O 落盘:</span> {node.output_ref}
+          </div>
         )}
       </div>
 

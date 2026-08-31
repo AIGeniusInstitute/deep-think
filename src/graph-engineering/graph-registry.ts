@@ -18,6 +18,7 @@ import type {
   GraphNode,
   GraphValidationResult,
 } from './graph-types.js';
+import { isSchemaValid } from './json-schema-validator.js';
 
 /** Canonical JSON stringify (stable key order) for deterministic hashing. */
 function canonicalJson(value: unknown): string {
@@ -114,6 +115,14 @@ export function validateDefinition(def: GraphDefinition): GraphValidationResult 
     }
     if (n.type === 'aggregate' && n.mergeStrategy === 'arbitrate' && !n.arbitratePrompt) {
       errors.push(`aggregate node ${n.id} with mergeStrategy=arbitrate missing arbitratePrompt`);
+    }
+    // v57: validate node must declare a compilable JSON Schema.
+    if (n.type === 'validate') {
+      if (!n.outputSchema || Object.keys(n.outputSchema).length === 0) {
+        errors.push(`validate node ${n.id} missing outputSchema`);
+      } else if (!isSchemaValid(n.outputSchema as Record<string, unknown>)) {
+        errors.push(`validate node ${n.id} has invalid outputSchema (not a compilable JSON Schema)`);
+      }
     }
   }
 

@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { isSchemaValid } from '../graph-engineering/json-schema-validator.js';
 import {
   listAgentDefinitions,
   getAgentDefinition,
@@ -38,6 +39,7 @@ import {
   ensureChatExists,
   updateChatName,
   addGroupMember,
+  updateAgentDefValidation,
   type AgentDefinitionRow,
   type AgentMountRow,
   type KnowledgeBaseRow,
@@ -202,6 +204,61 @@ paasAgentsRoute.patch('/:id', async (c) => {
     return c.json({ error: 'Agent definition not found' }, 404);
   }
   return c.json({ agent: serializeAgentDef(row) });
+});
+
+// PATCH /api/paas/agents/:id/validation — 配置结果校验策略（v58 开放平台）
+paasAgentsRoute.patch('/:id/validation', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  // 复用 getAgentDefinition 做归属校验
+  const existing = getAgentDefinition(id, user.id);
+  if (!existing) return c.json({ error: 'Agent definition not found' }, 404);
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  if (body.validation_schema != null && body.validation_schema !== '') {
+    if (typeof body.validation_schema !== 'string') {
+      return c.json({ error: 'validation_schema must be a JSON Schema string' }, 400);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body.validation_schema);
+    } catch (err) {
+      return c.json({ error: `validation_schema is not valid JSON: ${(err as Error).message}` }, 400);
+    }
+    if (!isSchemaValid(parsed as Record<string, unknown>)) {
+      return c.json({ error: 'validation_schema is not a compilable JSON Schema' }, 400);
+    }
+  }
+  const allowedHookActions = new Set(['passthrough', 'block', 'retry']);
+  const allowedSchemaActions = new Set(['fail', 'retry', 'passthrough']);
+  if (body.hook_failure_action != null && !allowedHookActions.has(body.hook_failure_action as string)) {
+    return c.json({ error: 'hook_failure_action must be one of passthrough|block|retry' }, 400);
+  }
+  if (body.on_schema_fail != null && !allowedSchemaActions.has(body.on_schema_fail as string)) {
+    return c.json({ error: 'on_schema_fail must be one of fail|retry|passthrough' }, 400);
+  }
+  updateAgentDefValidation(id, {
+    validationSchema: (body.validation_schema as string | null | undefined) ?? null,
+    validationHookUrl: (body.validation_hook_url as string | null | undefined) ?? null,
+    hookSecret: (body.hook_secret as string | null | undefined) ?? null,
+    hookFailureAction: (body.hook_failure_action as string | null | undefined) ?? null,
+    onSchemaFail: (body.on_schema_fail as string | null | undefined) ?? null,
+  });
+  const row = getAgentDefinition(id, user.id);
+  return c.json({
+    validation: row
+      ? {
+          has_schema: !!row.validation_schema,
+          has_hook: !!row.validation_hook_url,
+          hook_failure_action: row.hook_failure_action ?? 'passthrough',
+          on_schema_fail: row.on_schema_fail ?? 'fail',
+        }
+      : null,
+  });
 });
 
 paasAgentsRoute.delete('/:id', (c) => {

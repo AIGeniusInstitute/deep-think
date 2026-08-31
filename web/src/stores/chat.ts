@@ -46,7 +46,11 @@ export interface TraceNodeEntry {
   chat_jid: string;
   session_id?: string | null;
   parent_node_id?: number | null;
-  node_type: 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent';
+  node_type:
+    | 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent'
+    | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
+    | 'tool_select' | 'llm_call' | 'permission_check' | 'context_audit'
+    | 'validation';
   title?: string | null;
   input_summary?: string | null;
   output_summary?: string | null;
@@ -56,6 +60,12 @@ export interface TraceNodeEntry {
   annotation_output?: string | null;
   started_at: string;
   ended_at?: string | null;
+  // v57 atomic-step trace: span linkage + evidence list + large-I/O file ref.
+  trace_id?: string | null;
+  span_id?: string | null;
+  parent_span_id?: string | null;
+  evidence_json?: string | null;
+  output_ref?: string | null;
 }
 
 export interface StreamingTimelineEvent {

@@ -43,6 +43,7 @@ import { scoreAssertion } from '../harness-eval.js';
 import type { ExecutionMode, RegisteredGroup } from '../types.js';
 import type { StreamEvent } from '../stream-event.types.js';
 import { buildEvalContext, resolveExpr, resolveValue } from './graph-expr.js';
+import { validateJson, type ValidationResult } from './json-schema-validator.js';
 import type {
   GraphAssertion,
   GraphDefinition,
@@ -289,6 +290,8 @@ async function dispatchByTypeInner(
       return runEndNode(ctx, node);
     case 'aggregate':
       return runAggregateNode(ctx, node);
+    case 'validate':
+      return runValidateNode(ctx, node);
     default:
       return {
         status: 'failed',
@@ -555,6 +558,98 @@ async function runGateNode(
     inputTokens: 0,
     outputTokens: 0,
     costUsd: 0,
+  };
+}
+
+/**
+ * Run a 'validate' node — enforce the node's `outputSchema` (JSON Schema
+ * Draft-07 via ajv) against the upstream node's output. The upstream output is
+ * read from `state[node_<upstreamNodeId>_output]` (same convention as gate).
+ * On failure the `onFail` policy decides: fail (default) / retry / fallback.
+ * Validation errors are surfaced in `output`/`error` for traceability.
+ */
+export async function runValidateNode(
+  ctx: GraphRunContext,
+  node: GraphNode,
+): Promise<NodeRunOutcome> {
+  const upstreamId = node.upstreamNodeId;
+  const upstreamKey = upstreamId ? `node_${upstreamId}_output` : null;
+  const upstreamOutput =
+    (upstreamKey && typeof ctx.state[upstreamKey] === 'string'
+      ? (ctx.state[upstreamKey] as string)
+      : '') || '';
+
+  const schema = node.outputSchema;
+  if (!schema || typeof schema !== 'object' || Object.keys(schema).length === 0) {
+    return {
+      status: 'failed',
+      output: 'validate node missing outputSchema',
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      error: 'validate node requires a non-empty outputSchema',
+    };
+  }
+
+  // Parse upstream output as JSON; non-JSON is a validation failure.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(upstreamOutput);
+  } catch (err) {
+    return applyValidateOnFail(ctx, node, {
+      valid: false,
+      errors: [
+        { path: '$', message: `upstream output is not valid JSON: ${(err as Error).message}` },
+      ],
+    }, upstreamOutput);
+  }
+
+  const result = validateJson(schema as Record<string, unknown>, parsed);
+  if (result.valid) {
+    return {
+      status: 'completed',
+      output: upstreamOutput,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+    };
+  }
+  return applyValidateOnFail(ctx, node, result, upstreamOutput);
+}
+
+/** Apply the onFail policy for a failed validate node. Pure helper. */
+export function applyValidateOnFail(
+  ctx: GraphRunContext,
+  node: GraphNode,
+  result: ValidationResult,
+  upstreamOutput: string,
+): NodeRunOutcome {
+  const onFail = node.onFail ?? 'fail';
+  const errDetail = (result.errors ?? [])
+    .map((e) => `${e.path}: ${e.message}`)
+    .join('; ');
+  if (onFail === 'fallback') {
+    const key = `node_${node.id}_output`;
+    ctx.state[key] =
+      node.fallbackValue !== undefined ? JSON.stringify(node.fallbackValue) : '';
+    return {
+      status: 'completed',
+      output: `fallback applied (${errDetail})`,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+    };
+  }
+  // 'retry' and 'fail' both return failed; the orchestrator's gate-feedback
+  // loop re-runs the upstream node when status=failed and onFail='retry'
+  // (mirrors GATE_RETRY_MAX handling).
+  return {
+    status: 'failed',
+    output: `schema validation failed${onFail === 'retry' ? ' (retry)' : ''}: ${errDetail}\n上游产出片段：${upstreamOutput.slice(0, 500)}`,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    error: errDetail,
   };
 }
 

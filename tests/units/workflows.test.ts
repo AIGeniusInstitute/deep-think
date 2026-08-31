@@ -67,11 +67,11 @@ function makeDefRow(id: string, ownerUserId: string | null): GraphDefinitionRow 
 }
 
 describe('Agent Workflow: schema v56 migration', () => {
-  test('schema_version is 56', () => {
+  test('schema_version is 58', () => {
     const row = getDb()
       .prepare('SELECT value FROM router_state WHERE key = ?')
       .get('schema_version') as { value: string } | undefined;
-    expect(row?.value).toBe('56');
+    expect(row?.value).toBe('58');
   });
 
   test('graph_definitions has owner_user_id column', () => {

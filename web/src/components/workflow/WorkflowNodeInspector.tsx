@@ -7,6 +7,7 @@
  * edit the bound one inline — reusing the Agent Studio capability (PRD FP3).
  */
 import { useState } from 'react';
+import Editor from '@monaco-editor/react';
 import { useWorkflowEditorStore } from '../../stores/workflow-editor';
 import { useAgentsPaasStore } from '../../stores/agents-paas';
 import { AgentEditorPanel } from '../agents/AgentEditorPanel';
@@ -108,6 +109,10 @@ export function WorkflowNodeInspector() {
 
         {d.type === 'human' && (
           <HumanSection d={d} set={set} inputCls={inputCls} />
+        )}
+
+        {d.type === 'validate' && (
+          <ValidateSection d={d} set={set} nodes={nodes} inputCls={inputCls} />
         )}
 
         {d.type === 'end' && (
@@ -259,6 +264,90 @@ function GateSection({
           </button>
         </div>
       </div>
+    </>
+  );
+}
+
+function ValidateSection({
+  d,
+  set,
+  nodes,
+  inputCls,
+}: {
+  d: Record<string, unknown>;
+  set: (patch: Record<string, unknown>) => void;
+  nodes: { id: string; data: { type: string; title: string } }[];
+  inputCls: string;
+}) {
+  const schema = (d.outputSchema as string) ?? '';
+  const onFail = (d.onFail as string) ?? 'fail';
+  // Live schema-validity indicator (mirrors isSchemaValid on the backend).
+  let schemaOk: null | boolean = null;
+  let schemaErr = '';
+  if (schema.trim()) {
+    try {
+      const parsed = JSON.parse(schema);
+      schemaOk = typeof parsed === 'object' && parsed !== null;
+    } catch (err) {
+      schemaOk = false;
+      schemaErr = (err as Error).message;
+    }
+  }
+  return (
+    <>
+      <div>
+        <label className="text-[10px] text-muted-foreground block mb-0.5">
+          JSON Schema（校验上游输出）
+          {schemaOk === true && <span className="text-green-600 ml-2">✓ 合法</span>}
+          {schemaOk === false && <span className="text-red-500 ml-2" title={schemaErr}>✗ 非法 JSON</span>}
+        </label>
+        <div className="border border-border rounded overflow-hidden">
+          <Editor
+            height="180px"
+            language="json"
+            theme="vs-dark"
+            value={schema}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 12,
+              lineNumbers: 'off',
+              scrollBeyondLastLine: false,
+              wordWrap: 'on',
+              tabSize: 2,
+            }}
+            onChange={(val) => set({ outputSchema: val ?? '' })}
+          />
+        </div>
+      </div>
+      <div>
+        <label className="text-[10px] text-muted-foreground block mb-0.5">上游节点（校验对象，默认最近前驱）</label>
+        <select className={inputCls} value={(d.upstreamNodeId as string) ?? ''} onChange={(e) => set({ upstreamNodeId: e.target.value })}>
+          <option value="">自动（最近前驱）</option>
+          {nodes.filter((n) => n.id !== d.id).map((n) => (
+            <option key={n.id} value={n.id}>{n.data.title || n.id}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="text-[10px] text-muted-foreground block mb-0.5">失败策略（onFail）</label>
+        <select className={inputCls} value={onFail} onChange={(e) => set({ onFail: e.target.value })}>
+          <option value="fail">fail — 标记节点失败，流程进入错误处理</option>
+          <option value="retry">retry — 重试上游节点（复用 GATE_RETRY_MAX）</option>
+          <option value="fallback">fallback — 写入兜底值，节点标记完成</option>
+        </select>
+      </div>
+      {onFail === 'fallback' && (
+        <div>
+          <label className="text-[10px] text-muted-foreground block mb-0.5">兜底值（fallbackValue，写入 state[node_&lt;id&gt;_output]）</label>
+          <textarea
+            className={`${inputCls} resize-y font-mono text-[11px]`}
+            rows={2}
+            value={(d.fallbackValue as string) ?? ''}
+            onChange={(e) => set({ fallbackValue: e.target.value })}
+            placeholder='{"ok": true}'
+          />
+        </div>
+      )}
     </>
   );
 }

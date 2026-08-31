@@ -16,6 +16,14 @@ import {
   billOpenPlatformUsage,
   computeMaaSCostUSD,
 } from '../open-platform/billing.js';
+import {
+  validateResult,
+  decideValidationAction,
+} from '../open-platform/result-validation.js';
+import {
+  getApiKeyValidationPolicy,
+  getAgentDefValidationPolicy,
+} from '../db.js';
 import { logger } from '../logger.js';
 
 const openPlatformRoutes = new Hono();
@@ -28,14 +36,15 @@ function extractToken(c: any): string {
 }
 
 /** 校验 key 并返回 { userId, scopes }，失败返回 null（同时写 401 响应）。 */
-function authenticate(c: any): { userId: string; scopes: string[] } | null {
+/** 校验 key 并返回 { userId, keyId, scopes }，失败返回 null（同时写 401 响应）。 */
+function authenticate(c: any): { userId: string; keyId: string; scopes: string[] } | null {
   const raw = extractToken(c);
   const verified = verifyApiKey(raw);
   if (!verified) {
     c.status(401);
     return null;
   }
-  return { userId: verified.userId, scopes: verified.scopes };
+  return { userId: verified.userId, keyId: verified.keyId, scopes: verified.scopes };
 }
 
 function hasScope(scopes: string[], scope: string): boolean {
@@ -47,6 +56,48 @@ function jsonError(c: any, status: number, message: string, type = 'invalid_requ
     { error: { message, type, code: status } },
     status,
   );
+}
+
+/**
+ * v58 result-validation seam. Runs the schema→hook pipeline on a model/agent
+ * output text. `produce` is called to obtain the result (and re-called once on
+ * a 'retry' action). Returns either:
+ *  - { ok:true, payload, outcome } → route returns the (possibly second) result,
+ *    optionally tagging an X-Validation header when validation was tolerated;
+ *  - { ok:false, response } → route returns the 422 response directly.
+ * When no policy is configured, behaves as a thin pass-through (produce once).
+ */
+async function applyResultValidation<T>(
+  c: any,
+  policy: ReturnType<typeof getApiKeyValidationPolicy>,
+  produce: () => Promise<{ text: string; payload: T }>,
+): Promise<
+  | { ok: true; payload: T; outcome: import('../open-platform/result-validation.js').ValidationResultOutcome | null }
+  | { ok: false; response: Response }
+> {
+  if (!policy || (!policy.validationSchema && !policy.validationHookUrl)) {
+    const { payload } = await produce();
+    return { ok: true, payload, outcome: null };
+  }
+  let { text, payload } = await produce();
+  let outcome = await validateResult(policy, text);
+  const decision = decideValidationAction(policy, outcome);
+  if (decision.action === 'reject') {
+    return { ok: false, response: jsonError(c, 422, decision.message, 'validation_error') };
+  }
+  if (decision.action === 'retry') {
+    const second = await produce();
+    text = second.text;
+    payload = second.payload;
+    outcome = await validateResult(policy, text);
+    if (!outcome.passed) {
+      const failAction = !outcome.schemaPassed ? policy.onSchemaFail : policy.hookFailureAction;
+      if (failAction !== 'passthrough') {
+        return { ok: false, response: jsonError(c, 422, outcome.summary, 'validation_error') };
+      }
+    }
+  }
+  return { ok: true, payload, outcome };
 }
 
 /** 把一个产出 JSON 字符串的 generator 包装成 SSE ReadableStream。 */
@@ -145,15 +196,26 @@ openPlatformRoutes.post('/chat/completions', async (c) => {
   }
 
   try {
-    const result = await chatCompletion(body);
-    // 后置计量扣费
-    const usage = (result as any).usage ?? {};
-    const inputTokens = usage.prompt_tokens ?? 0;
-    const outputTokens = usage.completion_tokens ?? 0;
-    const model = (result as any).model || body.model || '';
-    const costUSD = computeMaaSCostUSD(model, inputTokens, outputTokens);
-    billOpenPlatformUsage(auth.userId, { model, inputTokens, outputTokens, costUSD });
-    return c.json(result);
+    const policy = getApiKeyValidationPolicy(auth.keyId);
+    const validated = await applyResultValidation<Record<string, unknown>>(c, policy, async () => {
+      const result = await chatCompletion(body);
+      // 后置计量扣费（每次 provider 调用都计费，含 retry 的二次调用）
+      const usage = (result as any).usage ?? {};
+      const inputTokens = usage.prompt_tokens ?? 0;
+      const outputTokens = usage.completion_tokens ?? 0;
+      const model = (result as any).model || body.model || '';
+      const costUSD = computeMaaSCostUSD(model, inputTokens, outputTokens);
+      billOpenPlatformUsage(auth.userId, { model, inputTokens, outputTokens, costUSD });
+      const content = (result as any).choices?.[0]?.message?.content;
+      const text = typeof content === 'string' ? content : JSON.stringify(result);
+      return { text, payload: result };
+    });
+    if (!validated.ok) return validated.response;
+    const headers: Record<string, string> = {};
+    if (validated.outcome) {
+      headers['X-Validation'] = validated.outcome.passed ? 'passed' : 'tolerated';
+    }
+    return c.json(validated.payload, 200, headers);
   } catch (err) {
     const status = (err as any).status || 500;
     logger.warn({ err: (err as Error).message }, '/v1/chat/completions failed');
@@ -205,15 +267,25 @@ openPlatformRoutes.post('/agents/:agentId/chat/completions', async (c) => {
   }
 
   try {
-    const { text } = await runAgent(agentId, auth.userId, userText);
-    return c.json({
-      id: `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: body.model || 'agent',
-      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    const policy = getAgentDefValidationPolicy(agentId);
+    const validated = await applyResultValidation<{ id: string; object: string; created: number; model: string; choices: unknown[]; usage: Record<string, number> }>(c, policy, async () => {
+      const { text } = await runAgent(agentId, auth.userId, userText);
+      const payload = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: body.model || 'agent',
+        choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      };
+      return { text, payload };
     });
+    if (!validated.ok) return validated.response;
+    const headers: Record<string, string> = {};
+    if (validated.outcome) {
+      headers['X-Validation'] = validated.outcome.passed ? 'passed' : 'tolerated';
+    }
+    return c.json(validated.payload, 200, headers);
   } catch (err) {
     const status = (err as any).status || 500;
     return jsonError(c, status, (err as Error).message || 'Agent execution failed', 'server_error');
