@@ -12,19 +12,25 @@
  */
 import { useRef, useCallback, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
-import type { Node, Connection, NodeProps } from '@xyflow/react';
+import type { Node, Edge, Connection, NodeProps, ReactFlowInstance } from '@xyflow/react';
 import {
   ReactFlow,
   Controls,
   Background,
   MiniMap,
+  Handle,
   MarkerType,
   BackgroundVariant,
+  Position,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useWorkflowEditorStore, type WorkflowNodeData } from '../../stores/workflow-editor';
 import { NODE_TYPE_COLORS, NODE_TYPE_LABEL_ZH } from './workflow-constants';
 import type { GraphNodeType } from './workflow-constants';
+import {
+  getWorkflowNodeHandleVisibility,
+  projectWorkflowDropPosition,
+} from './workflow-canvas-utils';
 
 function WorkflowNodeCard({ id, data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
@@ -32,6 +38,7 @@ function WorkflowNodeCard({ id, data, selected }: NodeProps) {
   const label = NODE_TYPE_LABEL_ZH[d.type] ?? d.type;
   const agentBound = d.type === 'agent' && !!d.agentDefId;
   const title = d.title || d.id;
+  const handles = getWorkflowNodeHandleVisibility(d.type);
   return (
     <div
       className="px-3 py-2 rounded-md border-2 bg-white text-xs min-w-[120px]"
@@ -40,6 +47,14 @@ function WorkflowNodeCard({ id, data, selected }: NodeProps) {
         boxShadow: selected ? '0 0 0 3px rgba(37,99,235,0.35)' : undefined,
       }}
     >
+      {handles.target && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          className="!h-3 !w-3 !border-2 !border-white"
+          style={{ backgroundColor: color }}
+        />
+      )}
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
         <span className="text-[10px] uppercase text-slate-500">{label}</span>
@@ -51,6 +66,14 @@ function WorkflowNodeCard({ id, data, selected }: NodeProps) {
         </div>
       )}
       <div className="mt-0.5 text-[9px] text-slate-400">{id}</div>
+      {handles.source && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          className="!h-3 !w-3 !border-2 !border-white"
+          style={{ backgroundColor: color }}
+        />
+      )}
     </div>
   );
 }
@@ -73,6 +96,7 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
   const removeEdge = useWorkflowEditorStore((s) => s.removeEdge);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const reactFlowRef = useRef<ReactFlowInstance<Node<WorkflowNodeData>, Edge> | null>(null);
 
   // Drop from the palette: read the node type from dataTransfer and place it
   // at the projected cursor position.
@@ -82,9 +106,14 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
       const type = event.dataTransfer.getData('application/workflow-node') as GraphNodeType;
       if (!type) return;
       const bounds = wrapperRef.current?.getBoundingClientRect();
-      const position = bounds
-        ? { x: event.clientX - bounds.left - 60, y: event.clientY - bounds.top - 20 }
-        : { x: 80, y: 80 };
+      const position = reactFlowRef.current
+        ? projectWorkflowDropPosition(
+            { x: event.clientX, y: event.clientY },
+            reactFlowRef.current.screenToFlowPosition,
+          )
+        : bounds
+          ? { x: event.clientX - bounds.left - 60, y: event.clientY - bounds.top - 20 }
+          : { x: 80, y: 80 };
       addNode(type, position);
     },
     [addNode],
@@ -103,7 +132,7 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
   const isEmpty = !nodes.length && !children;
 
   return (
-    <div ref={wrapperRef} className="flex-1 min-h-0 relative" onDrop={onDrop} onDragOver={onDragOver}>
+    <div ref={wrapperRef} className="h-full min-h-0 relative" onDrop={onDrop} onDragOver={onDragOver}>
       {isEmpty && (
         <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-muted-foreground p-8">
           <p className="text-sm">从左侧拖拽节点到这里开始编排</p>
@@ -121,6 +150,9 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
         onPaneClick={() => setSelected(null)}
         onNodesDelete={(deleted) => deleted.forEach((n) => removeNode(n.id))}
         onEdgesDelete={(deleted) => deleted.forEach((e) => removeEdge(e.id))}
+        onInit={(instance) => {
+          reactFlowRef.current = instance;
+        }}
         defaultEdgeOptions={{
           style: { stroke: '#94a3b8', strokeWidth: 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed },
@@ -128,6 +160,7 @@ export function WorkflowEditorCanvas({ children }: CanvasProps) {
         nodesDraggable
         nodesConnectable
         fitView
+        fitViewOptions={{ maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
         className="bg-muted/20"
       >

@@ -18,6 +18,11 @@ import { workflowsApi, type WorkflowDefinition, type WorkflowSummary } from '../
 import { useGroupsStore } from './groups';
 import type { GraphNodeType } from '../components/workflow/workflow-constants';
 import { defaultNodeFields } from '../components/workflow/workflow-constants';
+import {
+  hasCompleteWorkflowNodePositions,
+  isWorkflowCanvasPoint,
+} from '../components/workflow/workflow-canvas-utils';
+import { validateWorkflowGraph } from '../components/workflow/workflow-validation';
 
 let nodeSeq = 0;
 /** Generate a unique node id for a freshly dropped node. */
@@ -155,10 +160,11 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>((set, get) => 
   },
 
   loadDefinitionIntoEditor: (def) => {
+    const keepSavedPositions = hasCompleteWorkflowNodePositions(def.nodes);
     const nodes: Node<WorkflowNodeData>[] = (def.nodes as WorkflowNodeData[]).map((n) => ({
       id: n.id,
       type: 'workflowNode',
-      position: (n.position as { x: number; y: number }) ?? { x: 0, y: 0 },
+      position: isWorkflowCanvasPoint(n.position) ? { ...n.position } : { x: 0, y: 0 },
       data: { ...n },
     }));
     const edges: Edge[] = (def.edges as Record<string, unknown>[]).map((e) => ({
@@ -167,12 +173,12 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>((set, get) => 
       source: e.from as string,
       target: e.to as string,
     }));
-    const laid = layoutLayers(nodes, edges);
+    const positionedNodes = keepSavedPositions ? nodes : layoutLayers(nodes, edges);
     set({
       definitionId: def.id,
       name: def.name,
       description: def.description ?? '',
-      nodes: laid,
+      nodes: positionedNodes,
       edges,
       mode: 'edit',
       selectedNodeId: null,
@@ -247,8 +253,17 @@ export const useWorkflowEditorStore = create<WorkflowEditorState>((set, get) => 
 
   save: async () => {
     const { nodes, edges, name, description, definitionId } = get();
-    if (!nodes.length) {
-      set({ saveError: '工作流至少需要一个节点' });
+    const validationErrors = validateWorkflowGraph({
+      name,
+      nodes,
+      edges,
+    }).filter((issue) => issue.severity === 'error');
+    if (validationErrors.length > 0) {
+      const [first, ...rest] = validationErrors;
+      set({
+        saving: false,
+        saveError: `${first.message}${rest.length > 0 ? `（另有 ${rest.length} 项错误）` : ''}`,
+      });
       return null;
     }
     set({ saving: true, saveError: null });

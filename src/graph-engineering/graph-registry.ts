@@ -118,10 +118,16 @@ export function validateDefinition(def: GraphDefinition): GraphValidationResult 
   }
 
   // Edges
+  const edgePairs = new Set<string>();
   for (const e of def.edges) {
     if (!nodeIds.has(e.from)) errors.push(`edge ${e.id}: from '${e.from}' not found`);
     if (!nodeIds.has(e.to)) errors.push(`edge ${e.id}: to '${e.to}' not found`);
     if (e.from === e.to) errors.push(`edge ${e.id}: self-loop not allowed (P0)`);
+    const pairKey = `${e.from}\u0000${e.to}`;
+    if (edgePairs.has(pairKey)) {
+      errors.push(`edge ${e.id}: duplicate edge ${e.from} → ${e.to}`);
+    }
+    edgePairs.add(pairKey);
     // DSL v2: an edge may declare condition OR expression OR be default, not
     // conflicting combinations. (condition + expression is tolerated with
     // expression taking precedence, but flag for author clarity.)
