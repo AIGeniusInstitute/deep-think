@@ -269,6 +269,9 @@ export const OWNER_REQUIRED_IM_COMMANDS: ReadonlySet<string> = new Set([
   // release_owner is the reclaim path: only the current owner can release;
   // gate handles the "must equal current owner_im_id" check uniformly.
   'release_owner',
+  // skill runs an LLM call that costs tokens + posts output to the chat;
+  // owner-gate so only the bound owner can invoke it.
+  'skill',
 ]);
 
 export interface ImOwnerCheckGroup {

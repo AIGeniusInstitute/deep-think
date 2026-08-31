@@ -63,12 +63,14 @@ const DECOMPOSE_TIMEOUT_MS = 120_000;
 async function decompose(input: TeamTaskInput): Promise<TeamPlan> {
   // F4: reinject relevant past lessons (continual-learning 近似).
   const prompt = reinjectLessonsIntoPrompt(input.goalText, buildDecompositionPrompt(input), 'decision');
+  // llm_call trace: record team-decompose LLM invocations into the chat timeline.
+  const trace = { chatJid: input.chatJid, label: 'Team Decompose' };
   // Attempt 1.
-  let plan = parseTeamPlan(await sdkQuery(prompt, { timeout: DECOMPOSE_TIMEOUT_MS }));
+  let plan = parseTeamPlan(await sdkQuery(prompt, { timeout: DECOMPOSE_TIMEOUT_MS, trace }));
   if (plan) return plan;
   logger.warn({ goal: input.goalText.slice(0, 100) }, 'Team decompose attempt 1 invalid; retrying');
   // Attempt 2.
-  plan = parseTeamPlan(await sdkQuery(prompt, { timeout: DECOMPOSE_TIMEOUT_MS }));
+  plan = parseTeamPlan(await sdkQuery(prompt, { timeout: DECOMPOSE_TIMEOUT_MS, trace }));
   if (plan) return plan;
   logger.warn({ goal: input.goalText.slice(0, 100) }, 'Team decompose attempt 2 invalid; using fallback');
   // Fallback single-agent plan (already structurally valid).

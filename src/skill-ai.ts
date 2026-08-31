@@ -163,6 +163,7 @@ export async function debugSkill(
   skillContent: string,
   testInput: string,
   mode: 'ai' | 'real' = 'ai',
+  trace?: import('./sdk-query.js').LlmCallTrace,
 ): Promise<{ output: string; durationMs: number; mode: string } | { error: string }> {
   if (!skillContent || skillContent.trim().length === 0) {
     return { error: 'Skill content is empty' };
@@ -179,7 +180,7 @@ export async function debugSkill(
     const systemPrompt = `You are executing the following skill. Follow its instructions precisely to handle the user's request.\n\nSkill SKILL.md:\n\`\`\`\n${skillContent}\n\`\`\``;
     const result = await sdkQueryMessages(
       [{ role: 'user', content: testInput }],
-      { timeout: DEBUG_TIMEOUT_MS, systemPrompt },
+      { timeout: DEBUG_TIMEOUT_MS, systemPrompt, trace },
     );
     const durationMs = Date.now() - start;
     if (result === null) {

@@ -68,6 +68,25 @@ export interface TraceNodeEntry {
   output_ref?: string | null;
 }
 
+/**
+ * Replay timeline item — one merged entry from
+ * GET /api/groups/:jid/trace/timeline. `kind:'node'` are coarse DAG nodes
+ * (chat_trace_nodes), `kind:'step'` are atomic steps (trace_steps); steps
+ * carry an optional `outputRef` pointing to an offloaded large-I/O file.
+ */
+export interface TimelineItem {
+  kind: 'node' | 'step';
+  spanId: string;
+  traceId: string | null;
+  parentSpanId: string | null;
+  nodeType: TraceNodeEntry['node_type'];
+  title: string | null;
+  status: string | null;
+  outputRef?: string | null;
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export interface StreamingTimelineEvent {
   id: string;
   timestamp: number;
@@ -314,7 +333,11 @@ interface ChatState {
   // agent-runner's TraceNodeAllocator; upserts are idempotent on (jid, id).
   traceNodes: Record<string, TraceNodeEntry[]>;
   selectedTraceNodeId: number | null;
+  // Replay timeline (per chatJid) — merged coarse nodes + atomic steps from
+  // GET /api/groups/:jid/trace/timeline. Loaded on demand by TraceReplayPlayer.
+  traceTimeline: Record<string, TimelineItem[]>;
   loadTraceNodes: (jid: string) => Promise<void>;
+  loadTraceTimeline: (jid: string) => Promise<void>;
   upsertTraceNode: (jid: string, node: TraceNodeEntry) => void;
   clearTraceNodes: (jid: string) => void;
   setSelectedTraceNodeId: (id: number | null) => void;
@@ -1297,6 +1320,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentWaiting: {},
   agentHasMore: {},
   traceNodes: {},
+  traceTimeline: {},
   selectedTraceNodeId: null,
   drafts: {},
   unreadReplies: {},
@@ -2818,6 +2842,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     } catch {
       // best-effort; failure leaves existing nodes intact
+    }
+  },
+
+  loadTraceTimeline: async (jid) => {
+    try {
+      const data = await api.get<{ timeline: TimelineItem[] }>(
+        `/api/groups/${encodeURIComponent(jid)}/trace/timeline`,
+      );
+      set((s) => ({
+        traceTimeline: { ...s.traceTimeline, [jid]: data.timeline ?? [] },
+      }));
+    } catch {
+      // best-effort; failure leaves existing timeline intact
     }
   },
 

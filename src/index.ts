@@ -253,6 +253,7 @@ import {
 import {
   generateSkillContent,
 } from './skill-ai.js';
+import { handleSkillImCommand } from './skill-im-command.js';
 import {
   slugifySkillName,
   resolveSkillIdConflict,
@@ -1563,6 +1564,8 @@ async function handleCommand(
       return handleAdaptiveLoopCommand(chatJid, rawArgs, senderImId);
     case 'skill_evolution':
       return handleSkillEvolutionLoopCommand(chatJid, rawArgs, senderImId);
+    case 'skill':
+      return handleSkillImCommand(chatJid, rawArgs, group);
     case 'cancel':
       return handleCancelLoopCommand(chatJid, rawArgs, senderImId);
     case 'loops':
@@ -11608,7 +11611,7 @@ async function main(): Promise<void> {
       };
     },
     sdkQuery: (prompt, opts) =>
-      sdkQuery(prompt, { model: opts.model, timeout: 60_000 }),
+      sdkQuery(prompt, { model: opts.model, timeout: 60_000, trace: opts.trace }),
     storePromptMessage: (chatJid, _senderId, _senderName, text) => {
       storeSupervisorMessage(chatJid, text);
     },
