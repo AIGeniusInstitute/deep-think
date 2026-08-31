@@ -178,7 +178,7 @@ _start-pm2: ## (内部) pm2 托管模式：build 后 pm2 restart
 	@pm2 logs deepthink --lines 20 --nostream || true
 	@echo "✅ 启动完成，查看实时日志：pm2 logs deepthink"
 
-_start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）
+_start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）；START_DIRECT_DAEMON=1 时后台守护（start-prod 用）
 	@# 检查端口是否被占用
 	@if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 	  echo "❌ 端口 $(PORT) 已被占用，请先停掉旧进程：make stop"; \
@@ -193,8 +193,29 @@ _start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）
 	@$(MAKE) _build-web-if-stale
 	@$(MAKE) _build-ar-if-stale
 	@$(MAKE) _ensure-native-abi
-	@echo "🟢 Node 模式：运行编译后的 dist/index.js（端口 $(PORT)，本项目不使用 bun，WebSocket 需要 node）"
-	WEB_PORT=$(PORT) node dist/index.js
+	@if [ "$(START_DIRECT_DAEMON)" = "1" ]; then \
+	  mkdir -p "$$(dirname "$$PROD_LOG")"; \
+	  : > "$$PROD_LOG"; \
+	  rm -f "$$PROD_STOP_FLAG"; \
+	  echo "🚀 后台守护启动（端口 $(PORT)，nohup 脱离终端 + watchdog 自动重启）..."; \
+	  nohup bash scripts/deepthink-watchdog.sh "$(PORT)" "$$DEEPTHINK_DATA_DIR" "$$PROD_LOG" "$$PROD_STOP_FLAG" "$$PROD_PIDFILE" >> "$$PROD_LOG" 2>&1 < /dev/null & \
+	  wdpid=$$!; \
+	  i=0; while [ $$i -lt 15 ]; do \
+	    if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+	    if ! kill -0 $$wdpid 2>/dev/null; then break; fi; \
+	    sleep 1; i=$$((i+1)); \
+	  done; \
+	  if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	    echo "✅ 已后台启动 (watchdog pid $$wdpid, node pid $$(cat "$$PROD_PIDFILE" 2>/dev/null))"; \
+	    echo "   日志: tail -f $$PROD_LOG"; \
+	    echo "   停止: make stop-prod PORT=$(PORT)"; \
+	  else \
+	    echo "❌ 启动失败，查看日志: $$PROD_LOG"; tail -20 "$$PROD_LOG" 2>/dev/null; rm -f "$$PROD_PIDFILE"; exit 1; \
+	  fi; \
+	else \
+	  echo "🟢 Node 模式：运行编译后的 dist/index.js（端口 $(PORT)，本项目不使用 bun，WebSocket 需要 node）"; \
+	  WEB_PORT=$(PORT) node dist/index.js; \
+	fi
 
 # start-prod：以独立数据目录启动隔离生产实例，data dir = ~/.deepthink-<PORT>。
 # 用法：
@@ -202,11 +223,17 @@ _start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）
 # 说明：强制走非-pm2 直跑路径（pm2 的 deepthink 是单进程托管，无法多开）。
 # 独立 data dir → 独立 DB / 用户表 / user-im 飞书配置 / 会话，互不影响。
 # 与默认实例（make start，~/.deepthink/data）及其它端口的实例完全隔离。
-start-prod: ## 以隔离 data dir（~/.deepthink-<PORT>）启动生产实例（PORT 必填，不走 pm2）
+# 后台守护：nohup 脱离终端（SSH 断线/SIGHUP 不掉线）+ watchdog 自动重启（node 意外
+# 退出自动拉起；make stop-prod 写停止标记强制停止、不重启）。日志 → logs/deepthink-<PORT>.log，
+# 命令立即返回，用 make stop-prod PORT=<PORT> 停止、tail -f logs/deepthink-<PORT>.log 看日志。
+start-prod: ## 以隔离 data dir（~/.deepthink-<PORT>）后台守护启动生产实例（PORT 必填，含自动重启）
 	@if [ "$(origin PORT)" != "command line" ]; then echo "❌ 用法: make start-prod PORT=9999"; exit 1; fi
 	@export DEEPTHINK_DATA_DIR="$(HOME)/.deepthink-$(PORT)"; \
-	  echo ">> start-prod: PORT=$(PORT) DATA_DIR=$$DEEPTHINK_DATA_DIR"; \
-	  $(MAKE) --no-print-directory _start-direct PORT=$(PORT)
+	  export PROD_LOG="$(CURDIR)/logs/deepthink-$(PORT).log"; \
+	  export PROD_PIDFILE="$(CURDIR)/logs/deepthink-$(PORT).pid"; \
+	  export PROD_STOP_FLAG="$(CURDIR)/logs/deepthink-$(PORT).stop"; \
+	  echo ">> start-prod: PORT=$(PORT) DATA_DIR=$$DEEPTHINK_DATA_DIR LOG=$$PROD_LOG"; \
+	  $(MAKE) --no-print-directory _start-direct PORT=$(PORT) START_DIRECT_DAEMON=1
 
 # ─── Internal build checks ────────────────────────────────────
 
@@ -288,10 +315,12 @@ _stop-port: ## (内部) 按端口停止：SIGTERM -> 验证 -> SIGKILL 升级
 	  echo "⚠️  端口 $(PORT) 未被占用，无需停止"; \
 	fi
 
-# stop-prod：按端口停止隔离实例（杀该端口监听进程，不走 pm2）。
+# stop-prod：按端口停止隔离实例（写停止标记后杀该端口监听进程，不走 pm2）。
+# 停止标记通知 watchdog「这是主动停止」，使其杀掉 node 后正常退出、不自动重启。
 # 用法：make stop-prod PORT=9999
-stop-prod: ## 停止指定端口的隔离实例（PORT 必填，杀该端口监听进程）
+stop-prod: ## 停止指定端口的隔离实例（PORT 必填，写停止标记后杀端口监听进程，不自动重启）
 	@if [ "$(origin PORT)" != "command line" ]; then echo "❌ 用法: make stop-prod PORT=9999"; exit 1; fi
+	@touch "$(CURDIR)/logs/deepthink-$(PORT).stop"
 	@$(MAKE) --no-print-directory _stop-port PORT=$(PORT)
 
 status: ## 查看服务运行状态
