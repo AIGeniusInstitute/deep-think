@@ -387,7 +387,7 @@ export interface SupervisorCheckDeps {
   getBoundLoopSummary?: (
     loopRunId: string,
   ) => Promise<BoundLoopSummary | null>;
-  sdkQuery: (prompt: string, opts: { maxTurns: number; systemPrompt: string; model?: string }) => Promise<unknown>;
+  sdkQuery: (prompt: string, opts: { maxTurns: number; systemPrompt: string; model?: string; trace?: import('./sdk-query.js').LlmCallTrace }) => Promise<unknown>;
   storePromptMessage: (
     chatJid: string,
     senderId: string,
@@ -517,6 +517,7 @@ export async function runSupervisionCheck(
       maxTurns: 1,
       systemPrompt: '',
       model: process.env.SUPERVISOR_MODEL || undefined,
+      trace: { chatJid: session.chat_jid, label: 'Supervisor Decision' },
     });
     const text =
       typeof raw === 'string'

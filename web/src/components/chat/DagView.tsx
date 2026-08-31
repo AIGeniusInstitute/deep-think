@@ -53,7 +53,7 @@ const FlowCanvas = lazy(async () => {
   return { default: Component };
 });
 
-const NODE_TYPE_COLORS: Record<TraceNodeEntry['node_type'], string> = {
+export const NODE_TYPE_COLORS: Record<TraceNodeEntry['node_type'], string> = {
   turn: '#3b82f6',       // blue
   tool: '#10b981',       // green
   skill: '#a855f7',      // purple
@@ -72,7 +72,7 @@ const NODE_TYPE_COLORS: Record<TraceNodeEntry['node_type'], string> = {
   validation: '#16a34a',    // green (result-checking)
 };
 
-const NODE_TYPE_LABELS: Record<TraceNodeEntry['node_type'], string> = {
+export const NODE_TYPE_LABELS: Record<TraceNodeEntry['node_type'], string> = {
   turn: 'Turn',
   tool: 'Tool',
   skill: 'Skill',

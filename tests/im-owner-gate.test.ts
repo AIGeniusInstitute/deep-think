@@ -18,6 +18,7 @@ describe('OWNER_REQUIRED_IM_COMMANDS set', () => {
       'clear',
       'new',
       'release_owner',
+      'skill',
       'spawn',
       'sw',
       'unbind',

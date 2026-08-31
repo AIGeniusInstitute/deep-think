@@ -72,7 +72,7 @@ export interface Skill {
   files: Array<{ name: string; type: 'file' | 'directory'; size: number }>;
 }
 
-interface SkillDetail extends Skill {
+export interface SkillDetail extends Skill {
   content: string;
 }
 
@@ -202,7 +202,7 @@ export function discoverSkills(userId: string, userRole?: string): Skill[] {
   return result;
 }
 
-function getSkillDetail(skillId: string, userId: string, userRole?: string): SkillDetail | null {
+export function getSkillDetail(skillId: string, userId: string, userRole?: string): SkillDetail | null {
   if (!validateSkillId(skillId)) return null;
 
   const searchDirs: Array<{ rootDir: string; source: 'user' | 'project' | 'external' }> = [

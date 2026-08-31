@@ -24,6 +24,7 @@ import {
   upsertTraceToolCall,
   upsertTraceStep,
 } from './db.js';
+import type { TraceStepUpsertInput } from './db.js';
 import { logger } from './logger.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,6 +33,81 @@ const TOOL_IO_MAX = 64 * 1024; // 64KB per input/output JSON — trace volume gu
 const COARSE_NODE_TYPES = new Set([
   'turn', 'tool', 'review', 'goal_check', 'skill', 'subagent',
 ]);
+
+/** The MCP tool name that writes to the memory layer. Its tool_result carries
+ *  the appended content — we synthesize a dedicated memory_write atomic step so
+ *  memory writes are first-class traceable events (not buried inside a generic
+ *  tool node). */
+const MEMORY_WRITE_TOOL = 'memory_append';
+const MEMORY_WRITE_SUMMARY_MAX = 2048;
+
+/**
+ * Per-(chatJid, toolUseId) record of the tool name seen at tool_use_start.
+ * tool_result events carry toolUseId but NOT toolName, so we look the name up
+ * here to decide whether to synthesize a memory_write step. Bounded by turn
+ * (cleared implicitly as toolUseIds are unique per turn).
+ */
+const toolNameByUseId = new Map<string, string>();
+
+function toolNameKey(chatJid: string, toolUseId: string): string {
+  return `${chatJid}|${toolUseId}`;
+}
+
+/**
+ * Inspect a stream event and, when it completes a `memory_append` tool call,
+ * return a trace_steps upsert row for a `memory_write` atomic step. Stateful:
+ * records tool names from tool_use_start events and consumes them on
+ * tool_result. Returns null for all non-matching events (no side effect on the
+ * trace beyond the returned row). Pure with respect to DB — the caller decides
+ * whether to upsertTraceStep the returned row.
+ */
+export function maybeSynthesizeMemoryWrite(
+  chatJid: string,
+  event: StreamEvent,
+): TraceStepUpsertInput | null {
+  const toolUseId = event.toolUseId;
+  if (!toolUseId) return null;
+
+  // Record phase: tool_use_start carries toolName.
+  if (event.eventType === 'tool_use_start' && event.toolName) {
+    toolNameByUseId.set(toolNameKey(chatJid, toolUseId), event.toolName);
+    return null;
+  }
+
+  // Consume phase: tool_result carries the appended content.
+  if (event.eventType !== 'tool_result') return null;
+
+  const toolName = toolNameByUseId.get(toolNameKey(chatJid, toolUseId));
+  toolNameByUseId.delete(toolNameKey(chatJid, toolUseId));
+  if (toolName !== MEMORY_WRITE_TOOL) return null;
+
+  const tn = event.traceNode;
+  const traceId = tn?.traceId ?? `chat-${chatJid}`;
+  const parentSpanId = tn?.parentSpanId ?? null;
+  const now = new Date().toISOString();
+  const tail = toolUseId.slice(-8);
+  const content = event.toolResult ?? event.detail ?? '';
+  return {
+    trace_id: traceId,
+    span_id: `mw-${tail}`,
+    parent_span_id: parentSpanId,
+    chat_jid: chatJid,
+    graph_run_id: tn?.graphRunId ?? null,
+    graph_node_id: tn?.graphNodeId ?? null,
+    node_type: 'memory_write',
+    title: 'Memory Write',
+    input_summary: null,
+    output_summary: content.length > MEMORY_WRITE_SUMMARY_MAX
+      ? content.slice(0, MEMORY_WRITE_SUMMARY_MAX)
+      : content,
+    evidence: null,
+    output_ref: null,
+    tokens: 0,
+    status: 'done',
+    started_at: now,
+    ended_at: now,
+  };
+}
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) : s;
@@ -182,6 +258,18 @@ export function persistTraceNodeFromStreamEvent(
       }
     } catch (err) {
       logger.warn({ err, chatJid, toolUseId }, 'persistTraceToolCall failed');
+    }
+  }
+
+  // 3. memory_write atomic step synthesis: when a memory_append tool completes,
+  //    emit a dedicated memory_write trace_step (best-effort). No-op for other
+  //    tools. See maybeSynthesizeMemoryWrite for the stateful detection logic.
+  const memoryWriteStep = maybeSynthesizeMemoryWrite(chatJid, event);
+  if (memoryWriteStep) {
+    try {
+      upsertTraceStep(memoryWriteStep);
+    } catch (err) {
+      logger.warn({ err, chatJid, toolUseId }, 'persistMemoryWriteStep failed');
     }
   }
 }
