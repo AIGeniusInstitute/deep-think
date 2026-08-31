@@ -1,5 +1,20 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+const workflowsApiMock = vi.hoisted(() => ({
+  create: vi.fn(),
+  update: vi.fn(),
+}));
+
+vi.mock('../web/src/api/workflows', () => ({
+  workflowsApi: {
+    list: vi.fn(),
+    get: vi.fn(),
+    create: workflowsApiMock.create,
+    update: workflowsApiMock.update,
+    autobuild: vi.fn(),
+  },
+}));
+
 vi.mock('../web/src/stores/groups', () => ({
   useGroupsStore: {
     getState: () => ({ groups: {} }),
@@ -10,6 +25,8 @@ import { useWorkflowEditorStore } from '../web/src/stores/workflow-editor';
 
 describe('workflow editor persistence', () => {
   beforeEach(() => {
+    workflowsApiMock.create.mockReset();
+    workflowsApiMock.update.mockReset();
     useWorkflowEditorStore.getState().newWorkflow();
   });
 
@@ -72,5 +89,72 @@ describe('workflow editor persistence', () => {
       name: '画布人工验收-0829',
       description: '用于验收工作流画布保存与恢复',
     });
+  });
+
+  test('rejects a cyclic draft before sending a save request', async () => {
+    useWorkflowEditorStore.getState().loadDefinitionIntoEditor({
+      id: 'workflow-cycle',
+      version: 1,
+      name: '有环工作流',
+      nodes: [
+        {
+          id: 'A',
+          type: 'agent',
+          title: 'A',
+          prompt: '执行 A',
+          position: { x: 80, y: 80 },
+        },
+        {
+          id: 'B',
+          type: 'agent',
+          title: 'B',
+          prompt: '执行 B',
+          position: { x: 300, y: 80 },
+        },
+      ],
+      edges: [
+        { id: 'A-B', from: 'A', to: 'B', type: 'data' },
+        { id: 'B-A', from: 'B', to: 'A', type: 'data' },
+      ],
+    });
+
+    await expect(useWorkflowEditorStore.getState().save()).resolves.toBeNull();
+    expect(useWorkflowEditorStore.getState().saveError).toContain('存在环');
+    expect(useWorkflowEditorStore.getState().saving).toBe(false);
+    expect(workflowsApiMock.create).not.toHaveBeenCalled();
+    expect(workflowsApiMock.update).not.toHaveBeenCalled();
+  });
+
+  test('allows saving an unbound Agent because it is a warning, not an error', async () => {
+    workflowsApiMock.create.mockResolvedValue({
+      ok: true,
+      id: 'workflow-warning',
+      version: 1,
+      hash: 'hash',
+    });
+    useWorkflowEditorStore.setState({
+      name: '未绑定 Agent 工作流',
+      nodes: [
+        {
+          id: 'agent',
+          type: 'workflowNode',
+          position: { x: 80, y: 80 },
+          data: {
+            id: 'agent',
+            type: 'agent',
+            title: 'Agent',
+            prompt: '执行任务',
+          },
+        },
+      ],
+      edges: [],
+    });
+
+    await expect(useWorkflowEditorStore.getState().save()).resolves.toEqual({
+      id: 'workflow-warning',
+      version: 1,
+    });
+    expect(workflowsApiMock.create).toHaveBeenCalledOnce();
+    expect(useWorkflowEditorStore.getState().saveError).toBeNull();
   });
 });

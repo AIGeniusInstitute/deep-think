@@ -214,6 +214,26 @@ describe('graph-registry validateDefinition', () => {
     expect(validateDefinition(def).ok).toBe(false);
   });
 
+  test('duplicate directed connections are rejected', () => {
+    const def: GraphDefinition = {
+      id: 'dup',
+      version: 1,
+      name: 'dup',
+      nodes: [
+        { id: 'A', type: 'agent', title: 'A', prompt: 'do A' },
+        { id: 'B', type: 'agent', title: 'B', prompt: 'do B' },
+      ],
+      edges: [
+        { id: 'e1', from: 'A', to: 'B' },
+        { id: 'e2', from: 'A', to: 'B' },
+      ],
+    };
+    const result = validateDefinition(def);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('; ')).toMatch(/duplicate edge/i);
+  });
+
   test('valid linear graph passes', () => {
     expect(validateDefinition(linearGraph()).ok).toBe(true);
   });

@@ -21,10 +21,11 @@ import { useWorkflowEditorStore } from '../stores/workflow-editor';
 import { useGroupsStore } from '../stores/groups';
 import { NodePalette } from '../components/workflow/NodePalette';
 import { WorkflowNodeInspector } from '../components/workflow/WorkflowNodeInspector';
+import { validateWorkflowGraph } from '../components/workflow/workflow-validation';
 import { GraphDagView } from '../components/graph/GraphDagView';
 import { workflowsApi } from '../api/workflows';
 import { toast } from 'sonner';
-import { Workflow, Save, Play, Sparkles, LayoutGrid, List, Plus, Loader2 } from 'lucide-react';
+import { Workflow, Save, Play, Sparkles, LayoutGrid, List, Plus, Loader2, AlertTriangle, CircleCheck } from 'lucide-react';
 
 const WorkflowEditorCanvas = lazy(() =>
   import('../components/workflow/WorkflowEditorCanvas').then((m) => ({
@@ -45,6 +46,16 @@ export function WorkflowEditorPage() {
 
   const [showList, setShowList] = useState(false);
   const [showAutobuild, setShowAutobuild] = useState(false);
+  const [showValidation, setShowValidation] = useState(false);
+
+  const validationIssues = validateWorkflowGraph({
+    name: store.name,
+    nodes: store.nodes,
+    edges: store.edges,
+  });
+  const validationErrors = validationIssues.filter((issue) => issue.severity === 'error');
+  const validationWarnings = validationIssues.filter((issue) => issue.severity === 'warning');
+  const orderedValidationIssues = [...validationErrors, ...validationWarnings];
 
   useEffect(() => {
     if (!groupsLoaded) void loadGroups();
@@ -57,13 +68,28 @@ export function WorkflowEditorPage() {
     toast.loading('保存并启动运行…', { id: 'wf-run' });
     const runId = await store.run();
     if (runId) toast.success(`运行已启动：${runId}`, { id: 'wf-run' });
-    else toast.error(store.saveError ?? '启动失败', { id: 'wf-run' });
+    else {
+      setShowValidation(true);
+      toast.error(useWorkflowEditorStore.getState().saveError ?? '启动失败', {
+        id: 'wf-run',
+      });
+    }
   };
 
   const onSave = async () => {
     const res = await store.save();
-    if (res) toast.success(`已保存（v${res.version}）`);
-    else toast.error(store.saveError ?? '保存失败');
+    if (res) {
+      toast.success(`已保存（v${res.version}）`);
+      if (validationWarnings.length > 0) {
+        setShowValidation(true);
+        toast.warning(`已保存，但仍有 ${validationWarnings.length} 项提醒`);
+      } else {
+        setShowValidation(false);
+      }
+    } else {
+      setShowValidation(true);
+      toast.error(useWorkflowEditorStore.getState().saveError ?? '保存失败');
+    }
   };
 
   return (
@@ -101,6 +127,35 @@ export function WorkflowEditorPage() {
           <List size={13} /> 列表
         </button>
         <div className="flex-1" />
+        <button
+          onClick={() => {
+            if (validationIssues.length === 0) {
+              setShowValidation(false);
+              toast.success('DAG 校验通过');
+            } else {
+              setShowValidation((current) => !current);
+            }
+          }}
+          className={`text-xs flex items-center gap-1 px-2.5 py-1 rounded border ${
+            validationErrors.length > 0
+              ? 'border-red-300 bg-red-50 text-red-700'
+              : validationWarnings.length > 0
+                ? 'border-amber-300 bg-amber-50 text-amber-700'
+                : 'border-emerald-300 bg-emerald-50 text-emerald-700'
+          }`}
+          title="检查节点、连线、必填字段和 DAG 结构"
+        >
+          {validationErrors.length > 0 || validationWarnings.length > 0 ? (
+            <AlertTriangle size={13} />
+          ) : (
+            <CircleCheck size={13} />
+          )}
+          {validationErrors.length > 0
+            ? `校验错误 ${validationErrors.length}`
+            : validationWarnings.length > 0
+              ? `校验提醒 ${validationWarnings.length}`
+              : '校验通过'}
+        </button>
         <button
           onClick={() => void store.autoLayout()}
           className="text-xs flex items-center gap-1 px-2.5 py-1 rounded border border-border hover:bg-muted"
@@ -142,6 +197,41 @@ export function WorkflowEditorPage() {
           </button>
         </div>
       </div>
+
+      {showValidation && validationIssues.length > 0 && (
+        <div className="flex-shrink-0 border-b border-border bg-background px-3 py-2" role="alert">
+          <div className="mx-auto flex max-w-4xl items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+            <AlertTriangle
+              size={15}
+              className={validationErrors.length > 0 ? 'mt-0.5 text-red-600' : 'mt-0.5 text-amber-600'}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-medium">
+                {validationErrors.length > 0
+                  ? `保存前请修复 ${validationErrors.length} 项错误`
+                  : `${validationWarnings.length} 项提醒（不阻止保存）`}
+              </div>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
+                {orderedValidationIssues.map((issue, index) => (
+                  <li key={`${issue.code}-${issue.nodeId ?? issue.edgeId ?? index}`}>
+                    <span className={issue.severity === 'error' ? 'text-red-700' : 'text-amber-700'}>
+                      {issue.message}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowValidation(false)}
+              className="text-sm leading-none text-muted-foreground hover:text-foreground"
+              aria-label="关闭校验结果"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Body */}
       <div className="flex flex-1 min-h-0">
