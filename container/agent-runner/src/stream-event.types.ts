@@ -197,10 +197,23 @@ export interface StreamEvent {
     /** Short excerpt of the injected reminder text. */
     summary: string;
   };
-  /** Trace node metadata for DAG visualization. Persisted to loop_trace_nodes. */
+  /** Evidence item: ties a judgment (gate / supervisor / eval) to the
+   *  underlying proof it relied on. `ref` is a stable handle (trace span_id,
+   *  tool_use_id, file path, log line) the UI can follow to the source. */
+  evidence?: Array<{
+    type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
+    ref: string;
+    detail?: string;
+  }>;
+  /** Trace node metadata for DAG visualization. Persisted to chat_trace_nodes
+   *  (coarse types) and trace_steps (atomic types). */
   traceNode?: {
     nodeId: number;
-    nodeType: 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent';
+    nodeType:
+      | 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent'
+      | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
+      | 'tool_select' | 'llm_call' | 'permission_check' | 'context_audit'
+      | 'validation';
     parentNodeId?: number | null;
     title?: string;
     inputSummary?: string;
@@ -216,6 +229,21 @@ export interface StreamEvent {
      *  persist layer can join trace_tool_calls without re-reading the event. */
     toolName?: string;
     toolUseId?: string;
+    /** Atomic Step Trace (v57): full-linkage IDs. traceId ties every step in a
+     *  conversation together; spanId is this step's unique id; parentSpanId
+     *  links to the enclosing step (e.g. a thinking span under a turn). */
+    traceId?: string;
+    spanId?: string;
+    parentSpanId?: string | null;
+    /** Evidence backing a judgment emitted by this node (gate/supervisor/eval). */
+    evidence?: Array<{
+      type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
+      ref: string;
+      detail?: string;
+    }>;
+    /** File ref for >64KB tool I/O (persist layer offloads full payload to
+     *  data/trace-io/{traceId}/{spanId}.{in|out}.json and stores the path here). */
+    outputRef?: string;
   };
   /** Super Agent Team P1: a human approval node paused the run and is awaiting
    *  the user's decision in the DeepThink chat. The frontend renders an

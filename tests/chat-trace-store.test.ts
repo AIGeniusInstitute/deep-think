@@ -22,7 +22,11 @@ const {
   getChatTraceNode,
   saveChatTraceNodeAnnotation,
   deleteChatTraceNodes,
+  upsertTraceStep,
+  listTraceStepsByTrace,
+  getTraceStep,
 } = await import('../src/db.js');
+const { persistTraceNodeFromStreamEvent } = await import('../src/chat-trace-persist.js');
 
 const dbPath = path.join(tmpStoreDir, 'messages.db');
 let probeDb: InstanceType<typeof Database>;
@@ -164,5 +168,90 @@ describe('deleteChatTraceNodes', () => {
     deleteChatTraceNodes(CHAT_JID);
     expect(listChatTraceNodes('web:other')).toHaveLength(1);
     deleteChatTraceNodes('web:other');
+  });
+});
+
+// ---- Atomic Step Trace (v57): trace_steps + large I/O offload ----
+
+describe('trace_steps (v57 atomic step persistence)', () => {
+  test('upsertTraceStep inserts and merges on (trace_id, span_id)', () => {
+    const traceId = 'tr-merge-' + Date.now();
+    upsertTraceStep({
+      trace_id: traceId, span_id: 'sp1', chat_jid: CHAT_JID,
+      node_type: 'thinking', title: 'Thinking',
+      output_summary: 'partial', status: 'running',
+      started_at: '2026-08-31T10:00:00Z',
+    });
+    upsertTraceStep({
+      trace_id: traceId, span_id: 'sp1', chat_jid: CHAT_JID,
+      node_type: 'thinking',
+      output_summary: 'full thought', status: 'done', tokens: 120,
+      started_at: '2026-08-31T10:00:00Z', ended_at: '2026-08-31T10:00:01Z',
+    });
+    const steps = listTraceStepsByTrace(traceId);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].output_summary).toBe('full thought');
+    expect(steps[0].status).toBe('done');
+    expect(steps[0].tokens).toBe(120);
+  });
+
+  test('upsertTraceStep stores evidence_json', () => {
+    const traceId = 'tr-ev-' + Date.now();
+    upsertTraceStep({
+      trace_id: traceId, span_id: 'sp1', chat_jid: CHAT_JID,
+      node_type: 'validation',
+      evidence: [{ type: 'test', ref: 'tc-2.1.1', detail: 'schema fail' }],
+      started_at: '2026-08-31T10:00:00Z',
+    });
+    const step = getTraceStep(traceId, 'sp1')!;
+    expect(step.evidence_json).toContain('tc-2.1.1');
+    expect(step.evidence_json).toContain('schema fail');
+  });
+});
+
+describe('persistTraceNodeFromStreamEvent — large tool I/O offload', () => {
+  test('>64KB tool result is offloaded to a file with output_ref', () => {
+    const traceId = 'tr-big-' + Date.now();
+    const toolUseId = 'tu_big_' + Date.now();
+    const big = 'x'.repeat(70_000);
+    const event = {
+      eventType: 'tool_result',
+      toolUseId,
+      toolName: 'Bash',
+      toolResult: big,
+      traceNode: { nodeId: 1, nodeType: 'tool', traceId, spanId: 'sp1', status: 'done' },
+    } as any;
+    persistTraceNodeFromStreamEvent(CHAT_JID, event);
+    const row = probeDb
+      .prepare('SELECT output_json, output_ref FROM trace_tool_calls WHERE tool_use_id = ?')
+      .get(toolUseId) as { output_json: string; output_ref: string | null };
+    // inline is truncated to <= 64KB, ref points to the full file
+    expect(row.output_json.length).toBeLessThanOrEqual(64 * 1024);
+    expect(row.output_ref).toBeTruthy();
+    expect(fs.existsSync(row.output_ref!)).toBe(true);
+    expect(fs.readFileSync(row.output_ref!, 'utf8').length).toBe(70_000);
+    // cleanup offloaded file dir
+    fs.rmSync(path.dirname(row.output_ref!), { recursive: true, force: true });
+  });
+
+  test('atomic step nodeType is routed to trace_steps (not chat_trace_nodes)', () => {
+    const traceId = 'tr-compact-' + Date.now();
+    const event = {
+      eventType: 'compact_boundary',
+      summary: 'pre:8000 post:4000',
+      traceNode: {
+        nodeId: 2, nodeType: 'compact', traceId, spanId: 'sp-c',
+        parentNodeId: 1, status: 'done',
+        inputSummary: 'pre:8000 post:4000',
+        outputSummary: 'pre:8000 post:4000',
+      },
+    } as any;
+    persistTraceNodeFromStreamEvent(CHAT_JID, event);
+    const step = getTraceStep(traceId, 'sp-c');
+    expect(step).toBeDefined();
+    expect(step!.node_type).toBe('compact');
+    expect(step!.input_summary).toBe('pre:8000 post:4000');
+    // coarse nodes table must NOT contain the compact node (CHECK constraint)
+    expect(getChatTraceNode(CHAT_JID, 2)).toBeUndefined();
   });
 });

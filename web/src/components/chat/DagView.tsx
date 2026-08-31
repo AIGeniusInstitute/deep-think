@@ -60,6 +60,16 @@ const NODE_TYPE_COLORS: Record<TraceNodeEntry['node_type'], string> = {
   subagent: '#f97316',   // orange
   review: '#eab308',     // yellow
   goal_check: '#ef4444', // red
+  // Atomic step types (v57) — share palette hues, lighter shade.
+  thinking: '#6366f1',       // indigo
+  compact: '#8b5cf6',        // violet
+  memory_recall: '#0ea5e9', // sky
+  memory_write: '#0891b2',  // cyan
+  tool_select: '#14b8a6',   // teal
+  llm_call: '#06b6d4',      // cyan
+  permission_check: '#f59e0b', // amber
+  context_audit: '#a3a3a3',   // neutral
+  validation: '#16a34a',    // green (result-checking)
 };
 
 const NODE_TYPE_LABELS: Record<TraceNodeEntry['node_type'], string> = {
@@ -69,6 +79,15 @@ const NODE_TYPE_LABELS: Record<TraceNodeEntry['node_type'], string> = {
   subagent: 'Sub-Agent',
   review: 'Review',
   goal_check: 'Goal Check',
+  thinking: 'Thinking',
+  compact: 'Compact',
+  memory_recall: 'Memory Recall',
+  memory_write: 'Memory Write',
+  tool_select: 'Tool Select',
+  llm_call: 'LLM Call',
+  permission_check: 'Permission Check',
+  context_audit: 'Context Audit',
+  validation: 'Validation',
 };
 
 const STATUS_BORDER: Record<string, string> = {

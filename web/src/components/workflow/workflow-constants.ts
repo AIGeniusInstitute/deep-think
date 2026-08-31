@@ -6,7 +6,7 @@
 
 export type GraphNodeType =
   | 'agent' | 'gate' | 'branch' | 'join' | 'human'
-  | 'llm' | 'tool' | 'start' | 'end' | 'parallel' | 'aggregate';
+  | 'llm' | 'tool' | 'start' | 'end' | 'parallel' | 'aggregate' | 'validate';
 
 export const NODE_TYPE_COLORS: Record<string, string> = {
   agent: '#3b82f6',
@@ -20,6 +20,7 @@ export const NODE_TYPE_COLORS: Record<string, string> = {
   end: '#475569',
   parallel: '#8b5cf6',
   aggregate: '#ec4899',
+  validate: '#16a34a',
 };
 
 export const NODE_TYPE_LABEL_ZH: Record<string, string> = {
@@ -34,6 +35,7 @@ export const NODE_TYPE_LABEL_ZH: Record<string, string> = {
   end: '结束',
   parallel: '并行',
   aggregate: '聚合',
+  validate: '校验',
 };
 
 /** Node types creatable from the palette (excludes parallel/aggregate sugar). */
@@ -44,6 +46,7 @@ export const PALETTE_TYPES: GraphNodeType[] = [
   'join',
   'human',
   'llm',
+  'validate',
   'start',
   'end',
 ];
@@ -63,6 +66,16 @@ export function defaultNodeFields(type: GraphNodeType, title: string): Record<st
       return { prompt: title, model: '' };
     case 'tool':
       return { toolName: 'run_script', toolInput: {} };
+    case 'validate':
+      // v57/v58 result-checking node: JSON Schema over the upstream node output,
+      // plus a failure policy. upstreamNodeId is resolved at run time (default =
+      // nearest predecessor).
+      return {
+        outputSchema: '{\n  "type": "object",\n  "required": [],\n  "properties": {}\n}',
+        onFail: 'fail',
+        fallbackValue: '',
+        upstreamNodeId: '',
+      };
     case 'start':
       return { inputParams: [] };
     case 'end':

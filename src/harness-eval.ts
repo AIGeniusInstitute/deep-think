@@ -31,6 +31,7 @@ import {
 import { DATA_DIR, HARNESS_EVAL_CASES_SRC_DIR } from './config.js';
 import { upsertChatTraceNode } from './db.js';
 import { sdkQuery } from './sdk-query.js';
+import { validateJson } from './graph-engineering/json-schema-validator.js';
 import { logger } from './logger.js';
 
 export const EVAL_CASES_DIR = path.join(DATA_DIR, 'harness', 'eval-cases');
@@ -39,11 +40,23 @@ export type AssertionKind =
   | 'contains'
   | 'not_contains'
   | 'regex'
-  | 'no_error';
+  | 'no_error'
+  // v58 — structured / semantic assertions (P3).
+  | 'json_schema'   // value = JSON Schema text; response parsed & validated
+  | 'json_path'     // value = $.path; expected/operator compare extracted value
+  | 'numeric_range' // value = $.path (or '' for whole response as number); min/max
+  | 'llm_judge';    // value = judge rubric prompt; requires async LLM judge
 
 export interface EvalAssertion {
   kind: AssertionKind;
   value: string;
+  /** json_path operator: equals | contains | exists. Default 'equals'. */
+  operator?: 'equals' | 'contains' | 'exists';
+  /** json_path/numeric_range expected value (string). */
+  expected?: string;
+  /** numeric_range bounds (inclusive). */
+  min?: number;
+  max?: number;
 }
 
 export interface EvalRubric {
@@ -90,8 +103,17 @@ export function parseCaseYaml(raw: string): EvalCase | null {
       .map((a: any) => ({
         kind: a.kind as AssertionKind,
         value: String(a.value ?? ''),
+        operator: a.operator as EvalAssertion['operator'],
+        expected: a.expected != null ? String(a.expected) : undefined,
+        min: a.min != null ? Number(a.min) : undefined,
+        max: a.max != null ? Number(a.max) : undefined,
       }))
-      .filter((a: EvalAssertion) => ['contains', 'not_contains', 'regex', 'no_error'].includes(a.kind));
+      .filter((a: EvalAssertion) =>
+        [
+          'contains', 'not_contains', 'regex', 'no_error',
+          'json_schema', 'json_path', 'numeric_range', 'llm_judge',
+        ].includes(a.kind),
+      );
     const rubric: EvalRubric = {
       weights: obj.rubric?.weights ?? { default: 1.0 },
       pass_threshold: Number(obj.rubric?.pass_threshold ?? 1.0),
@@ -153,7 +175,37 @@ export function loadEvalCasesFromDb(enabledOnly = true): EvalCase[] {
   }));
 }
 
-/** Score a single assertion against response text. Pure function (unit-testable). */
+/**
+ * Extract a value via a simple dot/bracket JSON path (`$.a.b[0].c`).
+ * Returns undefined if the path cannot be resolved. Kept dependency-free
+ * (Simplicity First) — covers the structured-assertion use cases; a full
+ * JSONPath grammar is out of scope for the eval harness.
+ */
+export function extractJsonPath(obj: unknown, pathStr: string): unknown {
+  if (!pathStr) return obj;
+  let p = pathStr.trim();
+  if (p.startsWith('$.')) p = p.slice(2);
+  else if (p === '$') return obj;
+  const tokens = p.match(/[^.\[\]]+|\[\d+\]/g);
+  if (!tokens) return undefined;
+  let cur: unknown = obj;
+  for (const tok of tokens) {
+    if (cur == null) return undefined;
+    if (tok.startsWith('[') && tok.endsWith(']')) {
+      const idx = Number(tok.slice(1, -1));
+      cur = Array.isArray(cur) ? cur[idx] : undefined;
+    } else {
+      cur = (cur as Record<string, unknown>)[tok];
+    }
+  }
+  return cur;
+}
+
+/** LLM judge signature — injected by the caller (keeps harness-eval pure). */
+export type LlmJudge = (rubricPrompt: string, responseText: string) => Promise<{ pass: boolean; detail: string }>;
+
+/** Score a single assertion against response text. Pure function (unit-testable)
+ *  for all sync kinds; llm_judge returns a placeholder (use scoreCaseAsync). */
 export function scoreAssertion(
   assertion: EvalAssertion,
   responseText: string,
@@ -181,6 +233,72 @@ export function scoreAssertion(
       const pass = !hadError;
       return { pass, detail: pass ? 'no error' : 'had error' };
     }
+    case 'json_schema': {
+      // Reuse the v57 result-validation engine. No-throw: a malformed schema
+      // or non-JSON response yields a structured failure, not a crash.
+      let schemaObj: Record<string, unknown>;
+      try {
+        schemaObj = JSON.parse(assertion.value) as Record<string, unknown>;
+      } catch (err) {
+        return { pass: false, detail: `invalid schema JSON: ${(err as Error).message}` };
+      }
+      let data: unknown;
+      try {
+        data = JSON.parse(responseText);
+      } catch (err) {
+        return { pass: false, detail: `response not JSON: ${(err as Error).message}` };
+      }
+      const res = validateJson(schemaObj, data);
+      return {
+        pass: res.valid,
+        detail: res.valid ? 'json_schema passed' : `json_schema failed: ${(res.errors ?? []).map((e) => e.message).join('; ')}`,
+      };
+    }
+    case 'json_path': {
+      let data: unknown;
+      try {
+        data = JSON.parse(responseText);
+      } catch (err) {
+        return { pass: false, detail: `response not JSON: ${(err as Error).message}` };
+      }
+      const val = extractJsonPath(data, assertion.value);
+      const op = assertion.operator ?? 'equals';
+      if (op === 'exists') {
+        const pass = val !== undefined;
+        return { pass, detail: pass ? `${assertion.value} exists` : `${assertion.value} missing` };
+      }
+      const got = val == null ? '' : String(val);
+      if (op === 'contains') {
+        const pass = got.includes(assertion.expected ?? '');
+        return { pass, detail: `${assertion.value}="${got}" ${pass ? 'contains' : '!contains'} "${assertion.expected}"` };
+      }
+      // equals
+      const pass = got === (assertion.expected ?? '');
+      return { pass, detail: `${assertion.value}="${got}" ${pass ? '==' : '!='} "${assertion.expected}"` };
+    }
+    case 'numeric_range': {
+      let data: unknown;
+      try {
+        data = JSON.parse(responseText);
+      } catch (err) {
+        return { pass: false, detail: `response not JSON: ${(err as Error).message}` };
+      }
+      const raw = assertion.value ? extractJsonPath(data, assertion.value) : data;
+      const num = Number(raw);
+      if (Number.isNaN(num)) {
+        return { pass: false, detail: `${assertion.value || '$'} not numeric (got ${JSON.stringify(raw)})` };
+      }
+      const aboveMin = assertion.min == null || num >= assertion.min;
+      const belowMax = assertion.max == null || num <= assertion.max;
+      const pass = aboveMin && belowMax;
+      return {
+        pass,
+        detail: `${assertion.value || '$'}=${num} ${pass ? 'in' : 'out of'} range[${assertion.min ?? '-∞'}, ${assertion.max ?? '+∞'}]`,
+      };
+    }
+    case 'llm_judge':
+      // Requires an async judge — sync scorer marks it as skipped.
+      return { pass: false, detail: 'llm_judge requires async judge (use scoreCaseAsync)' };
     default:
       return { pass: false, detail: `unknown kind ${assertion.kind}` };
   }
@@ -198,6 +316,45 @@ export function scoreCase(
   for (const a of evalCase.assertions) {
     total += 1;
     const r = scoreAssertion(a, responseText, hadError);
+    if (r.pass) passed += 1;
+    details.push(`[${r.pass ? 'PASS' : 'FAIL'}] ${a.kind}: ${r.detail}`);
+  }
+  const score = total === 0 ? 0 : passed / total;
+  const pass = total > 0 && score >= evalCase.rubric.pass_threshold;
+  return { pass, score, details };
+}
+
+/**
+ * Async variant that supports `llm_judge` assertions via an injected judge.
+ * Sync kinds reuse scoreAssertion; llm_judge kinds call `judge` (when provided;
+ * otherwise scored as failed). The harness runner passes a real sdkQuery-backed
+ * judge; unit tests pass a stub.
+ */
+export async function scoreCaseAsync(
+  evalCase: EvalCase,
+  responseText: string,
+  hadError: boolean,
+  judge?: LlmJudge,
+): Promise<{ pass: boolean; score: number; details: string[] }> {
+  const details: string[] = [];
+  let passed = 0;
+  let total = 0;
+  for (const a of evalCase.assertions) {
+    total += 1;
+    let r: { pass: boolean; detail: string };
+    if (a.kind === 'llm_judge') {
+      if (!judge) {
+        r = { pass: false, detail: 'llm_judge: no judge configured' };
+      } else {
+        try {
+          r = await judge(a.value, responseText);
+        } catch (err) {
+          r = { pass: false, detail: `llm_judge error: ${(err as Error).message}` };
+        }
+      }
+    } else {
+      r = scoreAssertion(a, responseText, hadError);
+    }
     if (r.pass) passed += 1;
     details.push(`[${r.pass ? 'PASS' : 'FAIL'}] ${a.kind}: ${r.detail}`);
   }

@@ -4,6 +4,8 @@ import {
   parseCaseYaml,
   scoreAssertion,
   scoreCase,
+  scoreCaseAsync,
+  extractJsonPath,
   type EvalCase,
 } from '../../src/harness-eval.js';
 
@@ -128,5 +130,129 @@ describe('harness-eval: scoreCase', () => {
     const r = scoreCase(c, 'anything', false);
     expect(r.score).toBe(0);
     expect(r.pass).toBe(false);
+  });
+});
+
+describe('harness-eval: v58 structured assertions', () => {
+  test('json_schema passes on valid object', () => {
+    const r = scoreAssertion(
+      { kind: 'json_schema', value: JSON.stringify({ type: 'object', required: ['x'] }) },
+      JSON.stringify({ x: 1 }),
+      false,
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  test('json_schema fails on missing field', () => {
+    const r = scoreAssertion(
+      { kind: 'json_schema', value: JSON.stringify({ type: 'object', required: ['x'] }) },
+      JSON.stringify({ y: 1 }),
+      false,
+    );
+    expect(r.pass).toBe(false);
+    expect(r.detail).toContain('json_schema failed');
+  });
+
+  test('json_schema fails gracefully on non-JSON response', () => {
+    const r = scoreAssertion(
+      { kind: 'json_schema', value: JSON.stringify({ type: 'object' }) },
+      'not json',
+      false,
+    );
+    expect(r.pass).toBe(false);
+    expect(r.detail).toContain('not JSON');
+  });
+
+  test('json_path equals', () => {
+    const r = scoreAssertion(
+      { kind: 'json_path', value: '$.status', operator: 'equals', expected: 'ok' },
+      JSON.stringify({ status: 'ok' }),
+      false,
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  test('json_path contains', () => {
+    const r = scoreAssertion(
+      { kind: 'json_path', value: '$.msg', operator: 'contains', expected: 'world' },
+      JSON.stringify({ msg: 'hello world' }),
+      false,
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  test('json_path exists / missing', () => {
+    expect(
+      scoreAssertion({ kind: 'json_path', value: '$.a.b', operator: 'exists' }, JSON.stringify({ a: { b: 1 } }), false).pass,
+    ).toBe(true);
+    expect(
+      scoreAssertion({ kind: 'json_path', value: '$.a.c', operator: 'exists' }, JSON.stringify({ a: { b: 1 } }), false).pass,
+    ).toBe(false);
+  });
+
+  test('numeric_range in bounds', () => {
+    const r = scoreAssertion(
+      { kind: 'numeric_range', value: '$.count', min: 1, max: 10 },
+      JSON.stringify({ count: 5 }),
+      false,
+    );
+    expect(r.pass).toBe(true);
+  });
+
+  test('numeric_range out of bounds', () => {
+    const r = scoreAssertion(
+      { kind: 'numeric_range', value: '$.count', min: 1, max: 10 },
+      JSON.stringify({ count: 99 }),
+      false,
+    );
+    expect(r.pass).toBe(false);
+  });
+
+  test('extractJsonPath dot/bracket navigation', () => {
+    expect(extractJsonPath({ a: { b: [{ c: 7 }] } }, '$.a.b[0].c')).toBe(7);
+    expect(extractJsonPath({ a: { b: 1 } }, '$.a.c')).toBe(undefined);
+    expect(extractJsonPath({ x: 1 }, '$')).toEqual({ x: 1 });
+  });
+});
+
+describe('harness-eval: scoreCaseAsync (llm_judge)', () => {
+  test('llm_judge uses injected judge; sync kinds reuse scoreAssertion', async () => {
+    const c: EvalCase = {
+      case_id: 'lj',
+      name: 'LJ',
+      prompt: 'p',
+      assertions: [
+        { kind: 'contains', value: 'foo' },
+        { kind: 'llm_judge', value: 'is the answer helpful?' },
+      ],
+      rubric: { pass_threshold: 1.0 },
+    };
+    const judge = async () => ({ pass: true, detail: 'judge ok' });
+    const r = await scoreCaseAsync(c, 'foo bar', false, judge);
+    expect(r.pass).toBe(true);
+    expect(r.score).toBe(1.0);
+    expect(r.details[1]).toContain('judge ok');
+  });
+
+  test('llm_judge without judge fails', async () => {
+    const r = await scoreCaseAsync(
+      { case_id: 'lj', name: 'LJ', prompt: 'p', assertions: [{ kind: 'llm_judge', value: 'q' }], rubric: { pass_threshold: 1.0 } },
+      'resp',
+      false,
+    );
+    expect(r.pass).toBe(false);
+    expect(r.details[0]).toContain('no judge');
+  });
+
+  test('llm_judge error is captured', async () => {
+    const judge = async () => { throw new Error('boom'); };
+    const r = await scoreCaseAsync(
+      { case_id: 'lj', name: 'LJ', prompt: 'p', assertions: [{ kind: 'llm_judge', value: 'q' }], rubric: { pass_threshold: 1.0 } },
+      'resp',
+      false,
+      judge,
+    );
+    expect(r.pass).toBe(false);
+    expect(r.details[0]).toContain('boom');
   });
 });

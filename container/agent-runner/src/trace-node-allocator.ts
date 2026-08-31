@@ -31,7 +31,11 @@ interface ActiveTask {
 
 export interface TraceNodeDescriptor {
   nodeId: number;
-  nodeType: 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent';
+  nodeType:
+    | 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent'
+    | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
+    | 'tool_select' | 'llm_call' | 'permission_check' | 'context_audit'
+    | 'validation';
   parentNodeId?: number | null;
   title?: string;
   inputSummary?: string;
@@ -43,6 +47,16 @@ export interface TraceNodeDescriptor {
   graphNodeId?: string;
   toolName?: string;
   toolUseId?: string;
+  /** Atomic Step Trace (v57): full-linkage IDs. */
+  traceId?: string;
+  spanId?: string;
+  parentSpanId?: string | null;
+  evidence?: Array<{
+    type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
+    ref: string;
+    detail?: string;
+  }>;
+  outputRef?: string;
 }
 
 /** SDK task patch statuses that signal a terminal subagent result. */
@@ -64,10 +78,31 @@ export class TraceNodeAllocator {
    *  internal sub-graph in the trace DB. Undefined for plain (non-graph) chats. */
   private graphRunId?: string;
   private graphNodeId?: string;
+  /** Atomic Step Trace (v57): process-scoped trace id — ties every step in a
+   *  conversation together. One agent-runner process ≈ one chat session
+   *  fragment, so a single id is correct. */
+  private traceId: string =
+    globalThis.crypto?.randomUUID?.() ?? `t${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  /** Span id of the current turn node (parent for thinking/compact/memory/tool). */
+  private currentTurnSpanId: string | null = null;
+  /** Active streaming thinking span (multi-delta); closed on turn end. */
+  private activeThinkingId: number | null = null;
+  private activeThinkingText = '';
 
   /** Allocate a fresh nodeId. */
   private alloc(): number {
     return this.nextId++;
+  }
+
+  /** Stable span id derived from a nodeId (unique within this traceId). */
+  private spanFor(nodeId: number): string {
+    return `s${nodeId}`;
+  }
+
+  /** Ensure a turn is active; allocates one if none. Returns the turn nodeId. */
+  private ensureTurn(): number {
+    if (this.currentTurnId == null) this.startTurn();
+    return this.currentTurnId!;
   }
 
   /**
@@ -87,17 +122,25 @@ export class TraceNodeAllocator {
    * process persists it and the frontend live-upserts it.
    */
   startTurn(inputSummary?: string): TraceNodeDescriptor {
+    // Flush any lingering streaming thinking span from a prior turn.
+    this.activeThinkingId = null;
+    this.activeThinkingText = '';
     const id = this.alloc();
     this.currentTurnId = id;
+    const spanId = this.spanFor(id);
+    this.currentTurnSpanId = spanId;
     return {
       nodeId: id,
       nodeType: 'turn',
       parentNodeId: null,
       title: 'Turn',
-      inputSummary: inputSummary,
+      inputSummary,
       status: 'running',
       graphRunId: this.graphRunId,
       graphNodeId: this.graphNodeId,
+      traceId: this.traceId,
+      spanId,
+      parentSpanId: null,
     };
   }
 
@@ -108,6 +151,9 @@ export class TraceNodeAllocator {
    */
   endTurn(outputSummary?: string, status: 'done' | 'failed' = 'done'): TraceNodeDescriptor | null {
     if (this.currentTurnId == null) return null;
+    // Close any open streaming thinking span before the turn ends.
+    this.activeThinkingId = null;
+    this.activeThinkingText = '';
     return {
       nodeId: this.currentTurnId,
       nodeType: 'turn',
@@ -115,6 +161,9 @@ export class TraceNodeAllocator {
       status,
       graphRunId: this.graphRunId,
       graphNodeId: this.graphNodeId,
+      traceId: this.traceId,
+      spanId: this.spanFor(this.currentTurnId),
+      parentSpanId: null,
     };
   }
 
@@ -233,6 +282,69 @@ export class TraceNodeAllocator {
       default:
         break;
     }
+    // Atomic Step Trace (v57): thinking / compact / memory_recall — fine-grained
+    // atomic steps that previously streamed to the UI but had no traceNode and
+    // no DB persistence. Each gets a span under the current turn.
+    if (!event.traceNode) {
+      switch (event.eventType) {
+        case 'thinking_delta': {
+          const parentTurnId = this.ensureTurn();
+          if (this.activeThinkingId == null) {
+            const nodeId = this.alloc();
+            this.activeThinkingId = nodeId;
+            this.activeThinkingText = event.text ?? '';
+            event.traceNode = {
+              nodeId,
+              nodeType: 'thinking',
+              parentNodeId: parentTurnId,
+              title: 'Thinking',
+              outputSummary: this.activeThinkingText.slice(0, 500),
+              status: 'running',
+            };
+          } else if (event.text) {
+            this.activeThinkingText += event.text;
+            event.traceNode = {
+              nodeId: this.activeThinkingId,
+              nodeType: 'thinking',
+              outputSummary: this.activeThinkingText.slice(0, 500),
+            };
+          }
+          break;
+        }
+        case 'compact_boundary': {
+          const parentTurnId = this.ensureTurn();
+          const nodeId = this.alloc();
+          const summary = event.summary ?? event.detail ?? event.text;
+          event.traceNode = {
+            nodeId,
+            nodeType: 'compact',
+            parentNodeId: parentTurnId,
+            title: 'Context Compact',
+            inputSummary: summary,
+            outputSummary: summary,
+            status: 'done',
+          };
+          break;
+        }
+        case 'memory_recall': {
+          const parentTurnId = this.ensureTurn();
+          const nodeId = this.alloc();
+          const summary = event.summary ?? event.detail ?? event.text;
+          event.traceNode = {
+            nodeId,
+            nodeType: 'memory_recall',
+            parentNodeId: parentTurnId,
+            title: 'Memory Recall',
+            inputSummary: summary,
+            outputSummary: summary,
+            status: 'done',
+          };
+          break;
+        }
+        default:
+          break;
+      }
+    }
     // Super Agent Team: stamp graph linkage + tool identity onto any traceNode
     // the switch populated, so the persist layer can link the node into the
     // agent node's sub-graph and join trace_tool_calls. No-op when graphRunId
@@ -243,6 +355,17 @@ export class TraceNodeAllocator {
       if (event.toolName) event.traceNode.toolName = event.toolName;
       if (event.toolUseId) event.traceNode.toolUseId = event.toolUseId;
     }
+    // Atomic Step Trace (v57): stamp full-linkage IDs onto every traceNode so
+    // the persist layer can write trace_id/span_id/parent_span_id. turn nodes
+    // already carry spanId from startTurn; others derive it from nodeId and
+    // parent from the current turn span.
+    if (event.traceNode) {
+      event.traceNode.traceId = this.traceId;
+      if (!event.traceNode.spanId) event.traceNode.spanId = this.spanFor(event.traceNode.nodeId);
+      if (event.traceNode.parentSpanId === undefined && event.traceNode.nodeType !== 'turn') {
+        event.traceNode.parentSpanId = this.currentTurnSpanId ?? null;
+      }
+    }
     return event;
   }
 
@@ -250,6 +373,9 @@ export class TraceNodeAllocator {
    *  (nodeIds stay monotonic across turns within the process lifetime). */
   resetTurn(): void {
     this.currentTurnId = null;
+    this.currentTurnSpanId = null;
+    this.activeThinkingId = null;
+    this.activeThinkingText = '';
     this.toolByUseId.clear();
     this.taskById.clear();
   }

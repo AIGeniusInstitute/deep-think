@@ -33,6 +33,7 @@ const SupervisorPage = lazy(() => import('./pages/SupervisorPage').then(m => ({ 
 const HarnessPage = lazy(() => import('./pages/HarnessPage').then(m => ({ default: m.HarnessPage })));
 const SandboxPage = lazy(() => import('./pages/SandboxPage').then(m => ({ default: m.SandboxPage })));
 const EnginesPage = lazy(() => import('./pages/EnginesPage').then(m => ({ default: m.EnginesPage })));
+const ToolsOverviewPage = lazy(() => import('./pages/ToolsOverviewPage').then(m => ({ default: m.ToolsOverviewPage })));
 const BillingPage = lazy(() => import('./pages/BillingPage'));
 
 export function App() {
@@ -98,6 +99,7 @@ export function App() {
           <Route path="/marketplace" element={<MarketplacePage />} />
           <Route path="/sandbox" element={<Suspense fallback={null}><SandboxPage /></Suspense>} />
           <Route path="/engines" element={<Suspense fallback={null}><EnginesPage /></Suspense>} />
+          <Route path="/tools" element={<Suspense fallback={null}><ToolsOverviewPage /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={null}><SettingsPage /></Suspense>} />
           <Route
             path="/users"

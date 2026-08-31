@@ -3,7 +3,7 @@
  * Uses sdkQuery (Claude Agent SDK, maxTurns=1, no tools) to turn natural language
  * into SKILL.md content, improve existing skills, or simulate skill execution.
  */
-import { sdkQuery } from './sdk-query.js';
+import { sdkQuery, sdkQueryMessages } from './sdk-query.js';
 import { logger } from './logger.js';
 import { slugifySkillName } from './skill-content-utils.js';
 
@@ -147,10 +147,23 @@ export async function optimizeSkillContent(
  * Debug a skill by simulating its execution against a test input.
  * Uses sdkQuery with no tools (maxTurns=1) — purely text-in/text-out.
  */
+/**
+ * Debug a skill against a test input.
+ *
+ * mode='ai' (default): predict/describe skill behavior via the DEBUG_PROMPT —
+ *   the model explains what it *would* do (no tool access). Fast, safe, static.
+ * mode='real': actually run the skill as a system prompt + the test input as
+ *   the user message, so the model follows the skill instructions for real and
+ *   produces genuine output (still maxTurns=1 / no tools — bounded & safe; a
+ *   full tool-enabled run is a future, sandboxed path). The distinction gives
+ *   the Skills debugger both a "what would happen" and a "what does happen"
+ *   evidence channel (PRD: online skill registration + debugging).
+ */
 export async function debugSkill(
   skillContent: string,
   testInput: string,
-): Promise<{ output: string; durationMs: number } | { error: string }> {
+  mode: 'ai' | 'real' = 'ai',
+): Promise<{ output: string; durationMs: number; mode: string } | { error: string }> {
   if (!skillContent || skillContent.trim().length === 0) {
     return { error: 'Skill content is empty' };
   }
@@ -158,12 +171,28 @@ export async function debugSkill(
     return { error: 'test_input must be non-empty' };
   }
 
+  const start = Date.now();
+
+  if (mode === 'real') {
+    // Real execution: skill content becomes the system prompt, test_input is
+    // the user turn. The model actually follows the skill.
+    const systemPrompt = `You are executing the following skill. Follow its instructions precisely to handle the user's request.\n\nSkill SKILL.md:\n\`\`\`\n${skillContent}\n\`\`\``;
+    const result = await sdkQueryMessages(
+      [{ role: 'user', content: testInput }],
+      { timeout: DEBUG_TIMEOUT_MS, systemPrompt },
+    );
+    const durationMs = Date.now() - start;
+    if (result === null) {
+      return { error: 'Real debug query failed (provider unavailable or timed out)' };
+    }
+    return { output: result, durationMs, mode: 'real' };
+  }
+
+  // AI-predictive mode (legacy).
   const prompt = fillTemplate(DEBUG_PROMPT, {
     SKILL_CONTENT: skillContent,
     TEST_INPUT: testInput,
   });
-
-  const start = Date.now();
   const result = await sdkQuery(prompt, { timeout: DEBUG_TIMEOUT_MS });
   const durationMs = Date.now() - start;
 
@@ -171,7 +200,7 @@ export async function debugSkill(
     return { error: 'AI debug query failed (provider may be unavailable or timed out)' };
   }
 
-  return { output: result, durationMs };
+  return { output: result, durationMs, mode: 'ai' };
 }
 
 /**

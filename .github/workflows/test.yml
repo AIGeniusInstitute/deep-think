@@ -1,0 +1,39 @@
+name: Test (smoke)
+
+# 最小回归门禁：每个 pull_request 与 push 到 main 触发 `make test-smoke`
+# （< 60s 纯逻辑单测集，见 Makefile test-smoke target）。
+# 失败即阻断合并。完整 `make test` 仍由本地或发布前手动运行。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke tests (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install deps (no-save, no audit)
+        run: npm install --no-save --no-audit --no-fund
+
+      - name: Run smoke tests
+        run: npx vitest run \
+          tests/units/json-schema-validator.test.ts \
+          tests/units/graph-validate-node.test.ts \
+          tests/units/harness-eval.test.ts \
+          tests/chat-trace-store.test.ts \
+          tests/open-platform-validation.test.ts \
+          tests/graph-expr.test.ts

@@ -2265,7 +2265,161 @@ export function initDatabase(): void {
     })();
   }
 
-  const SCHEMA_VERSION = '56';
+  // v56 → v57: Atomic Step Trace — structured JSON for every atomic Agent
+  // execution step (thinking / compact / memory_recall / memory_write /
+  // tool_select / llm_call / permission_check / context_audit / validation),
+  // each step traceable & evidence-backed. New `trace_steps` table stores
+  // fine-grained atomic steps (the coarse `chat_trace_nodes` DAG is left as-is);
+  // `trace_tool_calls` gains `output_ref` so >64KB tool I/O offloads to a file
+  // (DB keeps only the ref). `chat_trace_nodes` gains span linkage + evidence
+  // so the coarse DAG can cross-reference atomic steps. All additive/nullable.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS trace_steps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT NOT NULL,
+      span_id TEXT NOT NULL,
+      parent_span_id TEXT,
+      chat_jid TEXT,
+      graph_run_id TEXT,
+      graph_node_id TEXT,
+      node_type TEXT NOT NULL,
+      title TEXT,
+      input_summary TEXT,
+      output_summary TEXT,
+      evidence_json TEXT,
+      output_ref TEXT,
+      tokens INTEGER NOT NULL DEFAULT 0,
+      status TEXT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      UNIQUE(trace_id, span_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_trace_steps_chat ON trace_steps(chat_jid, started_at);
+    CREATE INDEX IF NOT EXISTS idx_trace_steps_trace ON trace_steps(trace_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_trace_steps_parent ON trace_steps(parent_span_id);
+  `);
+  ensureColumn('trace_tool_calls', 'output_ref', 'TEXT');
+  for (const col of ['trace_id', 'span_id', 'parent_span_id', 'evidence_json', 'output_ref']) {
+    if (!hasColumn('chat_trace_nodes', col)) {
+      db.exec(`ALTER TABLE chat_trace_nodes ADD COLUMN ${col} TEXT`);
+    }
+  }
+
+  // v57: graph_node_runs.node_type CHECK must accept 'validate' (result-checking
+  // node). Rebuild the table adding 'validate' to the CHECK, mirroring the v55
+  // rebuild. Safe: node runs are execution records (regenerable); a transaction
+  // preserves any in-flight rows.
+  const graphNodeRunCheckV57 = (
+    db
+      .prepare(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='graph_node_runs'`,
+      )
+      .get() as { sql: string } | undefined
+  )?.sql;
+  if (graphNodeRunCheckV57 && !graphNodeRunCheckV57.includes("'validate'")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE graph_node_runs_v57 (
+          id TEXT PRIMARY KEY,
+          graph_run_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          node_type TEXT NOT NULL
+            CHECK(node_type IN ('agent','gate','branch','join','human','llm','tool','start','end','parallel','aggregate','validate')),
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','running','completed','failed','skipped','paused')),
+          attempt INTEGER NOT NULL DEFAULT 0,
+          input_summary TEXT,
+          output_summary TEXT,
+          state_patch_json TEXT,
+          parent_node_run_id TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL NOT NULL DEFAULT 0,
+          error TEXT,
+          is_idempotent INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (graph_run_id) REFERENCES graph_runs(id)
+        );
+        INSERT INTO graph_node_runs_v57
+          SELECT id, graph_run_id, node_id, node_type, status, attempt, input_summary,
+                 output_summary, state_patch_json, parent_node_run_id, started_at, ended_at,
+                 input_tokens, output_tokens, cost_usd, error, is_idempotent
+          FROM graph_node_runs;
+        DROP TABLE graph_node_runs;
+        ALTER TABLE graph_node_runs_v57 RENAME TO graph_node_runs;
+        CREATE INDEX IF NOT EXISTS idx_graph_node_runs_run ON graph_node_runs(graph_run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_graph_node_runs_parent ON graph_node_runs(parent_node_run_id);
+      `);
+    })();
+  }
+
+  // v57 → v58: Open Platform result validation — JSON Schema + business-hook
+  // policies attached to api_keys (MaaS chatCompletions) and agent_definitions
+  // (runAgent). Additive nullable columns on both tables; a new `webhook_calls`
+  // table records outbound validation-hook invocations for idempotency & audit.
+  for (const col of [
+    'validation_schema',
+    'validation_hook_url',
+    'hook_secret',
+    'hook_failure_action',
+    'on_schema_fail',
+  ]) {
+    if (!hasColumn('api_keys', col)) {
+      const def =
+        col === 'hook_failure_action'
+          ? "TEXT DEFAULT 'passthrough'"
+          : col === 'on_schema_fail'
+            ? "TEXT DEFAULT 'fail'"
+            : 'TEXT';
+      db.exec(`ALTER TABLE api_keys ADD COLUMN ${col} ${def}`);
+    }
+    if (!hasColumn('agent_definitions', col)) {
+      const def =
+        col === 'hook_failure_action'
+          ? "TEXT DEFAULT 'passthrough'"
+          : col === 'on_schema_fail'
+            ? "TEXT DEFAULT 'fail'"
+            : 'TEXT';
+      db.exec(`ALTER TABLE agent_definitions ADD COLUMN ${col} ${def}`);
+    }
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_calls (
+      id TEXT PRIMARY KEY,
+      policy_type TEXT NOT NULL CHECK(policy_type IN ('api_key','agent_def')),
+      policy_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      http_status INTEGER,
+      response_summary TEXT,
+      error TEXT,
+      latency_ms INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(policy_type, policy_id, request_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_calls_policy ON webhook_calls(policy_type, policy_id, created_at);
+
+    -- v58: skill_versions — version history for user skills. Each row is a
+    -- snapshot of a SKILL.md at a point in time (content + frontmatter hash),
+    -- so the Skills debugger can diff/rollback and the marketplace can pin a
+    -- known-good version. Skills live as files in ~/.claude/skills; this table
+    -- is the audit/version layer, not the source of truth at runtime.
+    CREATE TABLE IF NOT EXISTS skill_versions (
+      id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(skill_id, user_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, user_id, version);
+  `);
+
+  const SCHEMA_VERSION = '58';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3509,7 +3663,7 @@ export interface GraphNodeRunRow {
   node_type:
     | 'agent' | 'gate' | 'branch' | 'join' | 'human'
     | 'llm' | 'tool' | 'start' | 'end'
-    | 'parallel' | 'aggregate';
+    | 'parallel' | 'aggregate' | 'validate';
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'paused';
   attempt: number;
   input_summary: string | null;
@@ -5140,6 +5294,14 @@ export interface ChatTraceNodeRow {
   graph_node_id: string | null;
   tool_name: string | null;
   tool_use_id: string | null;
+  // Atomic Step Trace (v57): span linkage so coarse DAG nodes cross-reference
+  // fine-grained trace_steps rows (shared trace_id; span_id on this node;
+  // parent_span_id mirrors parent_node_id in span space).
+  trace_id: string | null;
+  span_id: string | null;
+  parent_span_id: string | null;
+  evidence_json: string | null;
+  output_ref: string | null;
 }
 
 export interface ChatTraceNodeUpsertInput {
@@ -5159,6 +5321,9 @@ export interface ChatTraceNodeUpsertInput {
   graph_node_id?: string | null;
   tool_name?: string | null;
   tool_use_id?: string | null;
+  trace_id?: string | null;
+  span_id?: string | null;
+  parent_span_id?: string | null;
 }
 
 /**
@@ -5171,8 +5336,9 @@ export function upsertChatTraceNode(row: ChatTraceNodeUpsertInput): void {
     `INSERT INTO chat_trace_nodes
        (id, chat_jid, session_id, parent_node_id, node_type, title,
         input_summary, output_summary, tokens, status, started_at, ended_at,
-        graph_run_id, graph_node_id, tool_name, tool_use_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        graph_run_id, graph_node_id, tool_name, tool_use_id,
+        trace_id, span_id, parent_span_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(chat_jid, id) DO UPDATE SET
        session_id = COALESCE(excluded.session_id, session_id),
        parent_node_id = COALESCE(excluded.parent_node_id, parent_node_id),
@@ -5185,7 +5351,10 @@ export function upsertChatTraceNode(row: ChatTraceNodeUpsertInput): void {
        graph_run_id = COALESCE(excluded.graph_run_id, graph_run_id),
        graph_node_id = COALESCE(excluded.graph_node_id, graph_node_id),
        tool_name = COALESCE(excluded.tool_name, tool_name),
-       tool_use_id = COALESCE(excluded.tool_use_id, tool_use_id)`,
+       tool_use_id = COALESCE(excluded.tool_use_id, tool_use_id),
+       trace_id = COALESCE(excluded.trace_id, trace_id),
+       span_id = COALESCE(excluded.span_id, span_id),
+       parent_span_id = COALESCE(excluded.parent_span_id, parent_span_id)`,
   ).run(
     row.id,
     row.chat_jid,
@@ -5203,6 +5372,9 @@ export function upsertChatTraceNode(row: ChatTraceNodeUpsertInput): void {
     row.graph_node_id ?? null,
     row.tool_name ?? null,
     row.tool_use_id ?? null,
+    row.trace_id ?? null,
+    row.span_id ?? null,
+    row.parent_span_id ?? null,
   );
 }
 
@@ -5266,6 +5438,7 @@ export interface TraceToolCallRow {
   tool_name: string;
   input_json: string | null;
   output_json: string | null;
+  output_ref: string | null;
   status: string | null;
   started_at: string;
   ended_at: string | null;
@@ -5279,6 +5452,7 @@ export interface TraceToolCallUpsertInput {
   tool_name: string;
   input_json?: string | null;
   output_json?: string | null;
+  output_ref?: string | null;
   status?: string | null;
   started_at: string;
   ended_at?: string | null;
@@ -5295,14 +5469,15 @@ export function upsertTraceToolCall(row: TraceToolCallUpsertInput): void {
   db.prepare(
     `INSERT INTO trace_tool_calls
        (graph_run_id, graph_node_id, chat_jid, tool_use_id, tool_name,
-        input_json, output_json, status, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        input_json, output_json, output_ref, status, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(graph_run_id, tool_use_id) DO UPDATE SET
        graph_node_id = COALESCE(excluded.graph_node_id, graph_node_id),
        chat_jid = COALESCE(excluded.chat_jid, chat_jid),
        tool_name = COALESCE(excluded.tool_name, tool_name),
        input_json = COALESCE(excluded.input_json, input_json),
        output_json = COALESCE(excluded.output_json, output_json),
+       output_ref = COALESCE(excluded.output_ref, output_ref),
        status = COALESCE(excluded.status, status),
        ended_at = COALESCE(excluded.ended_at, ended_at)`,
   ).run(
@@ -5313,6 +5488,7 @@ export function upsertTraceToolCall(row: TraceToolCallUpsertInput): void {
     row.tool_name,
     row.input_json ?? null,
     row.output_json ?? null,
+    row.output_ref ?? null,
     row.status ?? null,
     row.started_at,
     row.ended_at ?? null,
@@ -5333,6 +5509,122 @@ export function listTraceToolCalls(
   return db
     .prepare('SELECT * FROM trace_tool_calls WHERE graph_run_id = ? ORDER BY id ASC')
     .all(graphRunId) as TraceToolCallRow[];
+}
+
+// ---- Atomic Step Trace (v57) — fine-grained, evidence-backed steps ----
+
+export type TraceStepNodeType =
+  | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
+  | 'tool_select' | 'llm_call' | 'permission_check' | 'context_audit'
+  | 'validation';
+
+export interface TraceEvidenceItem {
+  type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
+  ref: string;
+  detail?: string;
+}
+
+export interface TraceStepRow {
+  id: number;
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  chat_jid: string | null;
+  graph_run_id: string | null;
+  graph_node_id: string | null;
+  node_type: string;
+  title: string | null;
+  input_summary: string | null;
+  output_summary: string | null;
+  evidence_json: string | null;
+  output_ref: string | null;
+  tokens: number;
+  status: string | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+export interface TraceStepUpsertInput {
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string | null;
+  chat_jid?: string | null;
+  graph_run_id?: string | null;
+  graph_node_id?: string | null;
+  node_type: TraceStepNodeType | string;
+  title?: string | null;
+  input_summary?: string | null;
+  output_summary?: string | null;
+  evidence?: TraceEvidenceItem[] | null;
+  output_ref?: string | null;
+  tokens?: number;
+  status?: string | null;
+  started_at: string;
+  ended_at?: string | null;
+}
+
+/**
+ * Idempotent upsert keyed on (trace_id, span_id). allocator emits start/end as
+ * separate events; each merges into the same row (input on start, output on end).
+ * Failures are best-effort (caller wraps in try/catch) — trace is a side channel.
+ */
+export function upsertTraceStep(row: TraceStepUpsertInput): void {
+  const evidenceJson = row.evidence ? JSON.stringify(row.evidence) : null;
+  db.prepare(
+    `INSERT INTO trace_steps
+       (trace_id, span_id, parent_span_id, chat_jid, graph_run_id, graph_node_id,
+        node_type, title, input_summary, output_summary, evidence_json, output_ref,
+        tokens, status, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(trace_id, span_id) DO UPDATE SET
+       parent_span_id = COALESCE(excluded.parent_span_id, parent_span_id),
+       chat_jid = COALESCE(excluded.chat_jid, chat_jid),
+       graph_run_id = COALESCE(excluded.graph_run_id, graph_run_id),
+       graph_node_id = COALESCE(excluded.graph_node_id, graph_node_id),
+       title = COALESCE(excluded.title, title),
+       input_summary = COALESCE(excluded.input_summary, input_summary),
+       output_summary = COALESCE(excluded.output_summary, output_summary),
+       evidence_json = COALESCE(excluded.evidence_json, evidence_json),
+       output_ref = COALESCE(excluded.output_ref, output_ref),
+       tokens = MAX(tokens, excluded.tokens),
+       status = COALESCE(excluded.status, status),
+       ended_at = COALESCE(excluded.ended_at, ended_at)`,
+  ).run(
+    row.trace_id,
+    row.span_id,
+    row.parent_span_id ?? null,
+    row.chat_jid ?? null,
+    row.graph_run_id ?? null,
+    row.graph_node_id ?? null,
+    row.node_type,
+    row.title ?? null,
+    row.input_summary ?? null,
+    row.output_summary ?? null,
+    evidenceJson,
+    row.output_ref ?? null,
+    row.tokens ?? 0,
+    row.status ?? null,
+    row.started_at,
+    row.ended_at ?? null,
+  );
+}
+
+export function listTraceSteps(chatJid: string): TraceStepRow[] {
+  return db
+    .prepare('SELECT * FROM trace_steps WHERE chat_jid = ? ORDER BY started_at ASC, id ASC')
+    .all(chatJid) as TraceStepRow[];
+}
+
+export function listTraceStepsByTrace(traceId: string): TraceStepRow[] {
+  return db
+    .prepare('SELECT * FROM trace_steps WHERE trace_id = ? ORDER BY started_at ASC, id ASC')
+    .all(traceId) as TraceStepRow[];
+}
+
+export function getTraceStep(traceId: string, spanId: string): TraceStepRow | undefined {
+  return db
+    .prepare('SELECT * FROM trace_steps WHERE trace_id = ? AND span_id = ?')
+    .get(traceId, spanId) as TraceStepRow | undefined;
 }
 
 /** Look up an agent definition by (owner user id, name) for idempotent team build. */
@@ -9248,6 +9540,12 @@ export type AgentDefinitionRow = {
   kind: string;
   created_at: string;
   updated_at: string;
+  // v58 Open Platform result-validation policy (nullable unless configured).
+  validation_schema: string | null;
+  validation_hook_url: string | null;
+  hook_secret: string | null;
+  hook_failure_action: string | null;
+  on_schema_fail: string | null;
 };
 
 export type AgentMountRow = {
@@ -9304,6 +9602,12 @@ export type ApiKeyRow = {
   created_at: string;
   last_used_at: string | null;
   expires_at: string | null;
+  // v58 Open Platform result-validation policy (nullable unless configured).
+  validation_schema: string | null;
+  validation_hook_url: string | null;
+  hook_secret: string | null;
+  hook_failure_action: string | null;
+  on_schema_fail: string | null;
 };
 
 export function createApiKey(input: {
@@ -9375,6 +9679,260 @@ export function deleteApiKey(id: string, userId: string, isAdmin = false): boole
 
 export function touchApiKeyLastUsed(id: string, at: string): void {
   db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(at, id);
+}
+
+// ─── v58: Open Platform result-validation policies ────────────
+// A single validation policy record projected from either an api_key or an
+// agent_definition row. Null fields mean "no policy configured" (passthrough).
+export interface ValidationPolicy {
+  policyType: 'api_key' | 'agent_def';
+  policyId: string;
+  validationSchema: string | null; // JSON Schema text
+  validationHookUrl: string | null;
+  hookSecret: string | null;
+  hookFailureAction: string | null; // 'passthrough' | 'block' | 'retry'
+  onSchemaFail: string | null; // 'fail' | 'retry' | 'passthrough'
+}
+
+export function getApiKeyValidationPolicy(id: string): ValidationPolicy | null {
+  const row = db
+    .prepare(
+      'SELECT validation_schema, validation_hook_url, hook_secret, hook_failure_action, on_schema_fail FROM api_keys WHERE id = ?',
+    )
+    .get(id) as
+    | {
+        validation_schema: string | null;
+        validation_hook_url: string | null;
+        hook_secret: string | null;
+        hook_failure_action: string | null;
+        on_schema_fail: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    policyType: 'api_key',
+    policyId: id,
+    validationSchema: row.validation_schema,
+    validationHookUrl: row.validation_hook_url,
+    hookSecret: row.hook_secret,
+    hookFailureAction: row.hook_failure_action ?? 'passthrough',
+    onSchemaFail: row.on_schema_fail ?? 'fail',
+  };
+}
+
+export function getAgentDefValidationPolicy(id: string): ValidationPolicy | null {
+  const row = db
+    .prepare(
+      'SELECT validation_schema, validation_hook_url, hook_secret, hook_failure_action, on_schema_fail FROM agent_definitions WHERE id = ?',
+    )
+    .get(id) as
+    | {
+        validation_schema: string | null;
+        validation_hook_url: string | null;
+        hook_secret: string | null;
+        hook_failure_action: string | null;
+        on_schema_fail: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    policyType: 'agent_def',
+    policyId: id,
+    validationSchema: row.validation_schema,
+    validationHookUrl: row.validation_hook_url,
+    hookSecret: row.hook_secret,
+    hookFailureAction: row.hook_failure_action ?? 'passthrough',
+    onSchemaFail: row.on_schema_fail ?? 'fail',
+  };
+}
+
+/** Update the validation policy columns on an api_key (null clears). */
+export function updateApiKeyValidation(
+  id: string,
+  input: {
+    validationSchema?: string | null;
+    validationHookUrl?: string | null;
+    hookSecret?: string | null;
+    hookFailureAction?: string | null;
+    onSchemaFail?: string | null;
+  },
+): void {
+  db.prepare(
+    `UPDATE api_keys SET
+       validation_schema = COALESCE(?, validation_schema),
+       validation_hook_url = COALESCE(?, validation_hook_url),
+       hook_secret = COALESCE(?, hook_secret),
+       hook_failure_action = COALESCE(?, hook_failure_action),
+       on_schema_fail = COALESCE(?, on_schema_fail)
+     WHERE id = ?`,
+  ).run(
+    input.validationSchema ?? null,
+    input.validationHookUrl ?? null,
+    input.hookSecret ?? null,
+    input.hookFailureAction ?? null,
+    input.onSchemaFail ?? null,
+    id,
+  );
+}
+
+/** Update the validation policy columns on an agent_definition (null clears). */
+export function updateAgentDefValidation(
+  id: string,
+  input: {
+    validationSchema?: string | null;
+    validationHookUrl?: string | null;
+    hookSecret?: string | null;
+    hookFailureAction?: string | null;
+    onSchemaFail?: string | null;
+  },
+): void {
+  db.prepare(
+    `UPDATE agent_definitions SET
+       validation_schema = COALESCE(?, validation_schema),
+       validation_hook_url = COALESCE(?, validation_hook_url),
+       hook_secret = COALESCE(?, hook_secret),
+       hook_failure_action = COALESCE(?, hook_failure_action),
+       on_schema_fail = COALESCE(?, on_schema_fail)
+     WHERE id = ?`,
+  ).run(
+    input.validationSchema ?? null,
+    input.validationHookUrl ?? null,
+    input.hookSecret ?? null,
+    input.hookFailureAction ?? null,
+    input.onSchemaFail ?? null,
+    id,
+  );
+}
+
+// ─── v58: webhook_calls (outbound validation-hook audit / idempotency) ──
+
+export type WebhookCallRow = {
+  id: string;
+  policy_type: 'api_key' | 'agent_def';
+  policy_id: string;
+  request_id: string;
+  url: string;
+  http_status: number | null;
+  response_summary: string | null;
+  error: string | null;
+  latency_ms: number | null;
+  created_at: string;
+};
+
+export function recordWebhookCall(input: {
+  policyType: 'api_key' | 'agent_def';
+  policyId: string;
+  requestId: string;
+  url: string;
+  httpStatus: number | null;
+  responseSummary: string | null;
+  error: string | null;
+  latencyMs: number | null;
+}): WebhookCallRow {
+  const id = crypto.randomUUID();
+  db.prepare(
+    `INSERT INTO webhook_calls (id, policy_type, policy_id, request_id, url, http_status, response_summary, error, latency_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(policy_type, policy_id, request_id) DO UPDATE SET
+       http_status = excluded.http_status,
+       response_summary = excluded.response_summary,
+       error = excluded.error,
+       latency_ms = excluded.latency_ms`,
+  ).run(
+    id,
+    input.policyType,
+    input.policyId,
+    input.requestId,
+    input.url,
+    input.httpStatus,
+    input.responseSummary,
+    input.error,
+    input.latencyMs,
+    isoNow(),
+  );
+  return db
+    .prepare('SELECT * FROM webhook_calls WHERE id = ?')
+    .get(id) as WebhookCallRow;
+}
+
+export function listWebhookCalls(
+  policyType: 'api_key' | 'agent_def',
+  policyId: string,
+): WebhookCallRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM webhook_calls WHERE policy_type = ? AND policy_id = ? ORDER BY created_at ASC',
+    )
+    .all(policyType, policyId) as WebhookCallRow[];
+}
+
+// ─── v58: skill_versions (skill version history / rollback) ──
+
+export type SkillVersionRow = {
+  id: string;
+  skill_id: string;
+  user_id: string;
+  version: number;
+  content: string;
+  content_hash: string;
+  notes: string | null;
+  created_at: string;
+};
+
+/** Insert a new version snapshot for a skill. Auto-increments version from the
+ *  latest existing one. Returns the new row. */
+export function createSkillVersion(input: {
+  skillId: string;
+  userId: string;
+  content: string;
+  notes?: string | null;
+}): SkillVersionRow {
+  const id = crypto.randomUUID();
+  const latest = db
+    .prepare(
+      'SELECT version FROM skill_versions WHERE skill_id = ? AND user_id = ? ORDER BY version DESC LIMIT 1',
+    )
+    .get(input.skillId, input.userId) as { version: number } | undefined;
+  const version = (latest?.version ?? 0) + 1;
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(input.content)
+    .digest('hex');
+  db.prepare(
+    `INSERT INTO skill_versions (id, skill_id, user_id, version, content, content_hash, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.skillId,
+    input.userId,
+    version,
+    input.content,
+    contentHash,
+    input.notes ?? null,
+    isoNow(),
+  );
+  return getSkillVersion(input.skillId, input.userId, version)!;
+}
+
+export function listSkillVersions(skillId: string, userId: string): SkillVersionRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM skill_versions WHERE skill_id = ? AND user_id = ? ORDER BY version DESC',
+    )
+    .all(skillId, userId) as SkillVersionRow[];
+}
+
+export function getSkillVersion(
+  skillId: string,
+  userId: string,
+  version: number,
+): SkillVersionRow | null {
+  const row = db
+    .prepare(
+      'SELECT * FROM skill_versions WHERE skill_id = ? AND user_id = ? AND version = ?',
+    )
+    .get(skillId, userId, version) as SkillVersionRow | undefined;
+  return row ?? null;
 }
 
 // ─── Agent Service 开放平台：模型定价 ──────────────────────────
