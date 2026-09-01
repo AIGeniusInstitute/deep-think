@@ -2417,9 +2417,36 @@ export function initDatabase(): void {
       UNIQUE(skill_id, user_id, version)
     );
     CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, user_id, version);
+
+    -- v59: collaborations — 多人协作工作能力。一个协作绑定一个共享群工作区
+    -- (group_folder)，承载协作模式 (orchestrator-worker/peer/critic-adversarial) +
+    -- 场景预设 + plan + run_id + 参与者快照。run_id 仍是标准 graph_runs 行，
+    -- 复用 graph 执行；本表只承载协作元数据与异步组建状态（镜像 team_builds 模式）。
+    CREATE TABLE IF NOT EXISTS collaborations (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      goal_text TEXT NOT NULL,
+      mode TEXT NOT NULL
+        CHECK(mode IN ('orchestrator-worker','peer','critic-adversarial')),
+      scenario TEXT,
+      background TEXT,
+      acceptance_criteria TEXT,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK(status IN ('running','completed','failed')),
+      plan_json TEXT,
+      run_id TEXT,
+      definition_id TEXT,
+      participants_json TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_collaborations_owner ON collaborations(owner_user_id, created_at DESC);
   `);
 
-  const SCHEMA_VERSION = '58';
+  const SCHEMA_VERSION = '59';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -4415,6 +4442,116 @@ export function listTeamBuilds(
       `SELECT * FROM team_builds WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ?`,
     )
     .all(ownerUserId, limit) as TeamBuildRow[];
+}
+
+// --- collaborations（多人协作工作能力，v59） ---
+
+/** 异步协作组建任务行（POST /api/collaborations 立即创建，后台 buildCollaboration 回写）。 */
+export interface CollaborationRow {
+  id: string;
+  owner_user_id: string;
+  group_folder: string;
+  chat_jid: string;
+  goal_text: string;
+  mode: 'orchestrator-worker' | 'peer' | 'critic-adversarial';
+  scenario: string | null;
+  background: string | null;
+  acceptance_criteria: string | null;
+  status: 'running' | 'completed' | 'failed';
+  plan_json: string | null;
+  run_id: string | null;
+  definition_id: string | null;
+  participants_json: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 创建一条 status='running' 的协作任务，返回 id。 */
+export function createCollaboration(row: {
+  id: string;
+  owner_user_id: string;
+  group_folder: string;
+  chat_jid: string;
+  goal_text: string;
+  mode: 'orchestrator-worker' | 'peer' | 'critic-adversarial';
+  scenario?: string | null;
+  background?: string | null;
+  acceptance_criteria?: string | null;
+}): string {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO collaborations
+      (id, owner_user_id, group_folder, chat_jid, goal_text, mode,
+       scenario, background, acceptance_criteria, status,
+       plan_json, run_id, definition_id, participants_json, error, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+  ).run(
+    row.id,
+    row.owner_user_id,
+    row.group_folder,
+    row.chat_jid,
+    row.goal_text,
+    row.mode,
+    row.scenario ?? null,
+    row.background ?? null,
+    row.acceptance_criteria ?? null,
+    now,
+    now,
+  );
+  return row.id;
+}
+
+export function getCollaboration(id: string): CollaborationRow | undefined {
+  return db.prepare('SELECT * FROM collaborations WHERE id = ?').get(id) as
+    | CollaborationRow
+    | undefined;
+}
+
+/** 后台 buildCollaboration 成功后回写 plan + runId + definitionId + participants，置 completed。 */
+export function completeCollaboration(
+  id: string,
+  result: {
+    plan_json: string;
+    run_id: string;
+    definition_id: string;
+    participants_json: string;
+  },
+): void {
+  db.prepare(
+    `UPDATE collaborations
+     SET status = 'completed', plan_json = ?, run_id = ?, definition_id = ?,
+         participants_json = ?, error = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    result.plan_json,
+    result.run_id,
+    result.definition_id,
+    result.participants_json,
+    Date.now(),
+    id,
+  );
+}
+
+/** 后台 buildCollaboration 失败后回写 error，置 failed。 */
+export function failCollaboration(id: string, error: string): void {
+  db.prepare(
+    `UPDATE collaborations
+     SET status = 'failed', error = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(error, Date.now(), id);
+}
+
+/** List a user's collaborations (history). Newest first. */
+export function listCollaborations(
+  ownerUserId: string,
+  limit = 20,
+): CollaborationRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM collaborations WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(ownerUserId, limit) as CollaborationRow[];
 }
 
 // --- workflow_builds（编排 Agent 草稿生成任务） ---

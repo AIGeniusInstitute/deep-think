@@ -54,6 +54,7 @@ import {
   buildDecompositionPrompt,
   buildGoalAnchor,
   buildFallbackPlan,
+  buildDecompositionPromptByMode,
 } from './team-prompt.js';
 import { reinjectLessonsIntoPrompt } from '../autonomy/lesson-injection.js';
 
@@ -62,7 +63,13 @@ const DECOMPOSE_TIMEOUT_MS = 120_000;
 /** Decompose via LLM, retry once, then fall back. Returns a valid TeamPlan. */
 async function decompose(input: TeamTaskInput): Promise<TeamPlan> {
   // F4: reinject relevant past lessons (continual-learning 近似).
-  const prompt = reinjectLessonsIntoPrompt(input.goalText, buildDecompositionPrompt(input), 'decision');
+  // Multi-user-collaboration: mode-aware decomposition prompt (peer/critic
+  // branches; default = legacy buildDecompositionPrompt, zero behavior change).
+  const prompt = reinjectLessonsIntoPrompt(
+    input.goalText,
+    buildDecompositionPromptByMode(input),
+    'decision',
+  );
   // llm_call trace: record team-decompose LLM invocations into the chat timeline.
   const trace = { chatJid: input.chatJid, label: 'Team Decompose' };
   // Attempt 1.

@@ -194,6 +194,7 @@ import {
 } from './graph-engineering/graph-orchestrator.js';
 import type { GraphDeps } from './graph-engineering/graph-runner.js';
 import { buildTeam } from './agent-team/team-builder.js';
+import { buildCollaboration } from './agent-team/collaboration-builder.js';
 import { handleTeamStartCommand } from './agent-team/team-commands.js';
 import { runOrchestrator } from './agent-orchestration/orchestrator-runner.js';
 import { setSupervisorDeps } from './routes/supervisor.js';
@@ -11720,6 +11721,11 @@ async function main(): Promise<void> {
     // decompose a complex task + create agent members + assemble + start a
     // graph run with full GraphDeps in scope. See src/agent-team/team-builder.ts.
     webDeps.buildTeam = (input) => buildTeam(input, graphDeps);
+    // Multi-User Collaboration: wire buildCollaboration so /api/collaborations
+    // can build a mode-aware collaboration (wraps buildTeam) + persist shared
+    // artifacts into the shared group workspace, with full GraphDeps in scope.
+    // See src/agent-team/collaboration-builder.ts.
+    webDeps.buildCollaboration = (input) => buildCollaboration(input, graphDeps);
     // Agent Orchestrator–Workers: wire runOrchestrator so POST /api/paas/agents/
     // :id/orchestrate can run a user-created orchestrator on its linked workers
     // with full GraphDeps in scope. See src/agent-orchestration/orchestrator-runner.ts.
