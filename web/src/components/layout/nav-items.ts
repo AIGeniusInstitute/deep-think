@@ -1,8 +1,9 @@
-import { MessageCircle, Clock4, Puzzle, Wallet, User, Repeat, GitBranch, Bot, BookOpen, ShoppingBag, Boxes, Server, BrainCircuit, Cpu, ShieldCheck, Users, Building2, Workflow, KeyRound } from 'lucide-react';
+import { MessageCircle, Clock4, Puzzle, Wallet, User, Repeat, GitBranch, Bot, BookOpen, ShoppingBag, Boxes, Server, BrainCircuit, Cpu, ShieldCheck, Users, Building2, Workflow, KeyRound, Handshake } from 'lucide-react';
 
 export const baseNavItems = [
   { path: '/chat', icon: MessageCircle, label: '工作台' },
   { path: '/team', icon: Users, label: '团队' },
+  { path: '/collaborations', icon: Handshake, label: '协作' },
   { path: '/opc', icon: Building2, label: 'OPC' },
   { path: '/open-platform', icon: KeyRound, label: '开放平台' },
   { path: '/agents', icon: Bot, label: 'Agent' },

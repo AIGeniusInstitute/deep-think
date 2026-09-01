@@ -195,6 +195,20 @@ export interface WebDeps {
     | { runId?: string; definitionId: string; definitionVersion: number; plan: unknown; memberDefIds: Record<string, string>; draft?: boolean }
     | { error: string; detail?: string }
   >;
+  /**
+   * Multi-User Collaboration: build a collaboration (mode-aware team build +
+   * shared-workspace artifact persistence). Delegates to buildCollaboration
+   * (collaboration-builder.ts) which wraps buildTeam with a mode/scenario and
+   * persists deliverables + manifest + shared memory into the shared group
+   * workspace folder. Wired in index.ts where full GraphDeps are in scope.
+   * Returns collabId + runId + plan, or an error.
+   */
+  buildCollaboration?: (
+    input: import('./agent-team/collaboration-builder.js').CollaborationInput,
+  ) => Promise<
+    | import('./agent-team/collaboration-builder.js').CollaborationBuildResult
+    | import('./agent-team/collaboration-builder.js').CollaborationBuildError
+  >;
   handleSpawnCommand?: (
     chatJid: string,
     message: string,

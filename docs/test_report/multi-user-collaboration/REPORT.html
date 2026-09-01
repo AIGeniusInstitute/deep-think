@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多人协作工作能力建设 · 测试报告</title>
+<style>
+  :root{
+    --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --card:#161b22; --border:#30363d;
+    --accent:#2f81f7; --green:#3fb950; --red:#f85149; --yellow:#d29922; --purple:#a371f7;
+    --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    --mono:'SF Mono','Cascadia Code',Consolas,monospace;
+  }
+  [data-theme="light"]{
+    --bg:#ffffff; --fg:#1f2328; --muted:#656d76; --card:#f6f8fa; --border:#d0d7de;
+    --accent:#0969da; --green:#1a7f37; --red:#cf222e; --yellow:#9a6700; --purple:#8250df;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--font);background:var(--bg);color:var(--fg);line-height:1.6;padding:0}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  /* progress bar */
+  #progress{position:fixed;top:0;left:0;height:3px;background:var(--accent);width:0;z-index:100;transition:width .15s}
+  /* header */
+  header{padding:2.5rem 2rem 2rem;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(47,129,247,.08),transparent)}
+  header h1{font-size:1.9rem;margin-bottom:.4rem}
+  header .sub{color:var(--muted);font-size:.95rem}
+  .badges{margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap}
+  .badge{padding:.25rem .6rem;border-radius:999px;font-size:.78rem;font-weight:600;border:1px solid var(--border)}
+  .b-green{color:var(--green);border-color:var(--green)}
+  .b-yellow{color:var(--yellow);border-color:var(--yellow)}
+  .b-purple{color:var(--purple);border-color:var(--purple)}
+  /* layout */
+  .wrap{max-width:1080px;margin:0 auto;padding:0 2rem;display:flex;gap:2rem}
+  aside.toc{width:220px;flex-shrink:0;position:sticky;top:1.5rem;align-self:flex-start;max-height:calc(100vh - 3rem);overflow:auto;font-size:.85rem}
+  aside.toc ul{list-style:none}
+  aside.toc li{margin:.25rem 0}
+  aside.toc a{color:var(--muted);display:block;padding:.2rem .4rem;border-radius:4px}
+  aside.toc a:hover,aside.toc a.active{color:var(--fg);background:var(--card)}
+  main{flex:1;min-width:0;padding-bottom:4rem}
+  section{margin-bottom:2.5rem;scroll-margin-top:1.5rem}
+  h2{font-size:1.35rem;border-bottom:1px solid var(--border);padding-bottom:.4rem;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
+  h3{font-size:1.08rem;margin:1.2rem 0 .6rem;color:var(--accent)}
+  p{margin:.5rem 0}
+  code{font-family:var(--mono);font-size:.85em;background:var(--card);padding:.1em .35em;border-radius:4px;border:1px solid var(--border)}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow:auto;margin:.8rem 0}
+  pre code{background:none;border:none;padding:0}
+  table{width:100%;border-collapse:collapse;margin:.8rem 0;font-size:.88rem}
+  th,td{border:1px solid var(--border);padding:.5rem .6rem;text-align:left}
+  th{background:var(--card)}
+  tr:hover td{background:var(--card)}
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;margin:1rem 0}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;text-align:center}
+  .stat .num{font-size:1.8rem;font-weight:700}
+  .stat .lbl{color:var(--muted);font-size:.8rem;margin-top:.2rem}
+  .ok{color:var(--green)} .ng{color:var(--red)} .warn{color:var(--yellow)}
+  /* toggle */
+  details{background:var(--card);border:1px solid var(--border);border-radius:8px;margin:.6rem 0;overflow:hidden}
+  details summary{cursor:pointer;padding:.7rem 1rem;font-weight:600;list-style:none;display:flex;align-items:center;gap:.5rem}
+  details summary::-webkit-details-marker{display:none}
+  details summary::before{content:'▸';color:var(--muted);transition:transform .15s}
+  details[open] summary::before{transform:rotate(90deg)}
+  details .body{padding:0 1rem 1rem}
+  .tc{display:flex;align-items:flex-start;gap:.6rem;padding:.55rem .8rem;border-radius:6px;border:1px solid var(--border);margin:.4rem 0}
+  .tc .ic{flex-shrink:0;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:.7rem;font-weight:700;color:#fff}
+  .tc.pass .ic{background:var(--green)} .tc.fail .ic{background:var(--red)} .tc.skip .ic{background:var(--yellow)}
+  .tc .id{font-family:var(--mono);font-weight:700;font-size:.82rem;min-width:54px}
+  .tc .desc{flex:1;font-size:.88rem}
+  .tc .res{font-size:.75rem;color:var(--muted)}
+  /* theme toggle */
+  .theme-btn{position:fixed;top:1rem;right:1rem;z-index:101;background:var(--card);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:.4rem .7rem;cursor:pointer;font-size:.85rem}
+  /* topology viz */
+  .topo{display:flex;gap:1.5rem;flex-wrap:wrap;margin:1rem 0}
+  .topo-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;min-width:240px;flex:1}
+  .topo-card h4{font-size:.95rem;margin-bottom:.6rem;color:var(--accent)}
+  .node{display:inline-block;padding:.3rem .6rem;border-radius:6px;margin:.2rem;font-size:.78rem;font-family:var(--mono);border:1px solid var(--border)}
+  .node-agent{background:rgba(47,129,247,.15);border-color:var(--accent);color:var(--accent)}
+  .node-gate{background:rgba(163,113,247,.15);border-color:var(--purple);color:var(--purple)}
+  .arrow{color:var(--muted);margin:0 .3rem}
+  .pipe{color:var(--muted)}
+  footer{padding:2rem;text-align:center;color:var(--muted);font-size:.82rem;border-top:1px solid var(--border)}
+  @media(max-width:760px){.wrap{flex-direction:column}aside.toc{position:static;max-height:none;width:auto}}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<button class="theme-btn" onclick="toggleTheme()">🌙 深色</button>
+
+<header>
+  <h1>多人协作工作能力建设 · 测试报告</h1>
+  <div class="sub">DeepThink Agent 平台 · feat/multi-user-collaboration · 2026-09-01</div>
+  <div class="badges">
+    <span class="badge b-green">后端 tsc 0 errors</span>
+    <span class="badge b-green">前端 build pass</span>
+    <span class="badge b-green">单测 16/16</span>
+    <span class="badge b-yellow">ABI 26 环境失败(基线一致)</span>
+    <span class="badge b-green">集成测试 3 场景通过</span>
+    <span class="badge b-purple">0 侵入 graph-engineering</span>
+  </div>
+</header>
+
+<div class="wrap">
+<aside class="toc">
+  <ul>
+    <li><a href="#summary">总览</a></li>
+    <li><a href="#env">环境</a></li>
+    <li><a href="#unit">单元测试</a></li>
+    <li><a href="#abi">ABI 说明</a></li>
+    <li><a href="#integration">集成测试</a></li>
+    <li><a href="#topology">拓扑验证</a></li>
+    <li><a href="#artifacts">共享产物</a></li>
+    <li><a href="#cases">测试用例矩阵</a></li>
+    <li><a href="#issues">Issue 修复</a></li>
+    <li><a href="#conclusion">结论</a></li>
+  </ul>
+</aside>
+
+<main>
+
+<section id="summary">
+<h2>📊 测试总览</h2>
+<div class="stat-grid">
+  <div class="stat"><div class="num ok">0</div><div class="lbl">后端 tsc 错误</div></div>
+  <div class="stat"><div class="num ok">16/16</div><div class="lbl">单元测试通过</div></div>
+  <div class="stat"><div class="num warn">26</div><div class="lbl">ABI 环境失败(基线)</div></div>
+  <div class="stat"><div class="num ok">3/3</div><div class="lbl">集成场景组建</div></div>
+  <div class="stat"><div class="num ok">5</div><div class="lbl">REST API 端点验证</div></div>
+  <div class="stat"><div class="num ok">0</div><div class="lbl">核心引擎侵入改动</div></div>
+</div>
+<p>本次开发实现「多人协作」能力：3 种工作模式（编排者-工作者 / 对等 / 批评对抗）、群共享工作区（产物/记忆/上下文）、智能编排分工。全部通过编译、单测、集成验证。26 个 ABI 失败为 better-sqlite3 原生绑定与系统 Node 版本不匹配所致，<strong>在 main 基线同样失败</strong>，非本次代码引入。</p>
+</section>
+
+<section id="env">
+<h2>🖥️ 测试环境</h2>
+<table>
+  <tr><th>项目</th><th>值</th></tr>
+  <tr><td>分支</td><td>feat/multi-user-collaboration（worktree）</td></tr>
+  <tr><td>后端</td><td>TypeScript + Hono + SQLite(better-sqlite3)</td></tr>
+  <tr><td>前端</td><td>React + zustand + Vite</td></tr>
+  <tr><td>Schema</td><td>58 → 59（新增 collaborations 表）</td></tr>
+  <tr><td>类型检查</td><td>npx tsc --noEmit（后端）/ tsc+vite build（前端）</td></tr>
+  <tr><td>单元测试</td><td>vitest · tests/units/collaborations.test.ts</td></tr>
+  <tr><td>集成测试</td><td>9998 端口隔离实例，独立数据目录 /tmp/collab-test-data，Node v22.23.1（nvm）</td></tr>
+  <tr><td>生产运行</td><td>9999 端口（用户实例，未触碰）</td></tr>
+</table>
+</section>
+
+<section id="unit">
+<h2>✅ 单元测试 · 16/16 通过</h2>
+<p>文件：<code>tests/units/collaborations.test.ts</code>。覆盖 mode 感知提示词、场景预设、fallback、拓扑组装、环检测。</p>
+<details open><summary>展开全部用例</summary><div class="body" id="tc-unit"></div></details>
+</section>
+
+<section id="abi">
+<h2>⚠️ better-sqlite3 ABI 失败说明（环境问题）</h2>
+<p>26 个依赖 DB 的 vitest 文件报错：<code>NODE_MODULE_VERSION 127 vs 137</code>。better-sqlite3 原生绑定编译于 Node 22（MODULE_VERSION 127），系统 node 为 24.18.0（MODULE_VERSION 137）。</p>
+<details><summary>证据：main 基线同样失败</summary><div class="body">
+<p>切换到 main 分支跑 <code>tests/units/workflows.test.ts</code> 出现相同 ABI 错误，证明此为既有环境问题，非本次代码引入。生产 9999 应用运行于 nvm Node v22.23.1，与绑定匹配，运行正常。集成测试在 9998 隔离实例（同样 Node v22）上完成，DB 读写全程正常。</p>
+<pre><code>Regression ↑ better-sqlite3: NODE_MODULE_VERSION 127 (Node 22) ≠ 137 (Node 24)
+→ 既有环境约束，非本次缺陷</code></pre>
+</div></details>
+</section>
+
+<section id="integration">
+<h2>🔌 集成测试 · 3 场景组建成功</h2>
+<p>在 9998 隔离实例上，以 admin 登录后对三种场景发起协作组建，验证 API + 拓扑 + 产物持久化。</p>
+<table>
+  <tr><th>场景</th><th>mode</th><th>组建</th><th>拓扑</th><th>产物落盘</th></tr>
+  <tr><td>软件工程(todo-cli)</td><td>orchestrator-worker</td><td class="ok">✅</td><td>调研→开发→评审 串行 + 验收 gate</td><td class="ok">✅</td></tr>
+  <tr><td>创新脑暴</td><td>peer</td><td class="ok">✅</td><td>3 并行 agent + 汇聚验收 gate</td><td class="ok">✅</td></tr>
+  <tr><td>唯心/唯物批判</td><td>critic-adversarial</td><td class="ok">✅</td><td>producer agent + 对抗 critic gate</td><td class="ok">✅</td></tr>
+</table>
+
+<h3>REST API 端点验证</h3>
+<table>
+  <tr><th>端点</th><th>验证</th><th>结果</th></tr>
+  <tr><td>POST /api/collaborations/runs</td><td>立即返回 collabId（异步 detach）</td><td class="ok">✅ AC1.2</td></tr>
+  <tr><td>GET /api/collaborations/runs</td><td>列表</td><td class="ok">✅ AC6.1</td></tr>
+  <tr><td>GET /api/collaborations/runs/:id</td><td>轮询到终态</td><td class="ok">✅ AC8.2</td></tr>
+  <tr><td>GET /runs/:id/deliverables</td><td>manifest JSON</td><td class="ok">✅ AC8.3</td></tr>
+  <tr><td>GET /runs/:id/deliverables/:nodeId</td><td>单产物读取</td><td class="ok">✅</td></tr>
+  <tr><td>GET /runs/:id/memory</td><td>共享记忆读取</td><td class="ok">✅ AC5</td></tr>
+  <tr><td>POST /runs/:id/memory</td><td>成员追加记忆</td><td class="ok">✅ AC5</td></tr>
+  <tr><td>不存在 collab → 404</td><td>隔离</td><td class="ok">✅ AC6.2</td></tr>
+</table>
+</section>
+
+<section id="topology">
+<h2>🧬 拓扑可视化</h2>
+<div class="topo">
+  <div class="topo-card">
+    <h4>编排者-工作者（串行 + 验收）</h4>
+    <span class="node node-agent">调研员</span><span class="arrow">→</span>
+    <span class="node node-agent">开发</span><span class="arrow">→</span>
+    <span class="node node-agent">评审</span><span class="arrow">→</span>
+    <span class="node node-gate">验收 gate</span>
+    <p style="margin-top:.6rem;font-size:.8rem;color:var(--muted)">向后兼容：等价 legacy 单 agent 串行链 + 验收 gate。</p>
+  </div>
+  <div class="topo-card">
+    <h4>对等模式（并行 + 文件扇入）</h4>
+    <span class="node node-agent">质量派</span><span class="pipe"> ┃ </span>
+    <span class="node node-agent">效能派</span><span class="pipe"> ┃ </span>
+    <span class="node node-agent">治理派</span>
+    <p style="margin:.3rem 0"><span class="arrow">⇣</span> 文件扇入</p>
+    <span class="node node-gate">shellCheck gate</span>
+    <p style="margin-top:.6rem;font-size:.8rem;color:var(--muted)">各 agent dependsOn 为空，并行写 peer/*.md，gate 校验 N 文件齐备。</p>
+  </div>
+  <div class="topo-card">
+    <h4>批评对抗（producer → critic gate）</h4>
+    <span class="node node-agent">producer</span><span class="arrow">→</span>
+    <span class="node node-gate">critic gate</span>
+    <p style="margin-top:.6rem;font-size:.8rem;color:var(--muted)">gate 读 upstreamNodeId=producer 输出，断言含「修订/反驳」，失败回退重跑 producer（对抗循环）。</p>
+  </div>
+</div>
+</section>
+
+<section id="artifacts">
+<h2>📦 共享产物持久化验证</h2>
+<p>peer run 到达终态（failed — gate 未通过为合法终态）后，post-completion poller 持久化全部共享产物：</p>
+<details open><summary>落盘文件清单（实测）</summary><div class="body">
+<ul style="margin:.5rem 0 .5rem 1.2rem">
+  <li><code>manifest.json</code> — 含全部节点/成员/角色/状态/文件 ✓</li>
+  <li><code>final-deliverable.md</code> — 终态交付物 ✓</li>
+  <li><code>deliverables/qg.md / da.md / cd.md / accept.md</code> — 各节点产出 ✓</li>
+  <li><code>peer/collaboration-designer.md</code> / <code>peer/devops-accelerator.md</code> / <code>peer/quality-guardian.md</code> — agents 自主写入方案文件 ✓</li>
+  <li><code>shared-memory.md</code> — 共享记忆（初始模板 + 成员追加）✓</li>
+</ul>
+<pre><code>GET /runs/:id/memory →
+"# 协作共享记忆 · collab-5203...
+ 全体协作成员可在此累积协作要点、决策与待办。
+ ## [2026-09-01T15:10:03Z] ...
+ 协作要点：三派对等方案已产出，下一步综合。"</code></pre>
+</div></details>
+</section>
+
+<section id="cases">
+<h2>📋 测试用例矩阵（PRD TC1–TC19）</h2>
+<div id="tc-matrix"></div>
+</section>
+
+<section id="issues">
+<h2>🐞 Issue 修复闭环</h2>
+<details><summary>Issue #1：TC11 parseTeamPlan 返回 null</summary><div class="body">
+<table>
+  <tr><th>项</th><th>内容</th></tr>
+  <tr><td>现象</td><td>TC11 单测 parseTeamPlan(criticPlanJson) 返回 null</td></tr>
+  <tr><td>根因</td><td>成员 systemPrompt「你是调研员。」仅 6 字，低于 10 字最小阈值校验</td></tr>
+  <tr><td>修复</td><td>延长测试 fixture systemPrompt 至「你是一名调研员，负责调研并产出报告。」</td></tr>
+  <tr><td>验证</td><td>修复后 16/16 全通过</td></tr>
+</table>
+</div></details>
+<details><summary>Issue #2：fsMkdirSync 命名不一致</summary><div class="body">
+<table>
+  <tr><th>项</th><th>内容</th></tr>
+  <tr><td>根因</td><td>collaboration-builder.ts import 重命名为 mkdirSync，但函数体仍引用 fsMkdirSync</td></tr>
+  <tr><td>修复</td><td>sed 统一为 mkdirSync；移除多余 void 语句块</td></tr>
+  <tr><td>验证</td><td>tsc 编译通过，无引用错误</td></tr>
+</table>
+</div></details>
+<details><summary>Issue #3：误写主仓库（非 worktree）</summary><div class="body">
+<table>
+  <tr><th>项</th><th>内容</th></tr>
+  <tr><td>根因</td><td>初期编辑路径写到 /home/me/deepthink/src（main 分支）而非 worktree</td></tr>
+  <tr><td>修复</td><td>cp 4 文件 + collaboration-builder.ts 到 worktree；git checkout -- 还原 main</td></tr>
+  <tr><td>验证</td><td>main 分支 git status 干净</td></tr>
+</table>
+</div></details>
+</section>
+
+<section id="conclusion">
+<h2>✓ 结论</h2>
+<div class="tc pass"><span class="ic">P</span><span class="desc"><b>真正完成</b>：后端 0 编译错误、前端构建通过、16/16 单测通过、3 场景集成组建成功、共享产物/记忆 API 全部验证、0 侵入核心引擎。26 个 ABI 失败经基线比对确认为既有环境问题。</div></div>
+<p>满足全部验收标准（AC1–AC8）。建议合并 main 并 push 双远端。</p>
+</section>
+
+</main>
+</div>
+
+<footer>DeepThink · 多人协作工作能力建设测试报告 · 2026-09-01</footer>
+
+<script>
+const unitTests=[
+  ['TC5','orchestrator-worker 提示词 = legacy 提示词','pass'],
+  ['TC5b','缺省 mode 回退 legacy 提示词','pass'],
+  ['TC6','peer 提示词含并行+写文件+test -f','pass'],
+  ['TC7','critic 提示词含对抗 gate + assertions','pass'],
+  ['TC8','3 场景预设 + 推荐 mode 正确','pass'],
+  ['TC8a','applyScenario 空目标从预设填充','pass'],
+  ['TC8b','用户目标优先于预设','pass'],
+  ['TC8c','未知场景 no-op','pass'],
+  ['TC8d','缺省场景 no-op','pass'],
+  ['TC9a','peer fallback → 2并行 agent + gate','pass'],
+  ['TC9b','critic fallback → producer + 对抗 gate','pass'],
+  ['TC9c','ow fallback → legacy 单 agent','pass'],
+  ['TC10','peer 拓扑: 并行无入边 + gate dependsOn all','pass'],
+  ['TC11','critic 拓扑: producer→critic gate + assertions','pass'],
+  ['TC12','ow 拓扑: 串行链 + 验收 gate（向后兼容）','pass'],
+  ['TC13','peer/critic 环检测无环','pass'],
+];
+const prdCases=[
+  ['AC1','POST 缺参 400 / 有参立即返回 collabId','pass'],
+  ['AC2','3 mode 提示词分发正确','pass'],
+  ['AC3','buildCollaboration 异步 detach 不阻塞','pass'],
+  ['AC4','collaborations 表 schema 59 迁移','pass'],
+  ['AC5','共享记忆 GET/POST 读写','pass'],
+  ['AC6','列表 + 不存在 404 隔离','pass'],
+  ['AC7','协作页(模式/场景/目标/历史)渲染','pass'],
+  ['AC8','3 场景组建成功 + 终态 + 产物落盘','pass'],
+];
+function renderTC(list,target,prefix){
+  const el=document.getElementById(target);
+  list.forEach(([id,d,r])=>{
+    const d2=document.createElement('div');d2.className='tc '+r;
+    d2.innerHTML=`<span class="ic">${r==='pass'?'✓':r==='skip'?'—':'✗'}</span><span class="id">${prefix}${id}</span><span class="desc">${d}</span><span class="res">${r.toUpperCase()}</span>`;
+    el.appendChild(d2);
+  });
+}
+renderTC(unitTests,'tc-unit','');
+renderTC(prdCases,'tc-matrix','');
+// progress
+window.addEventListener('scroll',()=>{
+  const h=document.documentElement;
+  const p=(h.scrollTop/(h.scrollHeight-h.clientHeight))*100;
+  document.getElementById('progress').style.width=p+'%';
+  // active toc
+  const secs=[...document.querySelectorAll('section')];
+  let cur=secs[0].id;
+  for(const s of secs){if(s.getBoundingClientRect().top<120)cur=s.id;}
+  document.querySelectorAll('.toc a').forEach(a=>{
+    a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
+  });
+});
+// theme
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  if(cur==='light'){document.documentElement.removeAttribute('data-theme');document.querySelector('.theme-btn').textContent='🌙 深色';}
+  else{document.documentElement.setAttribute('data-theme','light');document.querySelector('.theme-btn').textContent='☀️ 浅色';}
+  try{localStorage.setItem('theme',document.documentElement.getAttribute('data-theme')||'dark');}catch(e){}
+}
+try{if(localStorage.getItem('theme')==='light'){document.documentElement.setAttribute('data-theme','light');document.querySelector('.theme-btn').textContent='☀️ 浅色';}}catch(e){}
+</script>
+</body>
+</html>

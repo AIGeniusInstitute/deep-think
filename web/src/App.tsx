@@ -27,6 +27,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ defa
 const LoopsPage = lazy(() => import('./pages/LoopsPage').then(m => ({ default: m.LoopsPage })));
 const GraphPage = lazy(() => import('./pages/GraphPage').then(m => ({ default: m.GraphPage })));
 const TeamPage = lazy(() => import('./pages/TeamPage').then(m => ({ default: m.TeamPage })));
+const CollaborationPage = lazy(() => import('./pages/CollaborationPage').then(m => ({ default: m.CollaborationPage })));
 const WorkflowEditorPage = lazy(() => import('./pages/WorkflowEditorPage').then(m => ({ default: m.WorkflowEditorPage })));
 const OpcPage = lazy(() => import('./pages/OpcPage').then(m => ({ default: m.OpcPage })));
 const SupervisorPage = lazy(() => import('./pages/SupervisorPage').then(m => ({ default: m.SupervisorPage })));
@@ -79,6 +80,7 @@ export function App() {
           <Route path="/loops" element={<Suspense fallback={null}><LoopsPage /></Suspense>} />
           <Route path="/graphs" element={<Suspense fallback={null}><GraphPage /></Suspense>} />
           <Route path="/team" element={<Suspense fallback={null}><TeamPage /></Suspense>} />
+          <Route path="/collaborations" element={<Suspense fallback={null}><CollaborationPage /></Suspense>} />
           <Route path="/workflows" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
           <Route path="/workflows/:id" element={<Suspense fallback={null}><WorkflowEditorPage /></Suspense>} />
           <Route path="/opc" element={<Suspense fallback={null}><OpcPage /></Suspense>} />

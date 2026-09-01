@@ -104,6 +104,23 @@ export interface TeamTaskInput {
    * runs it. Missing → false (legacy "build and immediately run" behavior).
    */
   draft?: boolean;
+  /**
+   * Collaboration mode (multi-user-collaboration module). Drives the
+   * decomposition prompt branch + graph topology in assembleGraphDefinition.
+   * Missing → 'orchestrator-worker' (= legacy serial-chain behavior, backward
+   * compat). peer = N parallel agents each writing a distinct-perspective
+   * deliverable to the shared workspace, terminal gate shellChecks all files;
+   * critic-adversarial = producer agent → adversarial critic gate that re-runs
+   * the producer with critique feedback on failure (reuses gate-rollback).
+   */
+  mode?: 'orchestrator-worker' | 'peer' | 'critic-adversarial';
+  /** Scenario preset id (software-engineering/brainstorm/philosophy-critique).
+   *  Only used to seed goalText/acceptanceCriteria context in the prompt. */
+  scenario?: string;
+  /** Collaboration id, injected by collaboration-builder so peer-mode agent
+   *  prompts can instruct members to write deliverables to
+   *  `collaborations/{collabId}/peer/{member}.md`. */
+  collaborationId?: string;
 }
 
 export interface TeamBuildResult {
