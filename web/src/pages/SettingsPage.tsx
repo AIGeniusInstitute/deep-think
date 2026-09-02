@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 
 import { useAuthStore } from '../stores/auth';
+import { useBillingStore } from '../stores/billing';
 import { SettingsNav } from '../components/settings/SettingsNav';
 import { ClaudeProviderSection } from '../components/settings/ClaudeProviderSection';
 import { RegistrationSection } from '../components/settings/RegistrationSection';
@@ -30,16 +31,29 @@ import { OpencodeEngineSection } from '../components/settings/OpencodeEngineSect
 import { PiEngineSection } from '../components/settings/PiEngineSection';
 import { AutonomySection } from '../components/settings/AutonomySection';
 import { EmbeddingSettingsSection } from '../components/settings/EmbeddingSettingsSection';
+import { TeamPage } from './TeamPage';
+import { CollaborationPage } from './CollaborationPage';
+import { WorkflowEditorPage } from './WorkflowEditorPage';
+import { OpcPage } from './OpcPage';
+import { SupervisorPage } from './SupervisorPage';
+import { HarnessPage } from './HarnessPage';
+import { SandboxPage } from './SandboxPage';
+import { EnginesPage } from './EnginesPage';
+import { MarketplacePage } from './MarketplacePage';
+import { TasksPage } from './TasksPage';
+import { LoopsPage } from './LoopsPage';
+import BillingPage from './BillingPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'pi', 'embedding', 'autonomy'];
+const VALID_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'language', 'atomcode', 'codex', 'opencode', 'pi', 'embedding', 'autonomy', 'team', 'collaborations', 'opc', 'workflows', 'marketplace', 'engines', 'sandbox', 'tasks', 'loops', 'supervisor', 'harness', 'billing'];
 const SYSTEM_TABS: SettingsTab[] = ['claude', 'registration', 'appearance', 'system', 'atomcode', 'codex', 'opencode', 'pi', 'autonomy', 'embedding'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
+const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor', 'team', 'collaborations', 'opc', 'workflows', 'marketplace', 'engines', 'sandbox', 'tasks', 'loops', 'supervisor', 'harness', 'billing'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [navOpen, setNavOpen] = useState(false);
+  const billingEnabled = useBillingStore((s) => s.billingEnabled);
 
   const hasSystemConfigPermission =
     currentUser?.role === 'admin' || !!currentUser?.permissions.includes('manage_system_config');
@@ -102,9 +116,23 @@ export function SettingsPage() {
     if (canManageUsers) {
       tabs.push({ key: 'users', label: '用户' });
     }
+    tabs.push({ key: 'team', label: '团队' });
+    tabs.push({ key: 'collaborations', label: '协作' });
+    tabs.push({ key: 'opc', label: 'OPC' });
+    tabs.push({ key: 'workflows', label: '工作流' });
+    tabs.push({ key: 'marketplace', label: '市场' });
+    tabs.push({ key: 'engines', label: '引擎' });
+    tabs.push({ key: 'sandbox', label: '沙箱' });
+    tabs.push({ key: 'tasks', label: '任务' });
+    tabs.push({ key: 'loops', label: '循环' });
+    tabs.push({ key: 'supervisor', label: '监督者' });
+    tabs.push({ key: 'harness', label: 'Harness' });
+    if (billingEnabled) {
+      tabs.push({ key: 'billing', label: '账单' });
+    }
     tabs.push({ key: 'about', label: '关于' });
     return tabs;
-  }, [canManageSystemConfig, canManageUsers]);
+  }, [canManageSystemConfig, canManageUsers, billingEnabled]);
 
   const tabBarRef = useRef<HTMLDivElement>(null);
 
@@ -143,6 +171,18 @@ export function SettingsPage() {
     pi: 'pi 引擎',
     autonomy: '自主性中枢',
     embedding: 'Embedding 配置',
+    team: '团队',
+    collaborations: '协作',
+    opc: 'OPC',
+    workflows: '工作流',
+    marketplace: '市场',
+    engines: '引擎',
+    sandbox: '沙箱',
+    tasks: '任务',
+    loops: '循环',
+    supervisor: '监督者',
+    harness: 'Harness',
+    billing: '账单',
   };
 
   return (
@@ -196,6 +236,7 @@ export function SettingsPage() {
         canManageSystemConfig={canManageSystemConfig}
         canManageUsers={!!canManageUsers}
         mustChangePassword={mustChangePassword}
+        billingEnabled={billingEnabled}
         open={navOpen}
         onOpenChange={setNavOpen}
       />
@@ -213,6 +254,18 @@ export function SettingsPage() {
             {activeTab === 'bindings' && <BindingsSection />}
             {activeTab === 'usage' && <UsagePage />}
             {activeTab === 'monitor' && <MonitorPage />}
+            {activeTab === 'team' && <TeamPage />}
+            {activeTab === 'collaborations' && <CollaborationPage />}
+            {activeTab === 'opc' && <OpcPage />}
+            {activeTab === 'workflows' && <WorkflowEditorPage />}
+            {activeTab === 'marketplace' && <MarketplacePage />}
+            {activeTab === 'engines' && <EnginesPage />}
+            {activeTab === 'sandbox' && <SandboxPage />}
+            {activeTab === 'tasks' && <TasksPage />}
+            {activeTab === 'loops' && <LoopsPage />}
+            {activeTab === 'supervisor' && <SupervisorPage />}
+            {activeTab === 'harness' && <HarnessPage />}
+            {activeTab === 'billing' && <BillingPage />}
           </>
         ) : (
           <div className="p-4 lg:p-8">
