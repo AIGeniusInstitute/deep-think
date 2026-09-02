@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepthink
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+  annotations:
+    # Session affinity keeps WebSocket connections on the same pod.
+    # timeoutSeconds should exceed typical session duration.
+    # Phase 2 (multi-replica): increase or switch to Redis-based session sharing.
+spec:
+  type: ClusterIP
+  # Sticky sessions for WebSocket (Phase 1 & 2)
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours — long enough for typical chat sessions
+  selector:
+    app.kubernetes.io/name: deepthink
+  ports:
+    - name: http
+      port: 9898
+      targetPort: http
+      protocol: TCP

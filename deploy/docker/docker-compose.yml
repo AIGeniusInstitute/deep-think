@@ -1,0 +1,32 @@
+# DeepThink Server — Docker Compose for local testing
+# Usage: docker compose -f deploy/docker/docker-compose.yml up --build
+
+services:
+  deepthink:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.server
+    ports:
+      - "9999:9898"
+    volumes:
+      - deepthink-data:/data
+    environment:
+      - WEB_PORT=9898
+      - DEEPTHINK_DATA_DIR=/data
+      - TZ=Asia/Shanghai
+      - TRUST_PROXY=true
+      # Set WEB_SESSION_SECRET for reproducible sessions
+      # - WEB_SESSION_SECRET=changeme-secret
+      # Set your API key here or via .env
+      # - ANTHROPIC_API_KEY=sk-ant-xxx
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9898/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  deepthink-data:
+    driver: local

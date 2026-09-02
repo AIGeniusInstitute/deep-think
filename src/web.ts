@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'crypto';
 import path from 'path';
 import { TerminalManager } from './terminal-manager.js';
+import { checkDbReady } from './db.js';
 
 // Static asset root: injected by desktop launcher via env var; defaults to
 // `<cwd>/web/dist` for source-mode deployments.
@@ -268,6 +269,30 @@ app.use(
 // --- Global State ---
 
 let deps: WebDeps | null = null;
+
+// Shutdown flag — set true during graceful shutdown so readiness probe returns 503
+export let isShuttingDown = false;
+export function setShuttingDown(v: boolean) {
+  (isShuttingDown as boolean) = v;
+}
+
+// --- Health Check Endpoints (public, no auth) ---
+
+// Liveness probe: process is alive
+app.get('/health', (c) =>
+  c.json({ status: 'ok', timestamp: Date.now() }),
+);
+
+// Readiness probe: DB is accessible and not shutting down
+app.get('/ready', (c) => {
+  if (isShuttingDown) return c.json({ status: 'not-ready', reason: 'shutting-down' }, 503);
+  try {
+    if (checkDbReady()) return c.json({ status: 'ready', timestamp: Date.now() });
+    return c.json({ status: 'not-ready', reason: 'db-unavailable' }, 503);
+  } catch {
+    return c.json({ status: 'not-ready', reason: 'db-unavailable' }, 503);
+  }
+});
 
 // --- Route Mounting ---
 

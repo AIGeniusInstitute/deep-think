@@ -9659,6 +9659,20 @@ export function closeDatabase(): void {
   }
 }
 
+/**
+ * Check if the database is open and responsive (for readiness probes).
+ * @returns true if `SELECT 1` succeeds, false otherwise.
+ */
+export function checkDbReady(): boolean {
+  try {
+    if (!db) return false;
+    db.prepare('SELECT 1').get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Agent PaaS: Agent Definitions ─────────────────────────
 
 export type AgentDefinitionRow = {

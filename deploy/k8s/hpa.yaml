@@ -1,0 +1,44 @@
+# HorizontalPodAutoscaler for DeepThink
+# Phase 1: min=1 max=1 (single replica due to SQLite single-writer constraint)
+# Phase 2: change min to 2, max to 10 when PostgreSQL + Redis are wired
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: deepthink
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: deepthink
+  minReplicas: 1   # Phase 2: → 2
+  maxReplicas: 1   # Phase 2: → 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

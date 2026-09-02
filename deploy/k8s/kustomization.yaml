@@ -1,0 +1,32 @@
+# Kustomize bundle for DeepThink K8s deployment
+# Usage:
+#   kubectl apply -k deploy/k8s/
+# Or with overrides:
+#   kustomize edit set image deepthink-server:latest=registry.example.com/deepthink:v1.0
+#   kubectl apply -k deploy/k8s/
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  labels:
+    app.kubernetes.io/name: deepthink
+    app.kubernetes.io/version: "1.0"
+
+namespace: deepthink
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml.example
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+# Override image registry/tag for your environment
+# images:
+#   - name: deepthink-server
+#     newTag: v1.0.0
+#     newName: registry.example.com/deepthink-server
