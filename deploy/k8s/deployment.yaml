@@ -7,13 +7,17 @@ metadata:
     app.kubernetes.io/name: deepthink
     app.kubernetes.io/component: web-server
 spec:
-  # Phase 1: single replica (SQLite single-writer constraint).
-  # Phase 2: change to 2+ when PostgreSQL + Redis are wired.
-  replicas: 1
+  # Multi-replica mode: 2+ replicas for horizontal scaling.
+  # Safe because: (a) PostgreSQL handles concurrent writes,
+  # (b) Redis provides distributed locks for scheduler/IM,
+  # (c) WebSocket broadcasts propagate via Redis pub/sub.
+  # For single-replica mode (SQLite only): set replicas: 1, strategy: Recreate.
+  replicas: 2
   strategy:
-    # Recreate ensures no two pods write to the same PVC simultaneously.
-    # Change to RollingUpdate in Phase 2 with RWX PVC + PostgreSQL.
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: deepthink
@@ -23,12 +27,11 @@ spec:
         app.kubernetes.io/name: deepthink
         app.kubernetes.io/component: web-server
     spec:
-      # Graceful shutdown: K8s sends SIGTERM, waits up to 120s.
       terminationGracePeriodSeconds: 120
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
-        fsGroup: 0  # root group for PVC permissions
+        fsGroup: 0
       containers:
         - name: deepthink
           image: deepthink-server:latest
@@ -43,7 +46,6 @@ spec:
             - secretRef:
                 name: deepthink-secret
           env:
-            # Allow overriding per-pod via Downward API if needed
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -51,10 +53,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-              # All persistent data lives under /data (DEEPTHINK_DATA_DIR=/data):
-              #   db/messages.db, groups/, sessions/, memory/, config/,
-              #   skills/, trace-io/, mcp-servers/, harness/
-          # ─── Health Checks ────────────────────────────────
           livenessProbe:
             httpGet:
               path: /health
@@ -71,7 +69,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
-          # ─── Resource Limits ──────────────────────────────
           resources:
             requests:
               cpu: "500m"
@@ -79,22 +76,11 @@ spec:
             limits:
               cpu: "4000m"
               memory: "4Gi"
-          # ─── Lifecycle hooks ──────────────────────────────
           lifecycle:
             preStop:
               exec:
-                # Trigger graceful shutdown before SIGTERM (give kube-proxy time to remove endpoint)
                 command: ["sh", "-c", "sleep 5 && kill -TERM 1"]
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: deepthink-data
-      # ─── Node affinity / tolerations (optional) ───────────
-      # affinity:
-      #   nodeAffinity:
-      #     requiredDuringSchedulingIgnoredDuringExecution:
-      #       nodeSelectorTerms:
-      #         - matchExpressions:
-      #             - key: node-role.kubernetes.io/worker
-      #               operator: In
-      #               values: ["true"]

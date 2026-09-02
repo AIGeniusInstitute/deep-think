@@ -15,18 +15,15 @@ data:
 
   # ─── Web / Proxy ────────────────────────────
   TRUST_PROXY: "true"
-  # CORS_ALLOWED_ORIGINS: "https://deepthink.example.com"
   MAX_FILE_SIZE_MB: "50"
 
   # ─── Agent Runtime ──────────────────────────
-  # Phase 1: host mode (no Docker-in-Docker in K8s)
   CONTAINER_IMAGE: "deepthink-agent:latest"
-  # MAX_CONCURRENT_HOST_PROCESSES: "5"
 
-  # ─── Database ───────────────────────────────
-  # Leave empty to use SQLite (default, Phase 1)
-  # Set to postgres://user:pass@host:5432/deepthink for PostgreSQL (Phase 2)
-  DATABASE_URL: ""
+  # ─── Database (PostgreSQL for multi-pod) ────
+  # Set in secret: DATABASE_URL=postgresql://user:pass@postgres:5432/deepthink
+  # Leave empty for SQLite (single-replica mode)
 
-  # ─── Redis (Phase 2 — leave empty for single-replica) ──
-  REDIS_URL: ""
+  # ─── Redis (multi-pod shared state) ─────────
+  # Points to the Redis service in the same namespace
+  REDIS_URL: "redis://redis:6379"

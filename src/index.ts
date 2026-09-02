@@ -174,7 +174,7 @@ import type {
   WhatsAppConnectConfig,
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
-import { startSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
+import { startSchedulerLoop, stopSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
 import {
   startSupervisorLoop,
   bootRecoverSupervisor,
@@ -10592,6 +10592,20 @@ function migrateGlobalMemoryToPerUser(): void {
 async function main(): Promise<void> {
   migrateDataDirectories();
   warnOnLegacyRepoData();
+
+  // ─── PostgreSQL sync driver initialization (multi-pod mode) ───
+  // When DATABASE_URL points to PostgreSQL, initialize the sync driver
+  // BEFORE initDatabase() so the PG-backed Database constructor can use it.
+  if (
+    process.env.DATABASE_URL &&
+    (process.env.DATABASE_URL.startsWith('postgresql://') ||
+      process.env.DATABASE_URL.startsWith('postgres://'))
+  ) {
+    const { initPgSyncDriver } = await import('./pg-sync-driver.js');
+    await initPgSyncDriver(process.env.DATABASE_URL);
+    logger.info('PostgreSQL sync driver initialized — multi-pod DB mode');
+  }
+
   initDatabase();
   logger.info('Database initialized');
 
@@ -10728,6 +10742,10 @@ async function main(): Promise<void> {
 
     // Run cleanup tasks concurrently with a tight timeout
     await Promise.allSettled([
+      // Stop scheduler and release distributed leader lease
+      stopSchedulerLoop().catch((err) =>
+        logger.warn({ err }, 'Error stopping scheduler'),
+      ),
       // Abort all active streaming cards before disconnecting IM,
       // so users see "服务维护中" instead of a stuck "生成中..." card.
       // Race with a 5s timeout to avoid a hung Feishu API blocking shutdown.

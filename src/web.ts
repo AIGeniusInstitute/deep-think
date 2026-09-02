@@ -7,6 +7,13 @@ import crypto from 'crypto';
 import path from 'path';
 import { TerminalManager } from './terminal-manager.js';
 import { checkDbReady } from './db.js';
+import {
+  initRedis,
+  subscribeWsBroadcast,
+  isRedisConnected,
+  closeRedis,
+  publishWsBroadcast,
+} from './redis-bus.js';
 
 // Static asset root: injected by desktop launcher via env var; defaults to
 // `<cwd>/web/dist` for source-mode deployments.
@@ -2046,7 +2053,7 @@ function setupWebSocket(server: any): WebSocketServer {
  *     与代码不一致，代码 default-deny 更安全所以保留代码、对齐注释。
  *   - Set<string>: only these users (admin must be an explicit member to see)
  */
-function safeBroadcast(
+function safeBroadcastLocal(
   msg: WsMessageOut,
   adminOnly = false,
   allowedUserIds?: Set<string> | null,
@@ -2107,6 +2114,21 @@ function safeBroadcast(
       wsClients.delete(client);
     }
   }
+}
+
+/**
+ * Broadcast to local WebSocket clients AND publish to Redis (for cross-pod propagation).
+ * When Redis is not configured, this is identical to safeBroadcastLocal (single-pod mode).
+ */
+function safeBroadcast(
+  msg: WsMessageOut,
+  adminOnly = false,
+  allowedUserIds?: Set<string> | null,
+): void {
+  // 1. Send to local clients immediately (synchronous, zero latency for same-pod)
+  safeBroadcastLocal(msg, adminOnly, allowedUserIds);
+  // 2. Fire-and-forget publish to Redis for cross-pod propagation
+  publishWsBroadcast(msg, adminOnly, allowedUserIds ?? null).catch(() => {});
 }
 
 /**
@@ -2991,6 +3013,22 @@ export function startWebServer(webDeps: WebDeps): void {
   // Broadcast status every 5 seconds
   if (statusInterval) clearInterval(statusInterval);
   statusInterval = setInterval(broadcastStatus, 5000);
+
+  // ─── Redis: cross-pod WebSocket broadcast subscription ───
+  // When REDIS_URL is set, subscribe to the broadcast channel so messages
+  // published by other pods are forwarded to this pod's local WebSocket clients.
+  initRedis().then(() => {
+    if (!isRedisConnected()) return; // single-process mode, skip
+    subscribeWsBroadcast((msg, adminOnly, allowedUserIds) => {
+      // Received a broadcast from another pod — forward to local clients only
+      // (do NOT re-publish to Redis, avoiding infinite loop)
+      safeBroadcastLocal(msg as WsMessageOut, adminOnly, allowedUserIds);
+    }).catch((err) => {
+      logger.warn({ err }, 'Failed to subscribe to Redis WS broadcast channel');
+    });
+  }).catch((err) => {
+    logger.warn({ err }, 'Redis init failed — running in single-process mode');
+  });
 }
 
 // --- Exports ---
@@ -3023,6 +3061,8 @@ export async function shutdownWebServer(): Promise<void> {
     httpServer.close();
     httpServer = null;
   }
+  // Close Redis connections (multi-pod mode)
+  await closeRedis().catch(() => {});
 }
 
 export type { WebDeps } from './web-context.js';
