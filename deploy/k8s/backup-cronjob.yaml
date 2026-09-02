@@ -1,0 +1,54 @@
+# Backup CronJob — creates a SQLite backup copy daily
+# The .backup command does an online backup that is safe during writes.
+# Requires a writable PVC (backup subdirectory).
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: deepthink-backup
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+spec:
+  schedule: "0 3 * * *"  # Daily at 03:00 local time
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 0
+          containers:
+            - name: backup
+              image: deepthink-server:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_DIR="/data/backups"
+                  mkdir -p "$BACKUP_DIR"
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_FILE="$BACKUP_DIR/messages-${STAMP}.db"
+                  echo "Backing up SQLite database to $BACKUP_FILE..."
+                  node -e "
+                    const Database = require('better-sqlite3');
+                    const src = new Database('/data/db/messages.db', { readonly: true });
+                    src.backup('$BACKUP_FILE');
+                    src.close();
+                    console.log('Backup complete: $BACKUP_FILE');
+                  "
+                  # Cleanup: keep only last 7 backups
+                  ls -t "$BACKUP_DIR"/messages-*.db | tail -n +8 | xargs -r rm -v
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: deepthink-data

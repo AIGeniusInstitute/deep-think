@@ -246,6 +246,7 @@ import {
   shutdownWebServer,
   getActiveStreamingTexts,
   clearStreamingSnapshot,
+  setShuttingDown,
 } from './web.js';
 import {
   installSkillForUser,
@@ -10688,16 +10689,17 @@ async function main(): Promise<void> {
     }
     shutdownInProgress = true;
     shuttingDown = true;
+    setShuttingDown(true); // mark not-ready so K8s readiness probe returns 503
     logger.info({ signal }, 'Shutdown signal received, cleaning up...');
 
-    // Force exit after 30s if graceful shutdown hangs.
-    // Must be longer than queue.shutdown() grace period (15s) plus container
-    // force-stop time (~10s) to avoid killing the process while agents are
-    // still shutting down gracefully.
+    // Force exit after 120s if graceful shutdown hangs.
+    // Must be longer than queue.shutdown() grace period (15s) plus agent
+    // force-stop time plus K8s terminationGracePeriodSeconds (120s) to avoid
+    // killing the process while agents are still shutting down gracefully.
     const forceExitTimer = setTimeout(() => {
       logger.warn('Graceful shutdown timed out, force exiting');
       process.exit(1);
-    }, 30_000);
+    }, 120_000);
     forceExitTimer.unref();
 
     if (feishuSyncInterval) {

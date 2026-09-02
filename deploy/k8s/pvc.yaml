@@ -1,0 +1,19 @@
+# PersistentVolumeClaim for DeepThink data
+# Phase 1 (single replica): ReadWriteOnce is sufficient
+# Phase 2 (multi-replica): change to ReadWriteMany + NFS/CephFS StorageClass
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: deepthink-data
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+spec:
+  # Phase 1: RWO (single pod). Phase 2: RWX (multi pod — needs NFS/CephFS/EFs).
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: nfs-client  # Uncomment and change for RWX in Phase 2
+  resources:
+    requests:
+      storage: 100Gi

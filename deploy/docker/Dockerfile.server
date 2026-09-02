@@ -1,0 +1,78 @@
+# DeepThink Server Dockerfile (K8s / cloud deployment)
+# Multi-stage build: backend + frontend + agent-runner → production image
+
+# ─── Stage 1: Backend build ─────────────────────────────
+FROM node:22-slim AS backend-builder
+WORKDIR /app
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+COPY package*.json ./
+RUN npm ci --registry=${NPM_REGISTRY}
+COPY tsconfig.json ./
+COPY src/ ./src/
+COPY web/tsconfig.json web/tsconfig*.json ./web/
+RUN npx tsc --noEmit false 2>/dev/null || npx tsc
+
+# ─── Stage 2: Frontend build ────────────────────────────
+FROM node:22-slim AS frontend-builder
+WORKDIR /app/web
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+COPY web/package*.json ./
+RUN npm ci --registry=${NPM_REGISTRY}
+COPY web/ ./
+RUN npm run build
+
+# ─── Stage 3: Agent runner build ────────────────────────
+FROM node:22-slim AS agent-builder
+WORKDIR /app/container/agent-runner
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+COPY container/agent-runner/package*.json ./
+RUN npm ci --registry=${NPM_REGISTRY}
+COPY container/agent-runner/ ./
+RUN npm run build
+
+# ─── Stage 4: Production image ──────────────────────────
+FROM node:22-slim AS production
+WORKDIR /app
+
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+# Install build tools for native modules (better-sqlite3) + runtime deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install production dependencies (includes better-sqlite3)
+COPY package*.json ./
+RUN npm ci --omit=dev --registry=${NPM_REGISTRY}
+
+# Copy build artifacts
+COPY --from=backend-builder /app/dist ./dist
+COPY --from=frontend-builder /app/web/dist ./web/dist
+COPY --from=agent-builder /app/container/agent-runner/dist ./container/agent-runner/dist
+
+# Copy runtime config and skills
+COPY config/ ./config/
+COPY container/skills/ ./container/skills/
+COPY container/entrypoint.sh ./container/entrypoint.sh
+
+# Non-root user
+RUN useradd -r -u 1000 -g root deepthink \
+    && mkdir -p /data \
+    && chown -R deepthink:root /app /data
+
+USER deepthink
+
+# Environment defaults
+ENV DEEPTHINK_DATA_DIR=/data
+ENV WEB_PORT=9898
+ENV TZ=Asia/Shanghai
+ENV NODE_ENV=production
+
+EXPOSE 9898
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:9898/health || exit 1
+
+CMD ["node", "dist/index.js"]

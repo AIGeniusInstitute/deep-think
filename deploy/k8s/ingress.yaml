@@ -1,0 +1,36 @@
+# Ingress for DeepThink — supports WebSocket (long-lived connections)
+# Requires an ingress controller (nginx-ingress recommended).
+# TLS: provide a TLS secret or use cert-manager for auto-cert.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: deepthink
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+  annotations:
+    # ─── WebSocket support ──────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: deepthink
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # ─── TLS redirect (uncomment for production) ────────────
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  # tls:
+  #   - hosts: ["deepthink.example.com"]
+  #     secretName: deepthink-tls
+  rules:
+    - host: deepthink.example.com  # ← Change to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: deepthink
+                port:
+                  name: http
