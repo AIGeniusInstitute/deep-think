@@ -19,6 +19,16 @@ import {
   Globe,
   Cpu,
   Activity,
+  Users,
+  Handshake,
+  Building2,
+  Workflow,
+  ShoppingBag,
+  Boxes,
+  Clock4,
+  Repeat,
+  GitBranch,
+  Wallet,
 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type { SettingsTab } from './types';
@@ -27,7 +37,7 @@ interface NavItem {
   key: SettingsTab;
   label: string;
   icon: React.ReactNode;
-  group: 'system' | 'account' | 'features';
+  group: 'system' | 'account' | 'features' | 'apps';
 }
 
 const systemItems: NavItem[] = [
@@ -64,17 +74,34 @@ const featureItems: NavItem[] = [
   { key: 'about', label: '关于', icon: <Info className="w-4 h-4" />, group: 'features' },
 ];
 
+// 收纳自原一级菜单的应用入口（应用功能页）
+const appItems: NavItem[] = [
+  { key: 'team', label: '团队', icon: <Users className="w-4 h-4" />, group: 'apps' },
+  { key: 'collaborations', label: '协作', icon: <Handshake className="w-4 h-4" />, group: 'apps' },
+  { key: 'opc', label: 'OPC', icon: <Building2 className="w-4 h-4" />, group: 'apps' },
+  { key: 'workflows', label: '工作流', icon: <Workflow className="w-4 h-4" />, group: 'apps' },
+  { key: 'marketplace', label: '市场', icon: <ShoppingBag className="w-4 h-4" />, group: 'apps' },
+  { key: 'engines', label: '引擎', icon: <Cpu className="w-4 h-4" />, group: 'apps' },
+  { key: 'sandbox', label: '沙箱', icon: <Boxes className="w-4 h-4" />, group: 'apps' },
+  { key: 'tasks', label: '任务', icon: <Clock4 className="w-4 h-4" />, group: 'apps' },
+  { key: 'loops', label: '循环', icon: <Repeat className="w-4 h-4" />, group: 'apps' },
+  { key: 'supervisor', label: '监督者', icon: <ShieldCheck className="w-4 h-4" />, group: 'apps' },
+  { key: 'harness', label: 'Harness', icon: <GitBranch className="w-4 h-4" />, group: 'apps' },
+  { key: 'billing', label: '账单', icon: <Wallet className="w-4 h-4" />, group: 'apps' },
+];
+
 interface SettingsNavProps {
   activeTab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
   canManageSystemConfig: boolean;
   canManageUsers: boolean;
   mustChangePassword: boolean;
+  billingEnabled?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
 
-export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, canManageUsers, mustChangePassword, open, onOpenChange }: SettingsNavProps) {
+export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, canManageUsers, mustChangePassword, billingEnabled = false, open, onOpenChange }: SettingsNavProps) {
   const visibleItems: { group: string; items: NavItem[] }[] = [];
 
   if (canManageSystemConfig) {
@@ -89,6 +116,14 @@ export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, can
   });
   if (visibleFeatures.length > 0) {
     visibleItems.push({ group: '更多功能', items: visibleFeatures });
+  }
+
+  const visibleApps = appItems.filter((item) => {
+    if (item.key === 'billing' && !billingEnabled) return false;
+    return true;
+  });
+  if (visibleApps.length > 0) {
+    visibleItems.push({ group: '应用入口', items: visibleApps });
   }
 
   const isDisabled = (item: NavItem) => mustChangePassword && item.key !== 'profile';
