@@ -41,6 +41,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { acquireSchedulerLease, releaseSchedulerLease, isRedisConnected } from './redis-bus.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
@@ -1145,6 +1146,20 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       setTimeout(loop, 60_000);
       return;
     }
+
+    // ─── Distributed leader election (multi-pod mode) ───
+    // When Redis is connected, only the pod holding the scheduler lease
+    // executes the tick. Others sleep and retry. This prevents duplicate
+    // task execution across replicas. Single-process mode always passes.
+    if (isRedisConnected()) {
+      const isLeader = await acquireSchedulerLease();
+      if (!isLeader) {
+        // Another pod is the leader — skip this tick
+        setTimeout(loop, SCHEDULER_POLL_INTERVAL);
+        return;
+      }
+    }
+
     try {
       // Periodic cleanup of old task run logs (every 24h)
       const now = Date.now();
@@ -1304,6 +1319,16 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   };
 
   loop();
+}
+
+/**
+ * Stop the scheduler loop and release the distributed leader lease.
+ * Called during graceful shutdown.
+ */
+export async function stopSchedulerLoop(): Promise<void> {
+  schedulerRunning = false;
+  await releaseSchedulerLease().catch(() => {});
+  logger.info('Scheduler loop stopped');
 }
 
 /**

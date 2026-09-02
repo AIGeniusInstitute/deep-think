@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepThink 真正横向多 Pod 无状态化 — 测试报告</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--purple:#bc8cff}
+@media(prefers-color-scheme:light){:root{--bg:#fff;--surface:#f6f8fa;--border:#d0d7de;--text:#1f2328;--dim:#656d76;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--blue:#0969da;--purple:#8250df}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+.header{background:linear-gradient(135deg,#1f6feb,#8957e5);color:#fff;padding:48px 24px;text-align:center}
+.header h1{font-size:2em;margin-bottom:8px}
+.container{max-width:960px;margin:0 auto;padding:32px 24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:32px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;text-align:center}
+.card .num{font-size:2.5em;font-weight:700}
+.card .label{color:var(--dim);font-size:.85em;margin-top:4px}
+.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.blue{color:var(--blue)}
+h2{font-size:1.4em;margin:32px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;margin-bottom:16px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:.9em}
+th{background:var(--surface);font-weight:600}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.8em;font-weight:600}
+.badge.pass{background:rgba(63,185,80,.15);color:var(--green)}
+.badge.fail{background:rgba(248,81,73,.15);color:var(--red)}
+.badge.skip{background:rgba(210,153,34,.15);color:var(--yellow)}
+.code{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin:8px 0;font-family:Consolas,monospace;font-size:.85em;overflow-x:auto;white-space:pre;color:var(--dim)}
+.footer{text-align:center;color:var(--dim);padding:24px;border-top:1px solid var(--border);margin-top:32px}
+.arch{text-align:center;margin:24px 0}
+.arch pre{text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:.8em;overflow-x:auto;color:var(--dim)}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🚀 DeepThink 真正横向多 Pod 无状态化 — 测试报告</h1>
+  <div>2026-09-03 | Branch: feat/full-horizontal-scaling</div>
+</div>
+
+<div class="container">
+  <div class="grid">
+    <div class="card"><div class="num green">6</div><div class="label">通过用例</div></div>
+    <div class="card"><div class="num red">0</div><div class="label">失败用例</div></div>
+    <div class="card"><div class="num yellow">3</div><div class="label">待集群验证</div></div>
+    <div class="card"><div class="num blue">6</div><div class="label">新文件</div></div>
+    <div class="card"><div class="num blue">4</div><div class="label">修改文件</div></div>
+    <div class="card"><div class="num green">100%</div><div class="label">核心改造完成</div></div>
+  </div>
+
+  <h2>1. 架构改造</h2>
+  <div class="arch">
+    <pre>  Ingress (TLS + WebSocket)
+       │
+  Service (sticky session)
+       │
+  ┌────┴────┬────────┐
+  │Pod-1   │Pod-2   │Pod-N      ← 多副本无状态 Pod
+  │Hono+WS │Hono+WS │Hono+WS
+  └──┬─────┴──┬─────┘
+     │        │
+     │  Redis Pub/Sub  ← 跨 Pod 事件总线
+     │  (广播+锁+选主)
+     │        │
+     └────────┘
+              │
+     PostgreSQL (pgvector) ← 多写者持久化</pre>
+  </div>
+
+  <h2>2. 四大重构验证</h2>
+  <table>
+    <tr><th>方向</th><th>改动</th><th>验证</th><th>结果</th></tr>
+    <tr><td><b>A. Redis 事件总线</b></td><td>safeBroadcast 拆分(本地+Redis发布); startWebServer 初始化+订阅; shutdown 清理</td><td>单进程退化 no-op; 启动无 Redis 错误</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td><b>B. 分布式选主</b></td><td>task-scheduler.ts acquireSchedulerLease; stopSchedulerLoop</td><td>单进程退化为 true(永远 leader)</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td><b>C. PostgreSQL 桥</b></td><td>pg-sync-driver.ts worker_thread+Atomics; sql-translator.ts ?→$1/BLOB→BYTEA; sqlite-compat.ts 三后端</td><td>tsc 编译通过; 未设 DATABASE_URL 时走 SQLite</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td><b>D. K8s 多副本</b></td><td>deployment 2 replicas; PVC RWX; HPA 2-10; Redis+PG 部署清单</td><td>YAML 语法正确; 待集群验证</td><td><span class="badge skip">PENDING</span></td></tr>
+  </table>
+
+  <h2>3. 测试用例详情</h2>
+  <table>
+    <tr><th>用例</th><th>测试</th><th>预期</th><th>实际</th><th>结果</th></tr>
+    <tr><td>TC-01</td><td>GET /health, /ready</td><td>200</td><td>{"status":"ok"} 200, {"status":"ready"} 200</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-02</td><td>tsc --noEmit</td><td>零错误</td><td>零错误 (exit 0)</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-05</td><td>无 REDIS_URL 启动</td><td>正常退化</td><td>启动成功, 无 Redis 错误</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-06</td><td>SIGTERM 优雅关闭</td><td>exit 0</td><td>"Redis connections closed" + "Shutdown complete" exit 0</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-08</td><td>/login + /assets</td><td>200</td><td>HTTP 200</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-09</td><td>Redis init 单进程模式</td><td>优雅跳过</td><td>无 Redis 连接日志, 正常运行</td><td><span class="badge pass">PASS</span></td></tr>
+    <tr><td>TC-10</td><td>数据库多后端选择</td><td>SQLite 默认</td><td>无 DATABASE_URL → SQLite</td><td><span class="badge pass">PASS</span></td></tr>
+  </table>
+
+  <h2>4. 优雅关闭日志证据</h2>
+  <div class="code">[00:46:06.874] INFO: Shutdown signal received, cleaning up...
+    signal: "SIGTERM"
+[00:46:06.875] INFO: GroupQueue shutdown complete
+[00:46:06.875] INFO: Redis connections closed      ← Redis 优雅清理
+[00:46:06.893] INFO: Shutdown complete              ← exit 0</div>
+
+  <h2>5. 新增文件清单</h2>
+  <table>
+    <tr><th>文件</th><th>功能</th><th>行数</th></tr>
+    <tr><td>src/redis-bus.ts</td><td>Redis 事件总线 (pub/sub + 锁 + 选主 + IPC + 计数器)</td><td>~210</td></tr>
+    <tr><td>src/pg-sync-driver.ts</td><td>PostgreSQL 同步桥 (worker_thread + Atomics)</td><td>~160</td></tr>
+    <tr><td>src/sql-translator.ts</td><td>SQLite → PostgreSQL SQL 翻译器</td><td>~115</td></tr>
+    <tr><td>deploy/k8s/redis.yaml</td><td>Redis K8s Deployment + PVC + Service</td><td>~55</td></tr>
+    <tr><td>deploy/k8s/postgres.yaml</td><td>PostgreSQL StatefulSet (pgvector)</td><td>~65</td></tr>
+    <tr><td>scripts/migrate-sqlite-to-postgres.mjs</td><td>SQLite → PG 数据迁移</td><td>~160</td></tr>
+  </table>
+
+  <h2>6. 待集群验证项</h2>
+  <table>
+    <tr><th>用例</th><th>描述</th><th>所需环境</th></tr>
+    <tr><td>TC-07</td><td>多 Pod Redis pub/sub 跨 Pod 广播</td><td>K8s + Redis</td></tr>
+    <tr><td>TC-11</td><td>调度器选主(多 Pod 只一个执行)</td><td>K8s + Redis</td></tr>
+    <tr><td>TC-12</td><td>PostgreSQL 多写者并发</td><td>K8s + PostgreSQL</td></tr>
+  </table>
+
+  <div class="footer">
+    DeepThink Full Horizontal Scaling — Test Report<br>
+    2026-09-03 | Branch: feat/full-horizontal-scaling
+  </div>
+</div>
+</body>
+</html>
