@@ -8,7 +8,8 @@
        admin-create admin-passwd admin-set \
        desktop-install web-install desktop-build-deps desktop-build desktop-fetch-node \
        desktop-rebuild-natives desktop-dev desktop-pack-mac desktop-pack-mac-x64 \
-       desktop-pack-mac-all desktop-pack-win desktop-pack-linux
+       desktop-pack-mac-all desktop-pack-win desktop-pack-linux \
+       setup k8s-deploy docker-deploy health generate-tray-icons
 
 # ─── Runtime ────────────────────────────────────────────────
 # 本项目只用原生 Node 工具链运行（npm / npx / tsx / node），不使用 bun。
@@ -769,6 +770,28 @@ release-delete: ## 删除 release 及 tag（用法: make release-delete VERSION=
 	git tag -d "$(VERSION)" 2>/dev/null || true
 	git push origin --delete "$(VERSION)" 2>/dev/null || true
 	@echo "✅ 已删除 $(VERSION)"
+
+# ─── Ops / 一键部署 ────────────────────────────────────────
+# 详见 docs/ops/runbook.md。脚本均幂等，可安全重复执行。
+
+setup: ## 一键部署本地开发环境（检查依赖→安装→编译→初始化→设admin→启动）。--no-start 只装不启
+	@./scripts/bootstrap.sh $(ARGS)
+
+k8s-deploy: ## 一键部署 K8s（生成 Secret→配置域名/镜像→apply→等就绪→初始化 admin）。ARGS='--domain x --image y --apikey z'
+	@./deploy/k8s/deploy.sh $(ARGS)
+
+docker-deploy: ## 一键部署 Docker 单机（生成密钥→构建→up→健康检查）。ARGS='--port 9999 --apikey sk-ant-xxx'
+	@./deploy/docker/deploy.sh $(ARGS)
+
+health: ## 健康检查（探测本地 :$(PORT) 的 /health 与 /ready 端点）
+	@echo "=== DeepThink 健康检查 (端口 $(PORT)) ==="
+	@for ep in health ready; do \
+	  if curl -sf "http://localhost:$(PORT)/$$ep" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  /$$ep: {d.get(\"status\",d)}')" 2>/dev/null; then :; \
+	  else echo "  /$$ep: ❌ 不可达"; fi; \
+	done
+
+generate-tray-icons: ## 生成桌面版托盘图标（需 ImageMagick，无则 fallback）
+	@./scripts/generate-tray-icons.sh
 
 # ─── Help ────────────────────────────────────────────────────
 

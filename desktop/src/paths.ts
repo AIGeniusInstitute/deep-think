@@ -51,23 +51,23 @@ function resolveDevOrPackaged(devRelative: string, packagedRelative: string, env
 export const backendEntry = resolveDevOrPackaged(
   'dist',
   'backend',
-  'DEEPTHIK_BACKEND_DIR',
+  'DEEPTHINK_BACKEND_DIR',
 ) + '/index.js';
 
 export const webDistDir = resolveDevOrPackaged(
   'web/dist',
   'web-dist',
-  'DEEPTHIK_WEB_DIST_DIR',
+  'DEEPTHINK_WEB_DIST_DIR',
 );
 
 export const agentRunnerDir = resolveDevOrPackaged(
   'container/agent-runner',
   'agent-runner',
-  'DEEPTHIK_AGENT_RUNNER_DIR',
+  'DEEPTHINK_AGENT_RUNNER_DIR',
 );
 
 export const nodeBinary = (() => {
-  const envValue = process.env.DEEPTHIK_NODE_BINARY;
+  const envValue = process.env.DEEPTHINK_NODE_BINARY;
   if (envValue) return path.resolve(envValue);
   if (isPackaged) {
     const name = process.platform === 'win32' ? 'node.exe' : 'node';

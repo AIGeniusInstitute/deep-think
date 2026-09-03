@@ -1,5 +1,6 @@
-# DeepThink Server — Docker Compose for local testing
-# Usage: docker compose -f deploy/docker/docker-compose.yml up --build
+# DeepThink Server — Docker Compose（生产单机部署）
+# 一键启动：./deploy/docker/deploy.sh --port 9999 --apikey sk-ant-xxx
+# 手动启动：docker compose -f deploy/docker/docker-compose.yml --env-file deploy/docker/.env up -d --build
 
 services:
   deepthink:
@@ -7,18 +8,17 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.server
     ports:
-      - "9999:9898"
+      - "${HOST_PORT:-9999}:9898"
     volumes:
       - deepthink-data:/data
+    env_file:
+      - ./deploy/docker/.env
     environment:
       - WEB_PORT=9898
       - DEEPTHINK_DATA_DIR=/data
-      - TZ=Asia/Shanghai
-      - TRUST_PROXY=true
-      # Set WEB_SESSION_SECRET for reproducible sessions
-      # - WEB_SESSION_SECRET=changeme-secret
-      # Set your API key here or via .env
-      # - ANTHROPIC_API_KEY=sk-ant-xxx
+      - TZ=${TZ:-Asia/Shanghai}
+      - TRUST_PROXY=${TRUST_PROXY:-true}
+      # WEB_SESSION_SECRET / ANTHROPIC_API_KEY 经 .env 注入（见 deploy/docker/.env）
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9898/health"]

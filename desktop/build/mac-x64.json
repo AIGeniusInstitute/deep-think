@@ -2,6 +2,11 @@
   "appId": "com.aigeniusinstitute.deepthink",
   "productName": "DeepThink",
   "directories": { "output": "release", "buildResources": "resources" },
+  "publish": {
+    "provider": "github",
+    "owner": "AIGeniusInstitute",
+    "repo": "deepthink"
+  },
   "files": [
     "dist/**/*",
     "package.json",
