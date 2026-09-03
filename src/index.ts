@@ -175,6 +175,7 @@ import type {
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop, stopSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
+import { isRedisConnected, subscribeAgentIpc } from './redis-bus.js';
 import {
   startSupervisorLoop,
   bootRecoverSupervisor,
@@ -604,12 +605,12 @@ let messageLoopRunning = false;
 let ipcWatcherRunning = false;
 let shuttingDown = false;
 
-// ── IPC Watcher Manager (event-driven fs.watch + fallback polling) ──
+// ── IPC Watcher Manager (event-driven fs.watch + fallback polling + Redis bridge) ──
 
 class IpcWatcherManager {
   private watchers = new Map<
     string,
-    { watchers: fs.FSWatcher[]; refCount: number }
+    { watchers: fs.FSWatcher[]; refCount: number; redisUnsub?: () => void }
   >();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private processingFolders = new Set<string>();
@@ -659,6 +660,45 @@ class IpcWatcherManager {
       }
     }
     this.watchers.set(folder, { watchers: folderWatchers, refCount: 1 });
+
+    // Redis bridge: subscribe to cross-pod IPC channel for this group.
+    // When another pod publishes a message (user message, _close, _drain, _interrupt),
+    // write it to the local input dir so the local agent-runner picks it up.
+    if (isRedisConnected()) {
+      const inputDir = path.join(DATA_DIR, 'ipc', folder, 'input');
+      subscribeAgentIpc(folder, (payload) => {
+        try {
+          fs.mkdirSync(inputDir, { recursive: true });
+          if (payload.type === '_close') {
+            fs.writeFileSync(path.join(inputDir, '_close'), '');
+          } else if (payload.type === '_drain') {
+            fs.writeFileSync(path.join(inputDir, '_drain'), '');
+          } else if (payload.type === '_interrupt') {
+            fs.writeFileSync(path.join(inputDir, '_interrupt'), '');
+          } else if (payload.type === 'message') {
+            // Write message JSON file (atomic: .tmp → rename, matching sendMessage protocol)
+            const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+            const filepath = path.join(inputDir, filename);
+            const tempPath = `${filepath}.tmp`;
+            fs.writeFileSync(tempPath, JSON.stringify({
+              type: 'message',
+              text: payload.text,
+              images: payload.images,
+              sourceJid: payload.sourceJid,
+              taskId: payload.taskId,
+            }));
+            fs.renameSync(tempPath, filepath);
+          }
+        } catch (err) {
+          logger.warn({ err, folder, payload: payload.type }, 'Redis IPC bridge: failed to write local file');
+        }
+      }).then((unsub) => {
+        const entry = this.watchers.get(folder);
+        if (entry) entry.redisUnsub = unsub;
+      }).catch(() => {
+        // non-fatal — fs.watch + fallback polling still work
+      });
+    }
   }
 
   /** Stop watching a group's IPC directories. Called when a container/process stops. */
@@ -672,6 +712,10 @@ class IpcWatcherManager {
       try {
         w.close();
       } catch {}
+    }
+    // Unsubscribe from Redis IPC channel
+    if (entry.redisUnsub) {
+      try { entry.redisUnsub(); } catch { /* ignore */ }
     }
     this.watchers.delete(folder);
     const timer = this.debounceTimers.get(folder);
@@ -736,6 +780,9 @@ class IpcWatcherManager {
         try {
           w.close();
         } catch {}
+      }
+      if (entry.redisUnsub) {
+        try { entry.redisUnsub(); } catch { /* ignore */ }
       }
     }
     this.watchers.clear();
