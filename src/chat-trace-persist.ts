@@ -28,6 +28,7 @@ import type { TraceStepUpsertInput } from './db.js';
 import { logger } from './logger.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DATA_DIR } from './config.js';
 
 const TOOL_IO_MAX = 64 * 1024; // 64KB per input/output JSON — trace volume guard
 const COARSE_NODE_TYPES = new Set([
@@ -115,7 +116,11 @@ function truncate(s: string, max: number): string {
 
 /** Resolve (and lazily create) the on-disk dir for a trace's large I/O files. */
 function traceIoDir(traceId: string): string {
-  const dir = join(process.cwd(), 'data', 'trace-io', traceId);
+  // DATA_DIR points at the shared PVC in K8s (mountPath /data). Using
+  // process.cwd() here wrote to the ephemeral container fs (/app/data) —
+  // trace files were lost on pod restart, leaving DB output_ref as dangling
+  // pointers. Pin to DATA_DIR so offloaded I/O survives restarts.
+  const dir = join(DATA_DIR, 'trace-io', traceId);
   try {
     mkdirSync(dir, { recursive: true });
   } catch {
