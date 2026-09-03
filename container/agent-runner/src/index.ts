@@ -2436,16 +2436,51 @@ function forceExitWithSafetyNet(code: number): never {
 
 async function main(): Promise<void> {
   // Distributed mode: initialize Redis IPC, read task from Redis instead of stdin.
-  // The process exits after the task (K8s restarts the pod for the next task).
   if (distributedMode) {
     await initRedisIpc();
     if (!isRedisIpcConnected()) {
       console.error('[main] Distributed mode requested but Redis connection failed, exiting');
       process.exit(1);
     }
-    log('Distributed agent-runner mode — waiting for task from Redis');
+    // Propagate Redis env to child processes (codex/opencode → mcp-bridge).
+    // mcp-bridge reads DT_REDIS_URL + DT_DISTRIBUTED_MODE to switch from
+    // file-system IPC to Redis pub/sub.
+    process.env.DT_REDIS_URL = process.env.REDIS_URL || '';
+    process.env.DT_DISTRIBUTED_MODE = 'true';
+    log('Distributed agent-runner mode — long-running task loop active');
   }
 
+  // Distributed mode: loop forever, processing tasks one at a time.
+  // Non-distributed mode: single task from stdin, then exit.
+  if (distributedMode) {
+    while (true) {
+      try {
+        await processOneTask();
+      } catch (err) {
+        log(`Task processing error (continuing loop): ${err instanceof Error ? err.message : String(err)}`);
+        // Emit error output if possible, then continue to next task
+        try {
+          writeOutput({ status: 'error', result: null, error: String(err) });
+        } catch { /* stdout may be closed */ }
+      }
+      // Per-task cleanup: reset state for the next task
+      if (redisIpcUnsub) { try { redisIpcUnsub(); } catch { /* ignore */ } redisIpcUnsub = null; }
+      currentGroupFolder = '';
+      redisIpcQueue.length = 0;
+      log('Task complete, waiting for next task from Redis...');
+    }
+  } else {
+    await processOneTask();
+    forceExitWithSafetyNet(0);
+  }
+}
+
+/**
+ * Process a single agent task. Extracted from main() to support the
+ * long-running loop in distributed mode. Returns on normal completion;
+ * throws on fatal error (caught by the loop in distributed mode).
+ */
+async function processOneTask(): Promise<void> {
   let containerInput: ContainerInput;
 
   try {
@@ -2505,7 +2540,7 @@ async function main(): Promise<void> {
         turnId: containerInput.turnId,
       });
     }
-    process.exit(0);
+    return;
   }
   if (engine === 'codex') {
     log('Engine = codex, routing to codex-engine adapter');
@@ -2524,7 +2559,7 @@ async function main(): Promise<void> {
         turnId: containerInput.turnId,
       });
     }
-    process.exit(0);
+    return;
   }
   if (engine === 'opencode') {
     log('Engine = opencode, routing to opencode-engine adapter');
@@ -2543,7 +2578,7 @@ async function main(): Promise<void> {
         turnId: containerInput.turnId,
       });
     }
-    process.exit(0);
+    return;
   }
   if (engine === 'pi') {
     log('Engine = pi, routing to pi-engine adapter');
@@ -2562,7 +2597,7 @@ async function main(): Promise<void> {
         turnId: containerInput.turnId,
       });
     }
-    process.exit(0);
+    return;
   }
 
   // 模型是 provider 配置的硬契约（经 ANTHROPIC_MODEL 注入）。缺失即配置错误——
@@ -3474,20 +3509,16 @@ async function main(): Promise<void> {
     forceExitWithSafetyNet(1);
   }
 
-  // Clean up Redis IPC before exit (distributed mode)
+  // Clean up Redis IPC before exit (distributed mode — only on fatal errors
+  // that reach this point; normal completion returns to the loop in main())
   if (distributedMode) {
     await closeRedisIpc().catch(() => {});
   }
 
-  // main() 正常结束后必须显式退出。
-  // SDK 内部可能留有未关闭的异步资源（MCP 连接、定时器等），
-  // 如果不调用 process.exit()，Node.js 事件循环不会自动退出，
-  // 导致 agent-runner 进程以 0% CPU 挂起，阻塞队列。
-  //
-  // Safety net: 当 SDK 的后台 Task (run_in_background) 持有异步资源时，
-  // process.exit() 可能无法终止进程。5 秒后强制 SIGKILL。
-  // 参考 GitHub issue #236。
-  forceExitWithSafetyNet(0);
+  // Normal task completion — return to caller (main loop or main()).
+  // In non-distributed mode, main() calls forceExitWithSafetyNet(0) after
+  // processOneTask() returns. In distributed mode, the loop continues.
+  return;
 }
 
 // 处理管道断开（EPIPE）：父进程关闭管道后仍有写入时，静默退出避免 code 1 错误输出
@@ -3503,7 +3534,7 @@ async function main(): Promise<void> {
  * 这类错误通常发生在结果已输出之后，属于"收尾写入失败"，
  * 不应把整个 host query 标记为启动失败（code 1）。
  */
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   log('Received SIGTERM, exiting gracefully');
   // Emit latest session ID so the host can persist it before we exit.
   // Without this, the host starts a fresh session on restart, losing context.
@@ -3511,6 +3542,10 @@ process.on('SIGTERM', () => {
     try {
       writeOutput({ status: 'success', result: null, newSessionId: latestSessionId });
     } catch { /* stdout may be closed */ }
+  }
+  // Clean up Redis IPC in distributed mode
+  if (distributedMode) {
+    try { await closeRedisIpc(); } catch { /* ignore */ }
   }
   forceExitWithSafetyNet(0);
 });

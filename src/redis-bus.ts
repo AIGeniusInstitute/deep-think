@@ -263,6 +263,90 @@ export async function decrCounter(key: string): Promise<number> {
   }
 }
 
+// ─── IPC Output: agent-runner/mcp-bridge → web server ────────
+
+const IPC_OUTPUT_PREFIX = 'deepthink:ipc-out:';
+const IPC_TASK_RESULT_PREFIX = 'deepthink:ipc-task:';
+const AGENT_TASKS_CHANNEL = 'deepthink:agent-tasks';
+
+/**
+ * 订阅 agent-runner / mcp-bridge 的输出通道。
+ * agent-runner 的 writeOutput() 发布 { type: 'agent_output', output }。
+ * mcp-bridge 的 send_message 发布 { type: 'message', text, ... }。
+ * mcp-bridge 的 task 请求发布到 tasks 子通道。
+ */
+export async function subscribeIpcOutput(
+  groupFolder: string,
+  subdir: 'messages' | 'tasks',
+  handler: (payload: any) => void,
+): Promise<() => void> {
+  const sub = getSub();
+  if (!sub) return () => {};
+  const channel = `${IPC_OUTPUT_PREFIX}${groupFolder}:${subdir}`;
+  await sub.subscribe(channel, (raw: string) => {
+    try {
+      handler(JSON.parse(raw));
+    } catch (err) {
+      logger.warn({ err, raw, channel }, 'Failed to parse Redis IPC output');
+    }
+  });
+  return () => {
+    try { sub.unsubscribe(channel); } catch { /* ignore */ }
+  };
+}
+
+/**
+ * 发布 task result 回 mcp-bridge（分布式模式下 writeTaskResult 调用）。
+ * mcp-bridge 的 requestTaskResult 订阅 deepthink:ipc-task:{folder}:{requestId} 等待。
+ */
+export async function publishIpcTaskResult(
+  groupFolder: string,
+  requestId: string,
+  result: any,
+): Promise<void> {
+  const pub = getPub();
+  if (!pub) return;
+  try {
+    await pub.publish(
+      `${IPC_TASK_RESULT_PREFIX}${groupFolder}:${requestId}`,
+      JSON.stringify(result),
+    );
+  } catch (err) {
+    logger.debug({ err, groupFolder, requestId }, 'Redis publishIpcTaskResult failed');
+  }
+}
+
+/**
+ * 发布任务到分布式 agent-runner 队列。
+ * agent-runner 的 waitForTask() 从 deepthink:agent-tasks 消费。
+ */
+export async function publishAgentTask(taskInput: any): Promise<void> {
+  const pub = getPub();
+  if (!pub) return;
+  try {
+    await pub.publish(AGENT_TASKS_CHANNEL, JSON.stringify(taskInput));
+  } catch (err) {
+    logger.warn({ err }, 'Redis publishAgentTask failed');
+  }
+}
+
+// ─── Distributed Agent Runner Pool ─────────────────────────
+
+/**
+ * 检查是否有分布式 agent-runner 可用。
+ * agent-runner 启动时注册到 deepthink:agent-runners:pool 集合。
+ */
+export async function hasDistributedRunners(): Promise<boolean> {
+  const pub = getPub();
+  if (!pub) return false;
+  try {
+    const count = await pub.sCard('deepthink:agent-runners:pool');
+    return count && count > 0;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Shutdown ───────────────────────────────────────────
 
 /** 关闭所有 Redis 连接(优雅关闭时调用)。 */

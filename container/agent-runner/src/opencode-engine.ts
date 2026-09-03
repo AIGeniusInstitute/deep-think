@@ -150,6 +150,7 @@ async function writeOpencodeConfigFile(
       'DT_CHAT_JID', 'DT_GROUP_FOLDER', 'DT_IS_HOME', 'DT_IS_ADMIN_HOME',
       'DT_IPC_DIR', 'DT_WORKSPACE_GROUP', 'DT_WORKSPACE_GLOBAL',
       'DT_WORKSPACE_MEMORY', 'DT_DISABLE_MEMORY_LAYER',
+      'DT_REDIS_URL', 'DT_DISTRIBUTED_MODE',
     ]) {
       if (process.env[k] !== undefined) {
         environment[k] = String(process.env[k]);

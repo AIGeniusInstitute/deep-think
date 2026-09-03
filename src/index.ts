@@ -175,7 +175,7 @@ import type {
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop, stopSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
-import { isRedisConnected, subscribeAgentIpc } from './redis-bus.js';
+import { isRedisConnected, subscribeAgentIpc, subscribeIpcOutput, publishIpcTaskResult, publishAgentTask, hasDistributedRunners } from './redis-bus.js';
 import {
   startSupervisorLoop,
   bootRecoverSupervisor,
@@ -610,7 +610,7 @@ let shuttingDown = false;
 class IpcWatcherManager {
   private watchers = new Map<
     string,
-    { watchers: fs.FSWatcher[]; refCount: number; redisUnsub?: () => void }
+    { watchers: fs.FSWatcher[]; refCount: number; redisUnsub?: () => void; redisOutputUnsubs: (() => void)[] }
   >();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private processingFolders = new Set<string>();
@@ -618,6 +618,9 @@ class IpcWatcherManager {
   private fallbackTimer: ReturnType<typeof setInterval> | null = null;
   private processGroupFn: ((folder: string) => Promise<void>) | null = null;
   private processFullFn: (() => Promise<void>) | null = null;
+  // Distributed output handlers: when a distributed agent-runner publishes
+  // agent_output via Redis, route it to the registered onOutput callback.
+  private distributedOutputHandlers = new Map<string, (output: any) => Promise<void>>();
 
   /** Bind the per-group and full-scan processing functions (set once from startIpcWatcher). */
   bind(
@@ -659,13 +662,17 @@ class IpcWatcherManager {
         // Watch failed — fallback polling will handle it
       }
     }
-    this.watchers.set(folder, { watchers: folderWatchers, refCount: 1 });
+    this.watchers.set(folder, { watchers: folderWatchers, refCount: 1, redisOutputUnsubs: [] });
 
-    // Redis bridge: subscribe to cross-pod IPC channel for this group.
-    // When another pod publishes a message (user message, _close, _drain, _interrupt),
-    // write it to the local input dir so the local agent-runner picks it up.
+    // Redis bridge: subscribe to cross-pod IPC channels for this group.
     if (isRedisConnected()) {
       const inputDir = path.join(DATA_DIR, 'ipc', folder, 'input');
+      const messagesDir = path.join(DATA_DIR, 'ipc', folder, 'messages');
+      const tasksDir = path.join(DATA_DIR, 'ipc', folder, 'tasks');
+
+      // 1) Input direction (deepthink:ipc:{folder}) — Phase 4:
+      // Other pods publish user messages / control signals; we write them
+      // to the local input dir so the local agent-runner picks them up.
       subscribeAgentIpc(folder, (payload) => {
         try {
           fs.mkdirSync(inputDir, { recursive: true });
@@ -676,7 +683,6 @@ class IpcWatcherManager {
           } else if (payload.type === '_interrupt') {
             fs.writeFileSync(path.join(inputDir, '_interrupt'), '');
           } else if (payload.type === 'message') {
-            // Write message JSON file (atomic: .tmp → rename, matching sendMessage protocol)
             const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
             const filepath = path.join(inputDir, filename);
             const tempPath = `${filepath}.tmp`;
@@ -698,7 +704,71 @@ class IpcWatcherManager {
       }).catch(() => {
         // non-fatal — fs.watch + fallback polling still work
       });
+
+      // 2) Output direction (deepthink:ipc-out:{folder}:messages) — NEW:
+      // Distributed agent-runner's writeOutput() publishes { type: 'agent_output', output }
+      // and mcp-bridge's send_message publishes { type: 'message', ... }.
+      // Route agent_output to the registered onOutput handler; write message
+      // payloads to the local messages/ dir so processGroupIpc picks them up.
+      subscribeIpcOutput(folder, 'messages', (payload) => {
+        try {
+          if (payload.type === 'agent_output' && payload.output) {
+            const handler = this.distributedOutputHandlers.get(folder);
+            if (handler) {
+              handler(payload.output).catch((err) => {
+                logger.warn({ err, folder }, 'Distributed onOutput handler error');
+              });
+            } else {
+              logger.debug({ folder }, 'Distributed agent_output received but no handler registered');
+            }
+          } else if (payload.type === 'message') {
+            // mcp-bridge send_message via Redis — write to local messages/ dir
+            fs.mkdirSync(messagesDir, { recursive: true });
+            const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+            const filepath = path.join(messagesDir, filename);
+            const tempPath = `${filepath}.tmp`;
+            fs.writeFileSync(tempPath, JSON.stringify(payload));
+            fs.renameSync(tempPath, filepath);
+            this.debouncedProcess(folder);
+          }
+        } catch (err) {
+          logger.warn({ err, folder, payload: payload.type }, 'Redis IPC output (messages): failed to process');
+        }
+      }).then((unsub) => {
+        const entry = this.watchers.get(folder);
+        if (entry) entry.redisOutputUnsubs.push(unsub);
+      }).catch(() => { /* non-fatal */ });
+
+      // 3) Task requests from distributed mcp-bridge (deepthink:ipc-out:{folder}:tasks)
+      // Write to local tasks/ dir so processGroupIpc handles them.
+      // writeTaskResult will publish the result back via Redis.
+      subscribeIpcOutput(folder, 'tasks', (payload) => {
+        try {
+          fs.mkdirSync(tasksDir, { recursive: true });
+          const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+          const filepath = path.join(tasksDir, filename);
+          const tempPath = `${filepath}.tmp`;
+          fs.writeFileSync(tempPath, JSON.stringify(payload));
+          fs.renameSync(tempPath, filepath);
+          this.debouncedProcess(folder);
+        } catch (err) {
+          logger.warn({ err, folder, payload: payload.type }, 'Redis IPC output (tasks): failed to write local file');
+        }
+      }).then((unsub) => {
+        const entry = this.watchers.get(folder);
+        if (entry) entry.redisOutputUnsubs.push(unsub);
+      }).catch(() => { /* non-fatal */ });
     }
+  }
+
+  /** Register an onOutput handler for distributed agent-runner output. */
+  registerDistributedOutput(folder: string, handler: (output: any) => Promise<void>): void {
+    this.distributedOutputHandlers.set(folder, handler);
+  }
+
+  /** Unregister the distributed output handler. */
+  unregisterDistributedOutput(folder: string): void {
+    this.distributedOutputHandlers.delete(folder);
   }
 
   /** Stop watching a group's IPC directories. Called when a container/process stops. */
@@ -713,10 +783,15 @@ class IpcWatcherManager {
         w.close();
       } catch {}
     }
-    // Unsubscribe from Redis IPC channel
+    // Unsubscribe from Redis IPC channels
     if (entry.redisUnsub) {
       try { entry.redisUnsub(); } catch { /* ignore */ }
     }
+    for (const unsub of entry.redisOutputUnsubs) {
+      try { unsub(); } catch { /* ignore */ }
+    }
+    // Clean up distributed output handler
+    this.distributedOutputHandlers.delete(folder);
     this.watchers.delete(folder);
     const timer = this.debounceTimers.get(folder);
     if (timer) {
@@ -5040,7 +5115,57 @@ async function runAgent(
 
     let output: ContainerOutput;
 
-    if (executionMode === 'host') {
+    if (isRedisConnected() && await hasDistributedRunners()) {
+      // Distributed mode: dispatch task to remote agent-runner via Redis.
+      // Output is received via the IpcWatcherManager's ipc-out subscription.
+      const taskInput = {
+        prompt,
+        sessionId,
+        turnId,
+        groupFolder: group.folder,
+        chatJid,
+        currentSourceJid,
+        isMain: isAdminHome,
+        isHome,
+        isAdminHome,
+        images,
+        messageTaskId,
+        reminderConfig: buildReminderConfig(group.created_by, prompt),
+        engine: group.engine,
+      };
+
+      // Register the onOutput handler for this group's distributed output.
+      // The IpcWatcherManager routes agent_output messages from Redis to this handler.
+      const finalOutputPromise = new Promise<ContainerOutput>((resolve) => {
+        const distributedHandler = async (agentOutput: ContainerOutput) => {
+          if (wrappedOnOutput) {
+            await wrappedOnOutput(agentOutput);
+          }
+          if (
+            agentOutput.status === 'success' ||
+            agentOutput.status === 'error' ||
+            agentOutput.status === 'closed'
+          ) {
+            resolve(agentOutput);
+          }
+        };
+        ipcWatcherManager?.registerDistributedOutput(group.folder, distributedHandler);
+      });
+
+      // Timeout safety: if no terminal output within 10 minutes, return error.
+      const timeoutPromise = new Promise<ContainerOutput>((resolve) => {
+        setTimeout(() => {
+          resolve({ status: 'error', result: null, error: 'Distributed agent-runner timeout (10min)' });
+        }, 600_000);
+      });
+
+      // Publish the task to the distributed agent-runner queue
+      await publishAgentTask(taskInput);
+
+      // Wait for the final output (or timeout)
+      output = await Promise.race([finalOutputPromise, timeoutPromise]);
+      ipcWatcherManager?.unregisterDistributedOutput(group.folder);
+    } else if (executionMode === 'host') {
       output = await runHostAgent(
         group,
         {
@@ -6075,6 +6200,26 @@ function writeTaskResult(
     fs.renameSync(tmpPath, resultFilePath);
   } catch (err) {
     logger.error({ tasksDir, type, requestId, err }, 'Failed to write task IPC result');
+  }
+
+  // Distributed mode: also publish the result via Redis so the remote
+  // mcp-bridge (on another Pod) can receive it without file-system access.
+  // The folder is derived from the tasksDir path: ipc/{folder}/.../tasks
+  if (isRedisConnected()) {
+    try {
+      const tasksDirResolved = path.resolve(tasksDir);
+      // Walk up to find the folder: .../ipc/{folder}/tasks or .../ipc/{folder}/agents/{id}/tasks etc.
+      const ipcIdx = tasksDirResolved.lastIndexOf(`${path.sep}ipc${path.sep}`);
+      if (ipcIdx !== -1) {
+        const afterIpc = tasksDirResolved.slice(ipcIdx + 5); // skip "/ipc/"
+        const folder = afterIpc.split(path.sep)[0];
+        if (folder) {
+          publishIpcTaskResult(folder, requestId, payload).catch(() => {});
+        }
+      }
+    } catch {
+      // non-fatal — local file write already succeeded
+    }
   }
 }
 

@@ -41,6 +41,79 @@ const WORKSPACE_GLOBAL = process.env.DT_WORKSPACE_GLOBAL ?? '/workspace/global';
 const WORKSPACE_MEMORY = process.env.DT_WORKSPACE_MEMORY ?? '/workspace/memory';
 const DISABLE_MEMORY_LAYER = process.env.DT_DISABLE_MEMORY_LAYER === 'true';
 
+// ─── Distributed Redis mode ────────────────────────────────
+const REDIS_URL = process.env.DT_REDIS_URL || process.env.REDIS_URL || '';
+const DISTRIBUTED_MODE = process.env.DT_DISTRIBUTED_MODE === 'true' || process.env.AGENT_RUNNER_MODE === 'distributed';
+const distributedMode = !!REDIS_URL && DISTRIBUTED_MODE;
+
+let _redisPub: any = null;
+let _redisSub: any = null;
+let _redisConnected = false;
+
+const IPC_OUTPUT_PREFIX = 'deepthink:ipc-out:';
+const IPC_TASK_RESULT_PREFIX = 'deepthink:ipc-task:';
+
+async function initRedisBridge(): Promise<void> {
+  if (!distributedMode) return;
+  try {
+    const { createClient } = await import('redis');
+    _redisPub = createClient({ url: REDIS_URL });
+    _redisSub = createClient({ url: REDIS_URL });
+    _redisPub.on('error', () => {});
+    _redisSub.on('error', () => {});
+    await _redisPub.connect();
+    await _redisSub.connect();
+    _redisConnected = true;
+    console.error('[mcp-bridge] Redis bridge connected — distributed IPC mode active');
+  } catch (err) {
+    console.error('[mcp-bridge] Redis connection failed, falling back to file-system IPC:', err);
+    _redisConnected = false;
+  }
+}
+
+async function redisPublishMessage(data: object): Promise<void> {
+  if (!_redisConnected) return;
+  try {
+    await _redisPub.publish(
+      `${IPC_OUTPUT_PREFIX}${GROUP_FOLDER}:messages`,
+      JSON.stringify(data),
+    );
+  } catch { /* non-fatal */ }
+}
+
+async function redisRequestTask(
+  data: Record<string, unknown> & { requestId: string },
+  resultFilePrefix: string,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  const resultChannel = `${IPC_TASK_RESULT_PREFIX}${GROUP_FOLDER}:${data.requestId}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { _redisSub.unsubscribe(resultChannel); } catch { /* ignore */ }
+      reject(new Error(`Task result timeout (${timeoutMs}ms)`));
+    }, timeoutMs);
+
+    _redisSub.subscribe(resultChannel, (raw: string) => {
+      clearTimeout(timer);
+      try { _redisSub.unsubscribe(resultChannel); } catch { /* ignore */ }
+      try {
+        resolve(JSON.parse(raw) as Record<string, unknown>);
+      } catch (err) {
+        reject(new Error(`Failed to parse task result: ${err}`));
+      }
+    }).catch(() => {
+      clearTimeout(timer);
+      reject(new Error('Failed to subscribe to result channel'));
+    });
+
+    // Publish the request to the tasks channel
+    _redisPub.publish(
+      `${IPC_OUTPUT_PREFIX}${GROUP_FOLDER}:tasks`,
+      JSON.stringify(data),
+    ).catch(() => {});
+  });
+}
+
 if (!CHAT_JID || !GROUP_FOLDER || !IPC_DIR) {
   console.error('[mcp-bridge] Missing required env vars: DT_CHAT_JID, DT_GROUP_FOLDER, DT_IPC_DIR');
   process.exit(1);
@@ -51,6 +124,12 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
 // ─── IPC helpers (mirror mcp-tools.ts) ─────────────────────
 function writeIpcFile(dir: string, data: object): void {
+  // Distributed mode: send_message goes via Redis (fire-and-forget).
+  // Task requests are handled by pollIpcResult's distributed path.
+  if (_redisConnected && dir === MESSAGES_DIR) {
+    redisPublishMessage(data).catch(() => {});
+    return;
+  }
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
   const tempPath = `${filepath}.tmp`;
@@ -74,6 +153,10 @@ async function pollIpcResult(
   resultFilePrefix: string,
   timeoutMs: number = 30_000,
 ): Promise<Record<string, unknown>> {
+  // Distributed mode: use Redis request/response pattern.
+  if (_redisConnected) {
+    return redisRequestTask(data, resultFilePrefix, timeoutMs);
+  }
   const resultFileName = `${resultFilePrefix}_${data.requestId}.json`;
   const resultFilePath = path.join(dir, resultFileName);
   writeIpcFile(dir, data);
@@ -564,7 +647,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 const transport = new StdioServerTransport();
-server.connect(transport).catch((err) => {
-  console.error('[mcp-bridge] Failed to start server:', err);
-  process.exit(1);
+
+// Initialize Redis bridge before connecting (distributed mode only).
+// This must happen before the server starts handling tool calls.
+initRedisBridge().finally(() => {
+  server.connect(transport).catch((err) => {
+    console.error('[mcp-bridge] Failed to start server:', err);
+    process.exit(1);
+  });
+});
+
+// Graceful cleanup on exit
+process.on('SIGTERM', async () => {
+  try {
+    if (_redisPub) await _redisPub.quit().catch(() => {});
+    if (_redisSub) await _redisSub.quit().catch(() => {});
+  } catch { /* ignore */ }
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  try {
+    if (_redisPub) await _redisPub.quit().catch(() => {});
+    if (_redisSub) await _redisSub.quit().catch(() => {});
+  } catch { /* ignore */ }
+  process.exit(0);
 });
