@@ -1,6 +1,19 @@
-# Backup CronJob — creates a SQLite backup copy daily
-# The .backup command does an online backup that is safe during writes.
-# Requires a writable PVC (backup subdirectory).
+# Backup CronJob — daily disaster-recovery backup.
+#
+# PG mode (DATABASE_URL set): runs `pg_dump | gzip` against the PostgreSQL
+# service, writing a compressed logical dump to the PVC. This is the cloud /
+# multi-pod target. The image MUST ship pg_dump — postgres:16-alpine does.
+# (Earlier this used deepthink-server:latest, a node image with no pg_dump, so
+# the PG branch hit the "pg_dump missing" guard and silently skipped every
+# night — the CronJob stayed green but produced zero backups.)
+#
+# SQLite mode (no DATABASE_URL): best-effort `cp` of messages.db + WAL/SHM.
+# SQLite single-replica is not the cloud target; the node + better-sqlite3
+# online .backup() path is unavailable in the postgres image, so cp is the
+# pragmatic fallback.
+#
+# Requires a writable PVC (backup subdirectory) mounted at /data.
+# DATABASE_URL is injected via the deepthink-secret (same as web-server).
 
 apiVersion: batch/v1
 kind: CronJob
@@ -25,7 +38,10 @@ spec:
             fsGroup: 0
           containers:
             - name: backup
-              image: deepthink-server:latest
+              image: postgres:16-alpine
+              envFrom:
+                - secretRef:
+                    name: deepthink-secret
               command:
                 - /bin/sh
                 - -c
@@ -35,31 +51,27 @@ spec:
                   mkdir -p "$BACKUP_DIR"
                   STAMP=$(date +%Y%m%d-%H%M%S)
                   if [ -n "$DATABASE_URL" ]; then
-                    # PostgreSQL mode — pg_dump a compressed logical backup.
-                    # Image must ship pg_dump (postgresql-client). If absent we
-                    # warn + skip rather than crash, so the CronJob stays green.
-                    if command -v pg_dump >/dev/null 2>&1; then
-                      BACKUP_FILE="$BACKUP_DIR/pg-${STAMP}.sql.gz"
-                      echo "Backing up PostgreSQL to $BACKUP_FILE..."
-                      pg_dump "$DATABASE_URL" | gzip > "$BACKUP_FILE"
-                      echo "PostgreSQL backup complete: $BACKUP_FILE"
-                    else
-                      echo "WARN: DATABASE_URL set but pg_dump missing — install postgresql-client in image. Skipping PG backup." >&2
-                    fi
+                    # ── PostgreSQL (cloud / multi-pod) ──
+                    BACKUP_FILE="$BACKUP_DIR/pg-${STAMP}.sql.gz"
+                    echo "Backing up PostgreSQL to $BACKUP_FILE (pg_dump | gzip)..."
+                    pg_dump "$DATABASE_URL" | gzip > "$BACKUP_FILE"
+                    echo "PostgreSQL backup complete: $BACKUP_FILE"
                   else
-                    # SQLite mode — .backup is an online snapshot safe during writes.
+                    # ── SQLite (single-replica, non-cloud) ── best-effort cp
+                    SRC="/data/db/messages.db"
+                    if [ ! -f "$SRC" ]; then
+                      echo "No SQLite database at $SRC — nothing to back up."
+                      exit 0
+                    fi
                     BACKUP_FILE="$BACKUP_DIR/messages-${STAMP}.db"
-                    echo "Backing up SQLite database to $BACKUP_FILE..."
-                    node -e "
-                      const Database = require('better-sqlite3');
-                      const src = new Database('/data/db/messages.db', { readonly: true });
-                      src.backup('$BACKUP_FILE');
-                      src.close();
-                      console.log('SQLite backup complete: $BACKUP_FILE');
-                    "
+                    echo "Copying SQLite database to $BACKUP_FILE..."
+                    cp "$SRC" "$BACKUP_FILE"
+                    cp "$SRC-wal" "$BACKUP_FILE-wal" 2>/dev/null || true
+                    cp "$SRC-shm" "$BACKUP_FILE-shm" 2>/dev/null || true
+                    echo "SQLite backup complete: $BACKUP_FILE"
                   fi
-                  # Cleanup: keep only last 7 backups (any type)
-                  ls -t "$BACKUP_DIR"/*.db "$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm -v
+                  # Retention: keep only the last 7 backups (any type)
+                  ls -1t "$BACKUP_DIR"/*.db "$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm -v
               volumeMounts:
                 - name: data
                   mountPath: /data

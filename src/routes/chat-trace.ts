@@ -28,6 +28,7 @@ import {
 } from '../db.js';
 import { readFileSync } from 'node:fs';
 import { resolve, relative } from 'node:path';
+import { DATA_DIR } from '../config.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
@@ -104,8 +105,12 @@ router.get('/:jid/trace/steps/:spanId/io', async (c) => {
   if (!step || !step.output_ref) {
     return c.json({ error: 'No offloaded I/O for this step' }, 404);
   }
-  // Path-traversal guard: the ref must resolve under data/trace-io/.
-  const ioRoot = resolve(process.cwd(), 'data', 'trace-io');
+  // Path-traversal guard: the ref must resolve under DATA_DIR/trace-io/.
+  // Must match the WRITE side (chat-trace-persist.ts traceIoDir, which uses
+  // DATA_DIR). Earlier this read process.cwd()/data/trace-io while the writer
+  // used DATA_DIR — the mismatch made every offloaded I/O read fail the guard
+  // and return 400, so trace tool I/O was write-only / unreadable.
+  const ioRoot = resolve(DATA_DIR, 'trace-io');
   const resolved = resolve(step.output_ref);
   const rel = relative(ioRoot, resolved);
   if (rel.startsWith('..') || resolve(ioRoot, rel) !== resolved) {

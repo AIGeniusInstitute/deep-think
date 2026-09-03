@@ -13,6 +13,7 @@ fs.mkdirSync(tmpGroupsDir, { recursive: true });
 vi.mock('../src/config.js', async () => ({
   STORE_DIR: tmpStoreDir,
   GROUPS_DIR: tmpGroupsDir,
+  DATA_DIR: tmpDir,
 }));
 
 const {
