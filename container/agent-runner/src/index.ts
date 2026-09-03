@@ -40,6 +40,14 @@ export type { StreamEventType, StreamEvent } from './types.js';
 
 import { sanitizeFilename, generateFallbackName, formatLocalNow, isSuspectTruncatedStreamResult, AssistantTextTracker } from './utils.js';
 import {
+  initRedisIpc,
+  isRedisIpcConnected,
+  distributedMode,
+  subscribeIpcInput,
+  closeRedisIpc,
+  publishIpcOutput,
+} from './redis-ipc.js';
+import {
   extractSessionHistory as extractSessionHistoryImpl,
   parseTranscript,
 } from './session-history.js';
@@ -81,6 +89,39 @@ const CLAUDE_EFFORT = (process.env.CLAUDE_EFFORT?.trim() || '') as
 const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事件丢失）
+
+// ─── Redis IPC message queue (distributed mode) ─────────────────────────
+// When running as an independent service (REDIS_URL + AGENT_RUNNER_MODE=distributed),
+// incoming IPC messages arrive via Redis pub/sub instead of the file system.
+// Messages are queued here and consumed by waitForIpcMessage / shouldClose etc.
+const redisIpcQueue: Array<{ type: string; text?: string; images?: any[]; sourceJid?: string; taskId?: string }> = [];
+let redisIpcUnsub: (() => void) | null = null;
+// Current group folder — set in main(), used by writeOutput for Redis publishing
+let currentGroupFolder = '';
+
+/** Check for and consume a Redis IPC control signal (sentinel equivalent). */
+function consumeRedisSignal(type: string): boolean {
+  if (!isRedisIpcConnected()) return false;
+  const idx = redisIpcQueue.findIndex((m) => m.type === type);
+  if (idx >= 0) {
+    redisIpcQueue.splice(idx, 1);
+    return true;
+  }
+  return false;
+}
+
+/** Drain all queued Redis message payloads (replaces drainIpcInput in distributed mode). */
+function drainRedisMessages(): { text: string; images: any[]; taskId?: string; sourceJid?: string }[] {
+  const msgs: Array<{ text: string; images: any[]; taskId?: string; sourceJid?: string }> = [];
+  for (let i = redisIpcQueue.length - 1; i >= 0; i--) {
+    if (redisIpcQueue[i].type === 'message') {
+      const m = redisIpcQueue[i];
+      msgs.push({ text: m.text || '', images: m.images || [], taskId: m.taskId, sourceJid: m.sourceJid });
+      redisIpcQueue.splice(i, 1);
+    }
+  }
+  return msgs.reverse(); // restore chronological order
+}
 
 // In-query liveness watchdog. After the SDK handshake (system/init), if no
 // stream event / assistant / tool / result message arrives for this long, the
@@ -582,6 +623,13 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+  // Distributed mode: also publish output via Redis for cross-pod delivery
+  if (isRedisIpcConnected() && distributedMode && currentGroupFolder) {
+    publishIpcOutput(currentGroupFolder, 'messages', {
+      type: 'agent_output',
+      output,
+    }).catch(() => {});
+  }
 }
 
 function log(message: string): void {
@@ -990,6 +1038,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  * Check for _close sentinel.
  */
 function shouldClose(): boolean {
+  if (consumeRedisSignal('_close')) return true;
   if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
     try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
     return true;
@@ -1026,6 +1075,10 @@ function isInterruptRelatedError(err: unknown): boolean {
  * Check for _interrupt sentinel (graceful query interruption).
  */
 function shouldInterrupt(): boolean {
+  if (consumeRedisSignal('_interrupt')) {
+    markInterruptRequested();
+    return true;
+  }
   if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
     try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
     markInterruptRequested();
@@ -1055,6 +1108,7 @@ function cleanupStartupInterruptSentinel(): void {
  * a query completes to implement one-question-one-answer semantics.
  */
 function shouldDrain(): boolean {
+  if (consumeRedisSignal('_drain')) return true;
   if (fs.existsSync(IPC_INPUT_DRAIN_SENTINEL)) {
     try { fs.unlinkSync(IPC_INPUT_DRAIN_SENTINEL); } catch { /* ignore */ }
     return true;
@@ -1077,6 +1131,23 @@ interface IpcDrainResult {
 
 function drainIpcInput(): IpcDrainResult {
   const result: IpcDrainResult = { messages: [] };
+
+  // Drain Redis-queued messages first (distributed mode)
+  if (isRedisIpcConnected()) {
+    const redisMsgs = drainRedisMessages();
+    for (const m of redisMsgs) {
+      if (m.text) {
+        result.messages.push({
+          text: m.text,
+          images: m.images,
+          taskId: m.taskId,
+          sourceJid: m.sourceJid,
+        });
+      }
+    }
+  }
+
+  // Then drain file-system messages (fallback / single-pod mode)
   try {
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
@@ -2364,12 +2435,42 @@ function forceExitWithSafetyNet(code: number): never {
 }
 
 async function main(): Promise<void> {
+  // Distributed mode: initialize Redis IPC, read task from Redis instead of stdin.
+  // The process exits after the task (K8s restarts the pod for the next task).
+  if (distributedMode) {
+    await initRedisIpc();
+    if (!isRedisIpcConnected()) {
+      console.error('[main] Distributed mode requested but Redis connection failed, exiting');
+      process.exit(1);
+    }
+    log('Distributed agent-runner mode — waiting for task from Redis');
+  }
+
   let containerInput: ContainerInput;
 
   try {
-    const stdinData = await readStdin();
+    let stdinData: string;
+    if (distributedMode && isRedisIpcConnected()) {
+      // Read task from Redis pub/sub instead of stdin
+      const { waitForTask } = await import('./redis-ipc.js');
+      stdinData = JSON.stringify(await waitForTask());
+    } else {
+      stdinData = await readStdin();
+    }
     containerInput = JSON.parse(stdinData);
+    currentGroupFolder = containerInput.groupFolder;
     log(`Received input for group: ${containerInput.groupFolder}`);
+
+    // Distributed mode: subscribe to Redis IPC channel for this group.
+    // Incoming messages (follow-up user messages, _close/_drain/_interrupt signals)
+    // arrive via Redis instead of the file system.
+    if (distributedMode && isRedisIpcConnected()) {
+      redisIpcUnsub = await subscribeIpcInput(containerInput.groupFolder, (payload) => {
+        redisIpcQueue.push(payload);
+        log(`Redis IPC message received: type=${payload.type}`);
+      });
+      log(`Subscribed to Redis IPC channel for ${containerInput.groupFolder}`);
+    }
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -3371,6 +3472,11 @@ async function main(): Promise<void> {
       error: errorMessage
     });
     forceExitWithSafetyNet(1);
+  }
+
+  // Clean up Redis IPC before exit (distributed mode)
+  if (distributedMode) {
+    await closeRedisIpc().catch(() => {});
   }
 
   // main() 正常结束后必须显式退出。

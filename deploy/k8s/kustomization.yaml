@@ -23,4 +23,5 @@ resources:
   - service.yaml
   - ingress.yaml
   - hpa.yaml
+  - agent-runner.yaml
   - backup-cronjob.yaml

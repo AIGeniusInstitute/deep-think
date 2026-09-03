@@ -4,9 +4,10 @@ import path from 'path';
 
 import { DATA_DIR } from './config.js';
 import { killProcessTree } from './container-runner.js';
-import { getTaskById } from './db.js';
+import { getTaskById, getRegisteredGroup } from './db.js';
 import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
+import { isRedisConnected, publishAgentIpc } from './redis-bus.js';
 export type SendMessageResult = 'sent' | 'no_active';
 
 interface QueuedTask {
@@ -266,6 +267,29 @@ export class GroupQueue {
       if (!result.allowed) return false;
     }
     return true;
+  }
+
+  /**
+   * Resolve group folder from JID (for cross-pod Redis IPC when no local agent).
+   * Checks in-memory GroupState first, then falls back to DB lookup.
+   */
+  private resolveGroupFolder(groupJid: string): string | null {
+    const own = this.getGroup(groupJid);
+    if (own?.groupFolder) return own.groupFolder;
+    // Also check serialization siblings — they share the same folder
+    const sibling = this.findActiveRunnerFor(groupJid);
+    if (sibling) {
+      const shared = this.getGroup(sibling);
+      if (shared?.groupFolder) return shared.groupFolder;
+    }
+    // DB fallback for groups never started on this pod
+    try {
+      const group = getRegisteredGroup(groupJid);
+      if (group?.folder) return group.folder;
+    } catch {
+      // DB might not be ready during shutdown
+    }
+    return null;
   }
 
   private resolveActiveState(groupJid: string): ActiveGroupState | null {
@@ -664,8 +688,21 @@ export class GroupQueue {
     taskId?: string,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
-    if (!state) return 'no_active';
-
+    if (!state) {
+      // Cross-pod: no local agent — forward message via Redis if connected.
+      // The pod that has the active agent subscribes to deepthink:ipc:{folder}
+      // and writes the message to its local input dir for the agent-runner.
+      if (isRedisConnected()) {
+        const folder = this.resolveGroupFolder(groupJid);
+        if (folder) {
+          publishAgentIpc(folder, { type: 'message', text, images: images ?? undefined, sourceJid, taskId }).catch((err) => {
+            logger.warn({ err, groupJid, folder }, 'Redis publishAgentIpc (sendMessage) failed');
+          });
+          return 'sent';
+        }
+      }
+      return 'no_active';
+    }
     // If the active runner is a scheduled task (not a user-message handler),
     // do NOT pipe user messages into it.  The task container has no knowledge
     // of the user conversation context, so any IPC message injected here would
@@ -726,7 +763,16 @@ export class GroupQueue {
    */
   closeStdin(groupJid: string): void {
     const state = this.resolveActiveState(groupJid);
-    if (!state) return;
+    if (!state) {
+      // Cross-pod: forward _close via Redis
+      if (isRedisConnected()) {
+        const folder = this.resolveGroupFolder(groupJid);
+        if (folder) {
+          publishAgentIpc(folder, { type: '_close', text: '' }).catch(() => {});
+        }
+      }
+      return;
+    }
 
     const inputDir = this.resolveIpcInputDir(state);
     try {
@@ -904,7 +950,17 @@ export class GroupQueue {
     // Use resolveActiveState so sibling JIDs (feishu/telegram sharing the
     // same folder as a web group) are correctly resolved to the active runner.
     const state = this.resolveActiveState(groupJid);
-    if (!state) return false;
+    if (!state) {
+      // Cross-pod: forward _interrupt via Redis
+      if (isRedisConnected()) {
+        const folder = this.resolveGroupFolder(groupJid);
+        if (folder) {
+          publishAgentIpc(folder, { type: '_interrupt', text: '' }).catch(() => {});
+          return true;
+        }
+      }
+      return false;
+    }
 
     // 只取消等待中的 retry 定时器（如果有），不重置 retryCount —— 不让用户
     // 中断把已积累的 backoff 进度归零。
