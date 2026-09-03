@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepThink 运维手册 · Runbook</title>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --fg:#e6edf3; --fg2:#9198a1;
+  --accent:#58a6ff; --accent2:#3fb950; --warn:#d29922; --danger:#f85149;
+  --border:#30363d; --code-bg:#0a0e14; --shadow:0 6px 24px rgba(0,0,0,.4);
+}
+[data-theme="light"]{
+  --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eaeef2; --fg:#1f2328; --fg2:#656d76;
+  --accent:#0969da; --accent2:#1a7f37; --warn:#9a6700; --danger:#cf222e;
+  --border:#d0d7de; --code-bg:#f6f8fa; --shadow:0 6px 24px rgba(0,0,0,.1);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font:15px/1.7 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+code,pre{font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace}
+code{background:var(--bg3);padding:.15em .4em;border-radius:4px;font-size:.88em;color:var(--accent)}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:1em 1.2em;overflow-x:auto;position:relative}
+pre code{background:none;padding:0;font-size:.85em;color:var(--fg)}
+.copy-btn{position:absolute;top:.4em;right:.4em;background:var(--bg3);border:1px solid var(--border);color:var(--fg2);border-radius:5px;padding:.2em .6em;font-size:.7em;cursor:pointer;opacity:0;transition:opacity .15s}
+pre:hover .copy-btn{opacity:1}
+.layout{display:flex;min-height:100vh}
+nav.toc{width:280px;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--bg2);border-right:1px solid var(--border);padding:1.4em 1em}
+nav.toc h2{font-size:.85em;color:var(--fg2);text-transform:uppercase;letter-spacing:.08em;margin:1.2em 0 .5em}
+nav.toc a{display:block;color:var(--fg2);padding:.28em .6em;border-radius:5px;font-size:.86em;border-left:2px solid transparent}
+nav.toc a:hover,nav.toc a.active{background:var(--bg3);color:var(--accent);border-left-color:var(--accent);text-decoration:none}
+nav.toc a.l2{padding-left:1.6em;font-size:.82em}
+main{flex:1;max-width:920px;margin:0 auto;padding:2.5em 2em 6em}
+main h1{font-size:2em;border-bottom:1px solid var(--border);padding-bottom:.4em}
+main h1 small{font-size:.4em;color:var(--fg2);font-weight:400;display:block;margin-top:.3em}
+main h2{font-size:1.5em;margin-top:2.4em;padding-bottom:.3em;border-bottom:1px solid var(--border);scroll-margin-top:1em}
+main h3{font-size:1.2em;margin-top:1.8em;scroll-margin-top:1em;color:var(--accent)}
+main h4{font-size:1em;margin-top:1.4em;scroll-margin-top:1em}
+main p,main li{color:var(--fg)}
+section{padding-top:.5em}
+.badge{display:inline-block;font-size:.72em;padding:.15em .6em;border-radius:10px;font-weight:600;vertical-align:middle}
+.b-ok{background:rgba(63,185,80,.15);color:var(--accent2)}
+.b-warn{background:rgba(210,153,34,.15);color:var(--warn)}
+.b-bad{background:rgba(248,81,73,.15);color:var(--danger)}
+.b-info{background:rgba(88,166,255,.15);color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+th,td{border:1px solid var(--border);padding:.5em .8em;text-align:left}
+th{background:var(--bg2)}
+tr:nth-child(even){background:var(--bg2)}
+.callout{border-left:3px solid var(--accent);background:var(--bg2);padding:.8em 1.2em;margin:1em 0;border-radius:0 6px 6px 0}
+.callout.warn{border-color:var(--warn)} .callout.danger{border-color:var(--danger)} .callout.ok{border-color:var(--accent2)}
+details{margin:.8em 0;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--bg2)}
+summary{cursor:pointer;padding:.7em 1em;background:var(--bg3);font-weight:600;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary:before{content:"▸ ";color:var(--accent)}
+details[open] summary:before{content:"▾ "}
+details pre{border:none;border-radius:0;margin:0}
+.topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border);padding:.6em 2em;display:flex;align-items:center;gap:1em}
+.topbar .theme{margin-left:auto;cursor:pointer;background:var(--bg3);border:1px solid var(--border);color:var(--fg);padding:.3em .7em;border-radius:6px;font-size:.8em}
+.progress{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:50;transition:width .1s}
+.kbd{background:var(--bg3);border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:.1em .4em;font-size:.8em}
+@media(max-width:860px){nav.toc{display:none}main{padding:1.5em}}
+</style>
+</head>
+<body>
+<div class="progress" id="prog"></div>
+<div class="layout">
+<nav class="toc" id="toc"></nav>
+<main>
+<div class="topbar">
+<span>📘 DeepThink 运维手册</span>
+<span class="badge b-info">v1.0</span>
+<button class="theme" onclick="toggleTheme()">🌗 切换主题</button>
+</div>
+
+<h1>DeepThink 运维手册<small>一键部署 · 配置 · 备份恢复 · 升级回滚 · 监控 · 故障排查 · 桌面打包</small></h1>
+
+<p>本手册是 DeepThink 系统的< strong>唯一运维真相来源</strong>，覆盖从零到开箱即用的全部流程。所有命令均可在仓库根目录 <code>~/deepthink</code> 直接执行。</p>
+
+<div class="callout ok">
+<strong>速查：</strong>
+<code>make setup</code> 一键本地部署 ｜
+<code>make docker-deploy</code> Docker 单机 ｜
+<code>make k8s-deploy</code> K8s 云部署 ｜
+<code>make health</code> 健康检查 ｜
+<code>make backup</code> 备份 ｜
+<code>make status</code> 状态
+</div>
+
+<h2 id="arch">架构总览</h2>
+<p>DeepThink 是自托管 AI Agent 工作站。三种部署形态，按规模递进：</p>
+<table>
+<tr><th>形态</th><th>适用</th><th>数据库</th><th>并发</th><th>一键命令</th></tr>
+<tr><td><span class="badge b-ok">本地 Node</span></td><td>开发 / 单机个人</td><td>SQLite</td><td>单进程</td><td><code>make setup</code></td></tr>
+<tr><td><span class="badge b-info">Docker 单机</span></td><td>小团队 / 单机生产</td><td>SQLite (卷持久化)</td><td>单容器</td><td><code>make docker-deploy</code></td></tr>
+<tr><td><span class="badge b-warn">K8s 多副本</span></td><td>企业云部署</td><td>PostgreSQL</td><td>多 Pod + Redis</td><td><code>make k8s-deploy</code></td></tr>
+</table>
+<p>组件关系：Web Server（Hono + Node）提供 HTTP/WebSocket API + 静态前端 → Agent Runner（独立进程/容器）执行 Claude Agent SDK 任务 → 沙箱容器执行不可信代码/浏览器。多副本下 Redis 做跨 Pod 事件总线 + 分布式选主 + Agent IPC，PostgreSQL 替代 SQLite。</p>
+
+<h2 id="prereq">前置条件</h2>
+<h3>基础依赖</h3>
+<table>
+<tr><th>依赖</th><th>最低版本</th><th>用途</th><th>安装</th></tr>
+<tr><td>Node.js</td><td>≥ 20（推荐 22）</td><td>运行时（本项目<em>不</em>用 bun，WebSocket 需 node）</td><td><code>nvm install 22</code> 或 nodejs.org</td></tr>
+<tr><td>npm</td><td>随 Node</td><td>依赖管理</td><td>随 Node 安装</td></tr>
+<tr><td>git</td><td>2.20+</td><td>克隆源码</td><td><code>sudo apt install git</code></td></tr>
+<tr><td>Docker</td><td>可选</td><td>容器隔离 / 沙箱 / 代码执行 / 浏览器自动化</td><td><code>curl -fsSL https://get.docker.com | sh</code></td></tr>
+<tr><td>Claude API Key</td><td>—</td><td>Agent 推理能力</td><td>console.anthropic.com（或 Web Setup 向导录入）</td></tr>
+</table>
+<div class="callout"><strong>国内镜像：</strong>Makefile 已为 npm/electron 内置 <code>registry.npmmirror.com</code> 镜像，Docker 已配 <code>docker.1ms.run</code>。无需额外设置。</div>
+
+<h2 id="deploy-local">一、本地源码部署（make setup）</h2>
+<p>最简形态，适合开发与单机使用。一键脚本幂等，可重复执行。</p>
+<pre><code>git clone git@gitcode.com:AIGeniusInstitute/deepthink.git ~/deepthink
+cd ~/deepthink
+
+# 一键：检查依赖→安装→编译→初始化→设admin→启动
+make setup
+
+# 或只装不启
+make setup ARGS=--no-start
+
+# 后台守护模式（隔离数据目录，断线不掉）
+make setup ARGS=--prod PORT=9999
+
+# 自定义管理员
+ADMIN_NAME=alice ADMIN_PASS=Str0ng make setup</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<p>启动后访问 <code>http://localhost:9898</code>，默认管理员 <code>admin/88888888</code>（首次登录后请立即改密）。</p>
+
+<details><summary>make setup 做了什么（6 步）</summary>
+<pre><code>1. 检查 Node≥20 / git / npm（Docker 可选）
+2. make install：npm install + 编译 agent-runner（走 npmmirror）
+3. 初始化数据目录 ~/.deepthink/data（迁移仓库内旧 ./data）
+4. make admin-set：设置/重置管理员（幂等）
+5. 构建容器镜像（Docker 可用时）
+6. 启动：前台 make start 或后台 make start-prod</code></pre>
+</details>
+
+<h3>手动分步（精细控制）</h3>
+<pre><code>make install          # 装依赖 + 编译 agent-runner
+make build            # 编译前后端（build:all）
+make admin-set        # 设 admin 账号
+make start            # 启动（pm2 注册过则 pm2 restart，否则前台阻塞）
+
+# 隔离生产实例（不撞主实例）
+make start-prod PORT=9999
+make stop-prod PORT=9999
+make status</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="deploy-docker">二、Docker 单机部署（make docker-deploy）</h2>
+<p>容器化单机生产，数据持久化到 Docker 卷或宿主路径。</p>
+<pre><code>cd ~/deepthink
+
+# 一键：生成密钥→构建镜像→启动→健康检查
+make docker-deploy ARGS="--port 9999 --apikey sk-ant-xxx"
+
+# 持久化到宿主路径（便于备份）
+make docker-deploy ARGS="--port 9999 --apikey sk-ant-xxx --data-dir /opt/deepthink-data"
+
+# 复用已构建镜像不重建
+make docker-deploy ARGS="--no-build --port 9999"
+
+# 手动 docker compose
+docker compose -f deploy/docker/docker-compose.yml --env-file deploy/docker/.env up -d --build</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<div class="callout warn"><strong>注意：</strong>Docker 模式默认 SQLite 单容器，适合中小规模。如需多副本并发，请用 K8s 形态。</div>
+
+<h2 id="deploy-k8s">三、K8s 云部署（make k8s-deploy）</h2>
+<p>企业级多副本部署：Web Server 多 Pod + 独立 Agent Runner Deployment + Redis（事件总线/选主）+ PostgreSQL（pgvector）+ PVC + HPA。</p>
+<pre><code>cd ~/deepthink
+
+# 1. 构建并推送镜像（远程集群需推仓库）
+docker build -t deepthink-server:latest -f deploy/docker/Dockerfile.server .
+# docker tag deepthink-server:latest &lt;registry&gt;/deepthink-server:latest &amp;&amp; docker push ...
+
+# 2. 一键部署
+make k8s-deploy ARGS=" \
+  --domain deepthink.yourcompany.com \
+  --image registry.cn-hangzhou.aliyuncs.com/your/deepthink-server:latest \
+  --apikey sk-ant-xxx \
+  --pg-password YourStr0ngPgPass"
+
+# 仅本机 kind 测试（无需域名/镜像仓库）
+make k8s-deploy ARGS="--domain deepthink.local --apikey sk-ant-xxx"</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<p>脚本完成 4 件事：① 生成 Secret（随机 session/PG 密码，或 <code>--secret-file</code> 复用） ② sed 配置 Ingress 域名 + 镜像 ③ <code>kubectl apply -k deploy/k8s/</code> ④ 等待 rollout 就绪 + 初始化 admin。</p>
+
+<h3>部署后验证</h3>
+<pre><code>kubectl -n deepthink get pods,svc,hpa,ingress
+kubectl -n deepthink rollout status deployment/deepthink-web
+
+# 域名 DNS 生效前用端口转发
+kubectl -n deepthink port-forward svc/deepthink 8080:9898
+# → http://localhost:8080  默认 admin/88888888
+
+# 健康端点
+kubectl -n deepthink exec deploy/deepthink-web -- curl -s localhost:9898/health
+kubectl -n deepthink exec deploy/deepthink-web -- curl -s localhost:9898/ready</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h3>扩缩容</h3>
+<pre><code>kubectl -n deepthink scale deployment/deepthink-web --replicas=4
+kubectl -n deepthink scale deployment/deepthink-agent-runner --replicas=6
+# 或交给 HPA（CPU>70% 自动扩，2-20 Pod）
+kubectl -n deepthink get hpa</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h3>清理卸载</h3>
+<pre><code>kubectl delete namespace deepthink    # 一键删除全部资源
+# PVC 数据需单独删：
+kubectl delete pvc -n deepthink --all</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="config">配置管理</h2>
+<div class="callout ok"><strong>设计原则：</strong>所有运行时配置走 <strong>Web 界面</strong>（Setup 向导 + 设置页），API Key 经 AES-256-GCM 加密落盘，<em>无需手编配置文件</em>。环境变量仅用于部署拓扑（端口/数据目录/数据库连接/多副本协调）。</div>
+<p>完整环境变量参考见仓库根 <code>.env.example</code>。关键变量：</p>
+<table>
+<tr><th>变量</th><th>默认</th><th>说明</th></tr>
+<tr><td><code>WEB_PORT</code></td><td>9898</td><td>HTTP 监听端口</td></tr>
+<tr><td><code>DEEPTHINK_DATA_DIR</code></td><td>~/.deepthink/data</td><td>数据根目录（DB/配置/工作区/记忆）</td></tr>
+<tr><td><code>WEB_SESSION_SECRET</code></td><td>首启随机</td><td>会话签名（多副本<em>必须</em>显式设置）</td></tr>
+<tr><td><code>DATABASE_URL</code></td><td>—（SQLite）</td><td>设为 PG 连接串启用多副本</td></tr>
+<tr><td><code>REDIS_URL</code></td><td>—</td><td>设为启用跨 Pod 事件总线（不设则 no-op 降级）</td></tr>
+<tr><td><code>TRUST_PROXY</code></td><td>false</td><td>反向代理后设 true</td></tr>
+</table>
+
+<h3>从 SQLite 迁移到 PostgreSQL</h3>
+<pre><code># 1. 部署 PG（K8s：postgres.yaml 已含；Docker：加 pg 容器）
+# 2. 跑一次性迁移脚本
+node dist/migrate-sqlite-to-postgres.js
+# 3. 设置 DATABASE_URL 重启服务</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="backup">备份与恢复</h2>
+<h3>本地 / Docker</h3>
+<pre><code>make backup                          # 打包 ~/.deepthink/data → deepthink-backup-{date}.tar.gz
+make restore FILE=deepthink-backup-20260904-000000.tar.gz
+# Docker：宿主路径模式直接 tar 该目录；named volume 用 docker run 备份卷</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<h3>K8s（CronJob 自动 + 手动）</h3>
+<pre><code># 自动：backup-cronjob.yaml 每天 03:00 执行（PG→pg_dump|gzip，SQLite→cp），保留 7 份
+# 手动触发一次：
+kubectl -n deepthink create job --from=cronjob/deepthink-backup manual-backup-1
+
+# 手动 PG 备份：
+kubectl -n deepthink exec statefulset/postgres -- \
+  pg_dump "$DATABASE_URL" | gzip > deepthink-pg-$(date +%F).sql.gz
+
+# 恢复（PG）：
+kubectl -n deepthink scale deployment/deepthink-web --replicas=0
+gunzip -c deepthink-pg.sql.gz | kubectl -n deepthink exec -i statefulset/postgres -- psql "$DATABASE_URL"
+kubectl -n deepthink scale deployment/deepthink-web --replicas=2</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<div class="callout warn"><strong>注意：</strong>备份含 <code>session-secret.key</code> 与 <code>claude-provider.key</code> 明文，妥善保管，勿提交 git。</div>
+
+<h2 id="upgrade">升级与回滚</h2>
+<h3>本地源码</h3>
+<pre><code>cd ~/deepthink
+git pull origin main
+make install          # 依赖更新
+make build            # 重新编译
+make start            # 重启（pm2 注册过则 pm2 restart）
+# 或后台实例：make stop-prod PORT=9999 && make start-prod PORT=9999</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<h3>Docker</h3>
+<pre><code>make docker-deploy ARGS="--port 9999 --no-build"  # 拉新代码后重新 build
+docker compose -f deploy/docker/docker-compose.yml up -d --build</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<h3>K8s</h3>
+<pre><code># 滚动升级（改镜像 tag）
+kubectl -n deepthink set image deployment/deepthink-web \
+  deepthink=registry.../deepthink-server:v1.2.0
+kubectl -n deepthink rollout status deployment/deepthink-web
+
+# 回滚到上一版本
+kubectl -n deepthink rollout undo deployment/deepthink-web
+kubectl -n deepthink rollout undo deployment/deepthink-web --to-revision=2
+kubectl -n deepthink rollout history deployment/deepthink-web  # 查看历史</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<div class="callout danger"><strong>DB schema 注意：</strong>schema 靠 <code>CREATE TABLE IF NOT EXISTS</code> + 代码内置 <code>ALTER</code> 向前演进，<em>向前不兼容旧代码</em>。恢复旧数据备份后必须用<em>最新版</em>后端启动。回滚应用版本时，若新版本已升级 schema，旧代码可能无法启动——务必先回滚数据再回滚应用。</div>
+
+<h2 id="monitor">监控与日志</h2>
+<h3>健康端点</h3>
+<pre><code>make health                          # 本地探测
+curl http://localhost:9898/health    # {status:ok, ...}
+curl http://localhost:9898/ready     # 就绪探针
+curl http://localhost:9898/monitor/health  # 自治子系统健康</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<h3>日志</h3>
+<pre><code># 本地
+make logs                            # tail -f /tmp/deepthink.log
+tail -f logs/deepthink-9999.log      # start-prod 实例
+
+# Docker
+docker compose -f deploy/docker/docker-compose.yml logs -f
+
+# K8s
+kubectl -n deepthink logs -l app=deepthink --tail=50 -f
+kubectl -n deepthink logs deploy/deepthink-agent-runner --tail=50</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<h3>K8s 资源监控</h3>
+<pre><code>kubectl -n deepthink top pods
+kubectl -n deepthink top nodes
+kubectl -n deepthink get hpa
+kubectl -n deepthink get events --sort-by=.lastTimestamp | tail -20</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="troubleshoot">故障排查</h2>
+<table>
+<tr><th>现象</th><th>根因</th><th>处置</th></tr>
+<tr><td>启动报 <code>better-sqlite3 ABI 不匹配</code></td><td>Node 升级后原生模块需重编译</td><td><code>make</code> 自动探测重编译，或 <code>npm rebuild better-sqlite3</code></td></tr>
+<tr><td>WebSocket 握手失败、卡片不流式</td><td>误用 bun 运行（不支持 ws upgrade）</td><td>必须用 node：<code>node dist/index.js</code>，不用 bun</td></tr>
+<tr><td>端口被占用</td><td>旧进程未退</td><td><code>make stop</code> 或 <code>make stop-prod PORT=xxxx</code>（SIGTERM→SIGKILL 升级）</td></tr>
+<tr><td>pm2 与裸跑抢端口</td><td>混用两种启动</td><td>统一用 <code>make start/stop</code>（自动路由 pm2）</td></tr>
+<tr><td>桌面版 DMG 启动崩溃 <code>Cannot find better_sqlite3.node</code></td><td>npm12 allowScripts 拦截 install 脚本</td><td>见 <code>docs/issues/2026-08-21-desktop-dmg-better-sqlite3-missing.md</code></td></tr>
+<tr><td>K8s 多 Pod 重复处理同一任务</td><td>waitForTask 曾用 pub/sub（已修）</td><td>确保使用最新镜像（BRPOP 语义）</td></tr>
+<tr><td>K8s trace 文件 Pod 重启丢失</td><td>trace-io 路径不在 PVC（已修）</td><td>确保镜像含 <code>DATA_DIR</code> 修复，trace-io 落 /data PVC</td></tr>
+<tr><td>backup CronJob 在 PG 模式报错</td><td>曾用 better-sqlite3 打开不存在的 db（已修）</td><td>使用最新 backup-cronjob.yaml（postgres:16-alpine 镜像 + pg_dump）</td></tr>
+<tr><td>飞书等 IM 不回消息</td><td>agent-runner 容器未启动 / 凭据未配</td><td><code>make status</code>、检查 Web 设置页 IM 配置</td></tr>
+</table>
+
+<h2 id="desktop">桌面应用打包</h2>
+<p>桌面版 = Electron 壳 + 独立后端 Node 子进程 + HTTP serve 前端（<strong>完整复用 Web 应用功能</strong>，无内嵌静态文件，安全隔离 <code>contextIsolation:true / nodeIntegration:false</code>）。</p>
+
+<h3>打包链路（Makefile）</h3>
+<pre><code>make desktop-build-deps   # 编译后端+前端+agent-runner（前置）
+make desktop-build         # 编译 Electron 壳 TS
+make desktop-fetch-node    # 拉取 Node v22.11.0 二进制
+make desktop-rebuild-natives  # 用内置 Node ABI 重编译 native（含两道硬校验）
+
+# 各平台打包
+make desktop-pack-mac      # macOS arm64 .dmg
+make desktop-pack-mac-x64  # macOS x64 .dmg（需 Intel Mac）
+make desktop-pack-mac-all  # 双架构
+make desktop-pack-win      # Windows .exe (NSIS)
+make desktop-pack-linux    # Linux AppImage + .deb</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+<div class="callout ok"><strong>native 模块保障：</strong>better-sqlite3 ABI 问题已在打包链路中加<strong>两道硬校验</strong>（① <code>.node</code> 文件存在 ② 内置 Node 实际 <code>require('better-sqlite3')(':memory:').exec('select 1')</code> 加载验证）。失败即中止打包，绝不会产出残缺 DMG。</div>
+
+<h3>桌面版配置完善项（本次已修复）</h3>
+<table>
+<tr><th>问题</th><th>影响</th><th>状态</th></tr>
+<tr><td><code>desktop/src/paths.ts</code> 环境变量拼写错误 <code>DEEPTHIK_*</code>（缺 N）</td><td>开发模式 env 覆盖失效（打包模式不受影响）</td><td><span class="badge b-ok">已修</span> → <code>DEEPTHINK_*</code></td></tr>
+<tr><td><code>desktop/package.json</code> 缺 <code>allowScripts</code> 白名单</td><td>全新机器 <code>npm install</code> 时 electron postinstall 被静默拦截，二进制缺失</td><td><span class="badge b-ok">已修</span> 加 <code>{"electron":true}</code></td></tr>
+<tr><td>4 个 build JSON 缺 <code>publish</code> 配置</td><td>自动更新靠隐式推断，不健壮</td><td><span class="badge b-ok">已修</span> 显式 GitHub provider</td></tr>
+<tr><td>托盘图标文件缺失</td><td>托盘显示空图标（已有 fallback，不影响功能）</td><td><span class="badge b-info">脚本</span> <code>make generate-tray-icons</code>（需 ImageMagick）</td></tr>
+<tr><td>sqlite-vec native 校验缺失</td><td>潜在 ABI 担忧</td><td><span class="badge b-ok">已确认</span> 非 native addon，按平台预编译二进制，无需 rebuild</td></tr>
+</table>
+
+<h3>代码签名（待办）</h3>
+<div class="callout warn"><strong>当前未配置：</strong>macOS <code>notarize/identity</code>、Windows <code>code signing</code> 均缺失。macOS 首次运行需右键打开或 <code>xattr -cr /Applications/DeepThink.app</code>；Windows SmartScreen 会警告未知发布者。正式分发需补签名配置（设置 <code>CSC_LINK/CSC_KEY_PASSWORD</code> + Apple notarization credentials）。</div>
+
+<h3>CI/CD 自动打包</h3>
+<p>GitHub Actions（<code>.github/workflows/release.yml</code>）已配置三平台并行打包：push <code>v*</code> tag 或手动触发，4 个 job（mac-arm64 / mac-x64 / win / linux）构建后汇总到 GitHub Release。</p>
+<pre><code>git tag -a v1.0.0 -m 'Release v1.0.0'
+git push origin v1.0.0
+# CI 自动构建并发布；或本地发布：
+make release VERSION=v1.0.0   # 需 gh CLI + 已有产物</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="desktop-uninstall">桌面应用卸载</h2>
+<pre><code># Ubuntu/Debian 完整卸载（保留源码 ~/deepthink）
+make uninstall           # deb包+AppImage+配置 全清
+make purge-deb            # 仅卸 deb 包
+make purge-appimage       # 仅删 AppImage
+make purge-config         # 仅清配置
+make verify               # 校验卸载是否干净
+make dry-run              # 预览不执行</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>
+
+<h2 id="ref">命令速查表</h2>
+<table>
+<tr><th>命令</th><th>用途</th></tr>
+<tr><td><code>make setup</code></td><td>一键本地部署（装→编译→初始化→admin→启动）</td></tr>
+<tr><td><code>make docker-deploy</code></td><td>Docker 单机一键部署</td></tr>
+<tr><td><code>make k8s-deploy</code></td><td>K8s 云部署一键</td></tr>
+<tr><td><code>make start</code> / <code>make stop</code></td><td>启动/停止（自动 pm2 路由）</td></tr>
+<tr><td><code>make start-prod PORT=N</code> / <code>make stop-prod PORT=N</code></td><td>隔离实例后台守护启停</td></tr>
+<tr><td><code>make status</code></td><td>服务状态（pm2/端口/健康/Docker）</td></tr>
+<tr><td><code>make health</code></td><td>健康端点探测</td></tr>
+<tr><td><code>make backup</code> / <code>make restore FILE=x</code></td><td>备份/恢复</td></tr>
+<tr><td><code>make install</code> / <code>make build</code></td><td>装依赖/编译</td></tr>
+<tr><td><code>make admin-set ADMIN_NAME=x ADMIN_PASS=y</code></td><td>设/重置管理员（幂等）</td></tr>
+<tr><td><code>make test</code> / <code>make test-smoke</code></td><td>全量测试 / CI 冒烟门禁</td></tr>
+<tr><td><code>make desktop-pack-mac|win|linux</code></td><td>桌面打包</td></tr>
+<tr><td><code>make generate-tray-icons</code></td><td>生成托盘图标</td></tr>
+<tr><td><code>make help</code></td><td>显示全部命令</td></tr>
+</table>
+
+<p style="margin-top:3em;color:var(--fg2);font-size:.85em;border-top:1px solid var(--border);padding-top:1em">
+DeepThink 运维手册 · 仓库 <code>~/deepthink</code> · 问题排查见 <code>docs/issues/</code> · 本手册存于 <code>docs/ops/runbook.html</code>
+</p>
+</main>
+</div>
+
+<script>
+function toggleTheme(){
+  const h=document.documentElement;
+  h.dataset.theme = h.dataset.theme==='dark'?'light':'dark';
+  localStorage.theme=h.dataset.theme;
+}
+if(localStorage.theme)document.documentElement.dataset.theme=localStorage.theme;
+
+// TOC 生成
+const toc=document.getElementById('toc');
+const secs=document.querySelectorAll('main h2, main h3');
+let h2count=0;
+secs.forEach((s,i)=>{
+  if(!s.id)s.id='sec'+i;
+  const a=document.createElement('a');
+  a.href='#'+s.id;
+  a.textContent=s.textContent.replace(/^▸|^▾/,'');
+  a.className = s.tagName==='H3'?'l2':'';
+  if(s.tagName==='H2'){toc.appendChild(document.createElement('h2')).textContent='━ '+(++h2count>9?h2count:'0'+h2count);}
+  toc.appendChild(a);
+});
+
+// 滚动高亮 + 进度
+const links=[...toc.querySelectorAll('a')];
+const prog=document.getElementById('prog');
+function onScroll(){
+  const top=window.scrollY+120;
+  let cur=links[0];
+  links.forEach(l=>{const e=document.getElementById(l.getAttribute('href').slice(1)); if(e&&e.offsetTop<=top)cur=l;});
+  links.forEach(l=>l.classList.toggle('active',l===cur));
+  const h=document.documentElement.scrollHeight-window.innerHeight;
+  prog.style.width=(h>0?(window.scrollY/h*100):0)+'%';
+}
+window.addEventListener('scroll',onScroll,{passive:true});
+onScroll();
+
+// 复制
+function copyCode(btn){
+  const code=btn.parentElement.querySelector('code');
+  if(!code)return;
+  navigator.clipboard.writeText(code.textContent).then(()=>{
+    btn.textContent='✓';setTimeout(()=>btn.textContent='复制',1500);
+  });
+}
+</script>
+</body>
+</html>
