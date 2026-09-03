@@ -34,6 +34,13 @@ spec:
             secretKeyRef:
               name: deepthink-secret
               key: DATABASE_URL
+        # Mount the shared PVC so the distributed runner can read/write user
+        # files, memory, skills and IPC under the same /data layout as the
+        # web-server pods. Without this the workspace is an empty ephemeral dir
+        # and everything Claude Code creates is lost on pod restart.
+        volumeMounts:
+          - name: data
+            mountPath: /data
         resources:
           requests:
             cpu: "500m"
@@ -51,6 +58,10 @@ spec:
             command: ["node", "-e", "process.exit(0)"]
           initialDelaySeconds: 30
           periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: deepthink-data
       terminationGracePeriodSeconds: 120
 ---
 apiVersion: v1

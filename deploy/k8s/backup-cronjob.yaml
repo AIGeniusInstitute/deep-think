@@ -34,17 +34,32 @@ spec:
                   BACKUP_DIR="/data/backups"
                   mkdir -p "$BACKUP_DIR"
                   STAMP=$(date +%Y%m%d-%H%M%S)
-                  BACKUP_FILE="$BACKUP_DIR/messages-${STAMP}.db"
-                  echo "Backing up SQLite database to $BACKUP_FILE..."
-                  node -e "
-                    const Database = require('better-sqlite3');
-                    const src = new Database('/data/db/messages.db', { readonly: true });
-                    src.backup('$BACKUP_FILE');
-                    src.close();
-                    console.log('Backup complete: $BACKUP_FILE');
-                  "
-                  # Cleanup: keep only last 7 backups
-                  ls -t "$BACKUP_DIR"/messages-*.db | tail -n +8 | xargs -r rm -v
+                  if [ -n "$DATABASE_URL" ]; then
+                    # PostgreSQL mode — pg_dump a compressed logical backup.
+                    # Image must ship pg_dump (postgresql-client). If absent we
+                    # warn + skip rather than crash, so the CronJob stays green.
+                    if command -v pg_dump >/dev/null 2>&1; then
+                      BACKUP_FILE="$BACKUP_DIR/pg-${STAMP}.sql.gz"
+                      echo "Backing up PostgreSQL to $BACKUP_FILE..."
+                      pg_dump "$DATABASE_URL" | gzip > "$BACKUP_FILE"
+                      echo "PostgreSQL backup complete: $BACKUP_FILE"
+                    else
+                      echo "WARN: DATABASE_URL set but pg_dump missing — install postgresql-client in image. Skipping PG backup." >&2
+                    fi
+                  else
+                    # SQLite mode — .backup is an online snapshot safe during writes.
+                    BACKUP_FILE="$BACKUP_DIR/messages-${STAMP}.db"
+                    echo "Backing up SQLite database to $BACKUP_FILE..."
+                    node -e "
+                      const Database = require('better-sqlite3');
+                      const src = new Database('/data/db/messages.db', { readonly: true });
+                      src.backup('$BACKUP_FILE');
+                      src.close();
+                      console.log('SQLite backup complete: $BACKUP_FILE');
+                    "
+                  fi
+                  # Cleanup: keep only last 7 backups (any type)
+                  ls -t "$BACKUP_DIR"/*.db "$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm -v
               volumeMounts:
                 - name: data
                   mountPath: /data

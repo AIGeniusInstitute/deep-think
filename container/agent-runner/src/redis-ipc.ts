@@ -57,15 +57,21 @@ export function waitForTask(): Promise<any> {
       reject(new Error('Redis not connected'));
       return;
     }
-    // Use blocking pop from a list (BRPOP) for reliable task distribution
-    // This ensures each task is consumed by exactly one agent-runner
-    _sub.subscribe(TASK_QUEUE_CHANNEL, (raw: string) => {
-      try {
-        resolve(JSON.parse(raw));
-      } catch (err) {
-        reject(new Error(`Failed to parse task: ${err}`));
-      }
-    }).catch(() => reject(new Error('Failed to subscribe to task queue')));
+    // BRPOP: blocking pop from a Redis list. Queue semantics — each task is
+    // consumed by exactly ONE agent-runner (unlike pub/sub fan-out, which would
+    // dispatch the same task to every replica simultaneously). Timeout 0 = block
+    // forever. node-redis resolves { key, element }.
+    _pub
+      .blPop(TASK_QUEUE_CHANNEL, 0)
+      .then((res: any) => {
+        try {
+          const raw = res?.element ?? res?.[1] ?? res;
+          resolve(JSON.parse(raw));
+        } catch (err) {
+          reject(new Error(`Failed to parse task: ${err}`));
+        }
+      })
+      .catch((err: unknown) => reject(new Error(`Failed to BRPOP task: ${String(err)}`)));
   });
 }
 

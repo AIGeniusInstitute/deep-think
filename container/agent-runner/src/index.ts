@@ -63,11 +63,16 @@ import { classifyGap, buildGapResolutionPrompt } from './gap-resolver.js';
 // lifetime, so multiple turns in the same session do not overwrite each
 // other in the DB (which keys on (chat_jid, id)).
 
-// 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
-const WORKSPACE_GROUP = process.env.DEEPTHINK_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_GLOBAL = process.env.DEEPTHINK_WORKSPACE_GLOBAL || '/workspace/global';
-const WORKSPACE_MEMORY = process.env.DEEPTHINK_WORKSPACE_MEMORY || '/workspace/memory';
-const WORKSPACE_IPC = process.env.DEEPTHINK_WORKSPACE_IPC || '/workspace/ipc';
+// 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）。
+// 分布式模式（DEEPTHINK_DATA_DIR 指向共享 PVC）下，这些路径会在
+// processOneTask() 收到 groupFolder 后按 group 动态重算到 PVC 上的真实数据
+// 目录（与 web-server pod 的 DATA_DIR 布局一致），否则 Claude Code 会在空目录
+// 运行且写入随重启丢失。
+const DATA_DIR = process.env.DEEPTHINK_DATA_DIR || '';
+let WORKSPACE_GROUP = process.env.DEEPTHINK_WORKSPACE_GROUP || '/workspace/group';
+let WORKSPACE_GLOBAL = process.env.DEEPTHINK_WORKSPACE_GLOBAL || '/workspace/global';
+let WORKSPACE_MEMORY = process.env.DEEPTHINK_WORKSPACE_MEMORY || '/workspace/memory';
+let WORKSPACE_IPC = process.env.DEEPTHINK_WORKSPACE_IPC || '/workspace/ipc';
 
 // 模型由 provider 配置经 ANTHROPIC_MODEL 注入（runtime-config 的 mergeClaudeEnvConfig
 // → host/docker spawn env）。这是硬契约：不再用官方模型（opus 等）兜底——DeepThink 默认
@@ -2495,6 +2500,21 @@ async function processOneTask(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     currentGroupFolder = containerInput.groupFolder;
     log(`Received input for group: ${containerInput.groupFolder}`);
+
+    // 分布式模式：按 group 把 workspace 重算到共享 PVC 上（与 web-server 的
+    // DATA_DIR 布局一致），确保 agent 能读写用户文件/记忆/技能且重启不丢。
+    // 非分布式模式（DATA_DIR 为空）保持原 env 默认值，向后兼容。
+    if (DATA_DIR && containerInput.groupFolder) {
+      const gf = containerInput.groupFolder;
+      WORKSPACE_GROUP = path.join(DATA_DIR, 'groups', gf);
+      WORKSPACE_GLOBAL = path.join(DATA_DIR, 'groups', 'global');
+      WORKSPACE_MEMORY = path.join(DATA_DIR, 'memory', gf);
+      WORKSPACE_IPC = path.join(DATA_DIR, 'ipc', gf);
+      for (const d of [WORKSPACE_GROUP, WORKSPACE_GLOBAL, WORKSPACE_MEMORY, WORKSPACE_IPC]) {
+        try { fs.mkdirSync(d, { recursive: true }); } catch { /* may already exist */ }
+      }
+      log(`Workspace resolved on PVC: group=${WORKSPACE_GROUP}`);
+    }
 
     // Distributed mode: subscribe to Redis IPC channel for this group.
     // Incoming messages (follow-up user messages, _close/_drain/_interrupt signals)
