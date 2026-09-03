@@ -5118,6 +5118,24 @@ async function runAgent(
     if (isRedisConnected() && await hasDistributedRunners()) {
       // Distributed mode: dispatch task to remote agent-runner via Redis.
       // Output is received via the IpcWatcherManager's ipc-out subscription.
+      // Per-user workspace paths: the agent-runner pod cannot derive the owner
+      // from groupFolder alone, so the host (which has group.created_by and
+      // ownerHomeFolder) resolves the per-user global + owner-home memory dirs
+      // and passes them in the payload. This matches single-pod container-runner
+      // semantics — without it, all users' global CLAUDE.md would collide in a
+      // shared groups/global dir, and non-home groups' memory would land in the
+      // group folder (invisible to the host's memory routes).
+      const ownerId = group.created_by;
+      const distWorkspaceGlobal = ownerId
+        ? path.join(GROUPS_DIR, 'user-global', ownerId)
+        : path.join(GROUPS_DIR, 'global');
+      const distMemoryFolder = group.is_home
+        ? group.folder
+        : ownerHomeFolder || group.folder;
+      const distWorkspaceMemory = path.join(DATA_DIR, 'memory', distMemoryFolder);
+      fs.mkdirSync(distWorkspaceGlobal, { recursive: true });
+      fs.mkdirSync(distWorkspaceMemory, { recursive: true });
+
       const taskInput = {
         prompt,
         sessionId,
@@ -5132,6 +5150,8 @@ async function runAgent(
         messageTaskId,
         reminderConfig: buildReminderConfig(group.created_by, prompt),
         engine: group.engine,
+        workspaceGlobal: distWorkspaceGlobal,
+        workspaceMemory: distWorkspaceMemory,
       };
 
       // Register the onOutput handler for this group's distributed output.

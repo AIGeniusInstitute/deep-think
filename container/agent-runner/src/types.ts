@@ -103,6 +103,15 @@ export interface ContainerInput {
   maxTurns?: number;
   /** 全托管硬刹车上限：累计 token 用量到 maxTokens 即停止。默认 1,000,000。 */
   maxTokens?: number;
+  /** Distributed-mode per-user workspace paths. The host resolves these with
+   *  owner context (group.created_by for per-user global, ownerHomeFolder for
+   *  non-home-group memory) and passes them in the payload, because a long-
+   *  running shared agent-runner pod cannot derive the owner from groupFolder
+   *  alone. The runner overrides WORKSPACE_GLOBAL / WORKSPACE_MEMORY from
+   *  these (falling back to the shared/global + group-folder defaults when
+   *  absent). Optional — single-pod mode still uses env vars. */
+  workspaceGlobal?: string;
+  workspaceMemory?: string;
 }
 
 export interface ContainerOutput {

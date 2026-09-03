@@ -2504,16 +2504,20 @@ async function processOneTask(): Promise<void> {
     // 分布式模式：按 group 把 workspace 重算到共享 PVC 上（与 web-server 的
     // DATA_DIR 布局一致），确保 agent 能读写用户文件/记忆/技能且重启不丢。
     // 非分布式模式（DATA_DIR 为空）保持原 env 默认值，向后兼容。
+    // Per-user global + owner-home memory 由 host 在 payload 里带（runner 无法
+    // 仅凭 groupFolder 推导 owner），与单机 container-runner 语义一致；否则
+    // 所有用户的全局 CLAUDE.md 撞进共享 groups/global，非 home 组记忆落进组
+    // 目录（对 host 记忆路由不可见）。
     if (DATA_DIR && containerInput.groupFolder) {
       const gf = containerInput.groupFolder;
       WORKSPACE_GROUP = path.join(DATA_DIR, 'groups', gf);
-      WORKSPACE_GLOBAL = path.join(DATA_DIR, 'groups', 'global');
-      WORKSPACE_MEMORY = path.join(DATA_DIR, 'memory', gf);
       WORKSPACE_IPC = path.join(DATA_DIR, 'ipc', gf);
+      WORKSPACE_GLOBAL = containerInput.workspaceGlobal || path.join(DATA_DIR, 'groups', 'global');
+      WORKSPACE_MEMORY = containerInput.workspaceMemory || path.join(DATA_DIR, 'memory', gf);
       for (const d of [WORKSPACE_GROUP, WORKSPACE_GLOBAL, WORKSPACE_MEMORY, WORKSPACE_IPC]) {
         try { fs.mkdirSync(d, { recursive: true }); } catch { /* may already exist */ }
       }
-      log(`Workspace resolved on PVC: group=${WORKSPACE_GROUP}`);
+      log(`Workspace resolved on PVC: group=${WORKSPACE_GROUP} global=${WORKSPACE_GLOBAL} memory=${WORKSPACE_MEMORY}`);
     }
 
     // Distributed mode: subscribe to Redis IPC channel for this group.
