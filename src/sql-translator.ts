@@ -357,5 +357,9 @@ export function translateCreateTable(sql: string): string {
     'BIGSERIAL PRIMARY KEY',
   );
 
+  // Plain INTEGER → BIGINT (SQLite INTEGER is 64-bit; PG `integer` is 32-bit
+  // and overflows millisecond timestamps like 1788544038590 → 22003).
+  result = result.replace(/\bINTEGER\b/gi, 'BIGINT');
+
   return result;
 }

@@ -90,6 +90,9 @@ function createPgDatabaseClass(): new (path: string) => any {
         // is DDL-only (CREATE/ALTER/PRAGMA), so this never touches row data.
         pgSql = pgSql.replace(/\bBLOB\b/gi, 'BYTEA');
         pgSql = pgSql.replace(/\bREAL\b/gi, 'DOUBLE PRECISION');
+        // INTEGER PRIMARY KEY already handled by translateCreateTable for CREATE;
+        // for ALTER ADD COLUMN, map plain INTEGER → BIGINT (ms-timestamp safety).
+        pgSql = pgSql.replace(/\bINTEGER\b/gi, 'BIGINT');
       }
       if (pgSql.trim().startsWith('--')) return; // Skip PRAGMA comments
       this.getDriver().querySync(pgSql, []);

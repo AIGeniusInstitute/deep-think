@@ -1,0 +1,84 @@
+# DeepThink 本地持久化存储栈 — docker-compose
+# 启动: docker compose -f deploy/local/docker-compose.yml up -d
+# 包含: PostgreSQL(pgvector 向量扩展) + Redis(AOF 持久化) + MinIO(S3 对象存储)
+# 数据持久化: 三个 named volume (pg/redis/minio),重启容器不丢。
+# 端口: PG=5432  Redis=6380(避开本机 6379)  MinIO API=9000 Console=9001
+#
+# 说明: DeepThink 向量检索用 pgvector(PG 内嵌),全文检索用 pg_trgm(PG 内嵌),
+#       不需要独立的 Milvus / Elasticsearch。三者即可覆盖全部持久化需求。
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: deepthink-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deepthink
+      POSTGRES_PASSWORD: deepthink123
+      POSTGRES_DB: deepthink
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deepthink -d deepthink"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: deepthink-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "100"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    container_name: deepthink-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: deepthink
+      MINIO_ROOT_PASSWORD: deepthink123
+      TZ: Asia/Shanghai
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 一次性初始化 MinIO bucket(deepthink)
+  minio-init:
+    image: minio/mc:latest
+    container_name: deepthink-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 deepthink deepthink123 &&
+      (mc mb local/deepthink || true) &&
+      mc anonymous set download local/deepthink || true;
+      echo 'bucket deepthink ready';
+      "
+    restart: "no"
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
