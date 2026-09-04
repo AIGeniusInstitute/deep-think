@@ -1,0 +1,14 @@
+# SQLite + Litestream overlay — single-replica SQLite with real-time WAL
+# replication to MinIO/S3. Excludes Redis/Postgres (not needed for single-node).
+# For multi-writer horizontal scaling, use the base kustomization (PG + Redis).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../namespace.yaml
+  - ../configmap.yaml
+  - ../pvc.yaml
+  - ./deployment.yaml
+  - ../service.yaml
+  - ../ingress.yaml
+  - ../minio.yaml
+  - ../litestream-config.yaml

@@ -5,12 +5,18 @@
 FROM node:22-slim AS backend-builder
 WORKDIR /app
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+# Build tools for native modules (node-pty, better-sqlite3) — node-gyp needs python3/make/g++
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package*.json ./
 RUN npm ci --registry=${NPM_REGISTRY}
 COPY tsconfig.json ./
 COPY src/ ./src/
 COPY web/tsconfig.json web/tsconfig*.json ./web/
-RUN npx tsc --noEmit false 2>/dev/null || npx tsc
+RUN npx tsc
 
 # ─── Stage 2: Frontend build ────────────────────────────
 FROM node:22-slim AS frontend-builder
@@ -36,11 +42,9 @@ WORKDIR /app
 
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
-# Install build tools for native modules (better-sqlite3) + runtime deps
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ git curl \
+# Build tools for native modules (better-sqlite3) + runtime deps (curl for healthcheck)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install production dependencies (includes better-sqlite3)
@@ -58,7 +62,7 @@ COPY container/skills/ ./container/skills/
 COPY container/entrypoint.sh ./container/entrypoint.sh
 
 # Non-root user
-RUN useradd -r -u 1000 -g root deepthink \
+RUN useradd -o -r -u 1000 -g root deepthink \
     && mkdir -p /data \
     && chown -R deepthink:root /app /data
 

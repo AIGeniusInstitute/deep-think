@@ -1,0 +1,112 @@
+# MinIO — S3-compatible object store for large-file offload (trace I/O)
+# and Litestream WAL replication target.
+#
+# Used when OBJECT_STORE_PROVIDER=s3 (see src/object-store.ts). When unset,
+# the platform defaults to local PVC filesystem — MinIO is not required.
+#
+# Ports: 9000 S3 API, 9001 console. Provision a 50Gi PVC for objects.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: object-store
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: object-store
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: deepthink-secret, key: S3_ACCESS_KEY_ID } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: deepthink-secret, key: S3_SECRET_ACCESS_KEY } }
+          ports:
+            - name: s3
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: 9000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1000m", memory: "2Gi" }
+  volumeClaimTemplates:
+    - metadata:
+        name: minio-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 50Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: deepthink
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+# Auto-create the bucket used by object-store.ts + Litestream on first boot.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-make-bucket
+  namespace: deepthink
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MC_HOST_deepthink
+              value: "http://$(S3_ACCESS_KEY_ID):$(S3_SECRET_ACCESS_KEY)@minio:9000"
+          envFrom:
+            - secretRef: { name: deepthink-secret }
+          command:
+            - sh
+            - -c
+            - |
+              until mc ls deepthink 2>/dev/null; do sleep 2; done
+              mc mb -p deepthink/deepthink || true
+              mc mb -p deepthink/deepthink-litestream || true
+              mc anonymous set none deepthink/deepthink || true

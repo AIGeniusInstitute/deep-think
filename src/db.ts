@@ -50,6 +50,8 @@ import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: InstanceType<typeof Database>;
 let vecExtensionLoaded = false;
+/** pgvector ANN index loaded (PG mode only). Falls back to linear scan when false. */
+let pgVectorLoaded = false;
 
 /** Access the initialized database instance. */
 export function getDb(): InstanceType<typeof Database> {
@@ -10508,7 +10510,7 @@ export function deleteKnowledgeBase(id: string, userId: string): boolean {
   // FTS trigger handles cascade delete of docs
   // But FTS5 content table is `kb_documents` — deletion via FK cascade works only if docs deleted via SQL.
   // Explicit delete to ensure FTS triggers fire:
-  if (vecExtensionLoaded) {
+  if (vecExtensionLoaded || pgVectorLoaded) {
     try {
       db.prepare(
         `DELETE FROM kb_documents_vec WHERE doc_id IN (SELECT id FROM kb_documents WHERE kb_id = ?)`,
@@ -10785,11 +10787,22 @@ export function updateDocEmbedding(
     } catch (err) {
       logger.warn({ err, docId }, 'Failed to upsert into kb_documents_vec');
     }
+  } else if (pgVectorLoaded) {
+    // PostgreSQL + pgvector: store embedding as a vector literal.
+    try {
+      const vecLit = float32ToVectorLiteral(embedding);
+      db.prepare(
+        `INSERT INTO kb_documents_vec (doc_id, embedding) VALUES (?, ?::vector)
+         ON CONFLICT (doc_id) DO UPDATE SET embedding = excluded.embedding`,
+      ).run(docId, vecLit);
+    } catch (err) {
+      logger.warn({ err, docId }, 'Failed to upsert into kb_documents_vec (pgvector)');
+    }
   }
 }
 
 export function deleteDocFromVecIndex(docId: string): void {
-  if (!vecExtensionLoaded) return;
+  if (!vecExtensionLoaded && !pgVectorLoaded) return;
   try {
     db.prepare('DELETE FROM kb_documents_vec WHERE doc_id = ?').run(docId);
   } catch (err) {
@@ -10866,6 +10879,21 @@ function initKbSearchIndexesPg(): void {
   } catch (err) {
     logger.warn({ err }, 'kb_documents trgm GIN index creation failed — KB search will seq-scan');
   }
+  // pgvector ANN — replaces sqlite-vec vec0. Gracefully degrade to linear scan.
+  try {
+    db.exec(`CREATE EXTENSION IF NOT EXISTS vector;`);
+    db.exec(`CREATE TABLE IF NOT EXISTS kb_documents_vec (
+      doc_id TEXT PRIMARY KEY,
+      embedding vector(1536)
+    );`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_kb_docs_vec_hnsw
+             ON kb_documents_vec USING hnsw (embedding vector_cosine_ops);`);
+    pgVectorLoaded = true;
+    logger.info('pgvector ANN index ready — vector search uses HNSW');
+  } catch (err) {
+    pgVectorLoaded = false;
+    logger.warn({ err }, 'pgvector unavailable — vector search degrades to linear scan');
+  }
 }
 
 export interface HybridSearchRow {
@@ -10888,7 +10916,51 @@ export function vectorSearchKbDocuments(
 ): Array<{ doc_id: string; kb_id: string; filename: string; score: number; snippet: string }> {
   if (kbIds.length === 0) return [];
   if (vecExtensionLoaded) return vectorSearchViaVec(kbIds, queryEmbedding, limit);
+  if (pgVectorLoaded) return vectorSearchViaPgvector(kbIds, queryEmbedding, limit);
   return vectorSearchKbDocumentsLinear(kbIds, queryEmbedding, limit);
+}
+
+/** Convert a Float32Array to a pgvector string literal `[v0,v1,...]`. */
+function float32ToVectorLiteral(emb: Float32Array | Buffer): string {
+  const arr = emb instanceof Buffer
+    ? Array.from({ length: emb.length / 4 }, (_, i) => emb.readFloatLE(i * 4))
+    : Array.from(emb);
+  return `[${arr.map((v) => Number(v.toFixed(6))).join(',')}]`;
+}
+
+/** Vector search via pgvector HNSW index (cosine distance). */
+function vectorSearchViaPgvector(
+  kbIds: string[],
+  queryEmbedding: Float32Array,
+  limit: number,
+): Array<{ doc_id: string; kb_id: string; filename: string; score: number; snippet: string }> {
+  const placeholders = kbIds.map(() => '?').join(',');
+  const vecLit = float32ToVectorLiteral(queryEmbedding);
+  try {
+    const rows = db
+      .prepare(
+        `SELECT v.doc_id as doc_id, v.embedding <=> ?::vector AS distance,
+                d.kb_id as kb_id, d.filename as filename, d.content as content
+         FROM kb_documents_vec v
+         JOIN kb_documents d ON d.id = v.doc_id
+         WHERE d.kb_id IN (${placeholders})
+         ORDER BY v.embedding <=> ?::vector
+         LIMIT ?`,
+      )
+      .all(vecLit, ...kbIds, vecLit, limit) as Array<{
+        doc_id: string; kb_id: string; filename: string; content: string; distance: number;
+      }>;
+    return rows.map((r) => ({
+      doc_id: r.doc_id,
+      kb_id: r.kb_id,
+      filename: r.filename,
+      score: Math.max(0, 1 - r.distance),
+      snippet: r.content.slice(0, 200).replace(/\s+/g, ' ').trim(),
+    }));
+  } catch (err) {
+    logger.warn({ err }, 'pgvector KNN query failed — falling back to linear scan');
+    return vectorSearchKbDocumentsLinear(kbIds, queryEmbedding, limit);
+  }
 }
 
 function vectorSearchViaVec(

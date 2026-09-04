@@ -1,0 +1,12 @@
+# Litestream 实时 WAL 备份 overlay — 叠加到基础 deploy/k8s
+# 用法: kubectl apply -k deploy/k8s/overlays/with-litestream/
+# 仅 SQLite 模式有意义(PG 模式有自身 WAL/pg_dump,无需 Litestream)。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: deepthink
+resources:
+  - ../../
+  - backup-pvc.yaml
+  - litestream-configmap.yaml
+patches:
+  - path: deployment-patch.yaml

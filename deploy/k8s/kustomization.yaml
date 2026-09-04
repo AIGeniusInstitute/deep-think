@@ -15,13 +15,16 @@ namespace: deepthink
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secret.yaml.example
+  # secret: 由 deploy.sh 或手动 `kubectl apply -f secret.yaml.example`(改名为 deepthink-secret.yaml)
+  # 创建,不在 base 中 apply(secret.yaml.example 是模板,apply 会覆盖真实 secret)
   - pvc.yaml
   - redis.yaml
   - postgres.yaml
+  - minio.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml
   - hpa.yaml
   - agent-runner.yaml
   - backup-cronjob.yaml
+
