@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { createRequire } from 'module';
-import Database from './sqlite-compat.js';
+import Database, { isPostgresBackend } from './sqlite-compat.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -297,6 +297,8 @@ export function initDatabase(): void {
   }
 
   // Phase 3: 加载 sqlite-vec 扩展（向量索引）。失败时回退线性扫描。
+  // PostgreSQL 后端无 sqlite-vec；向量搜索走线性扫描（pgvector 为后续 Phase）。
+  if (!isPostgresBackend) {
   try {
     const sqliteVecReq = createRequire(import.meta.url);
     const sqliteVec = sqliteVecReq('sqlite-vec');
@@ -315,6 +317,10 @@ export function initDatabase(): void {
   } catch (err) {
     logger.warn({ err }, 'sqlite-vec extension load failed — falling back to linear scan');
     vecExtensionLoaded = false;
+  }
+  } else {
+    vecExtensionLoaded = false;
+    logger.info('PostgreSQL backend — sqlite-vec skipped, vector search uses linear scan');
   }
 
   db.exec(`
@@ -1201,19 +1207,8 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_kb_docs_kb ON kb_documents(kb_id);
 
-    CREATE VIRTUAL TABLE IF NOT EXISTS kb_documents_fts USING fts5(
-      filename, content, content='kb_documents', content_rowid='rowid'
-    );
-    CREATE TRIGGER IF NOT EXISTS kb_docs_ai AFTER INSERT ON kb_documents BEGIN
-      INSERT INTO kb_documents_fts(rowid, filename, content) VALUES (new.rowid, new.filename, new.content);
-    END;
-    CREATE TRIGGER IF NOT EXISTS kb_docs_ad AFTER DELETE ON kb_documents BEGIN
-      INSERT INTO kb_documents_fts(kb_documents_fts, rowid, filename, content) VALUES('delete', old.rowid, old.filename, old.content);
-    END;
-    CREATE TRIGGER IF NOT EXISTS kb_docs_au AFTER UPDATE ON kb_documents BEGIN
-      INSERT INTO kb_documents_fts(kb_documents_fts, rowid, filename, content) VALUES('delete', old.rowid, old.filename, old.content);
-      INSERT INTO kb_documents_fts(rowid, filename, content) VALUES (new.rowid, new.filename, new.content);
-    END;
+    -- FTS5 virtual table + sync triggers are created separately below;
+    -- they are SQLite-only (PG uses pg_trgm, see initKbSearchIndexes()).
 
     CREATE TABLE IF NOT EXISTS marketplace_items (
       id TEXT PRIMARY KEY,
@@ -1373,6 +1368,16 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL
     );
   `);
+
+  // ── Knowledge-base full-text search indexes ──────────────────────────────
+  // SQLite: FTS5 virtual table + sync triggers (contentless external-content).
+  // PostgreSQL: pg_trgm GIN indexes — ILIKE/similarity search (FTS5 is
+  // SQLite-only; creating it under PG would crash initDatabase).
+  if (isPostgresBackend) {
+    initKbSearchIndexesPg();
+  } else {
+    initKbSearchIndexesSqlite();
+  }
 
   // Phase 2 columns
   ensureColumn('kb_documents', 'embedding', 'BLOB');
@@ -10607,8 +10612,36 @@ export function searchKbDocuments(
   // Sanitize: wrap as quoted phrase to avoid FTS5 syntax injection
   const sanitized = query.replace(/["'\n\r]/g, ' ').trim();
   if (!sanitized) return [];
-  const ftsQuery = `"${sanitized}"`;
   const placeholders = kbIds.map(() => '?').join(',');
+
+  // PostgreSQL has no FTS5 — use pg_trgm ILIKE search (functional fallback).
+  if (isPostgresBackend) {
+    const like = `%${sanitized}%`;
+    const rows = db
+      .prepare(
+        `SELECT
+           id as doc_id,
+           kb_id,
+           filename,
+           LEFT(content, 200) as snippet,
+           0.5 as rank
+         FROM kb_documents
+         WHERE kb_id IN (${placeholders})
+           AND (content ILIKE ? OR filename ILIKE ?)
+         ORDER BY rank
+         LIMIT ?`,
+      )
+      .all(...kbIds, like, like, limit) as Array<{
+        doc_id: string;
+        kb_id: string;
+        filename: string;
+        snippet: string;
+        rank: number;
+      }>;
+    return rows;
+  }
+
+  const ftsQuery = `"${sanitized}"`;
   const rows = db
     .prepare(
       `SELECT
@@ -10792,6 +10825,47 @@ export function listAllKbDocIds(kbId: string): Array<{ id: string; filename: str
       'SELECT id, filename, embedding FROM kb_documents WHERE kb_id = ?',
     )
     .all(kbId) as Array<{ id: string; filename: string; embedding: Buffer | null }>;
+}
+
+/**
+ * Create SQLite FTS5 virtual table + sync triggers for kb_documents.
+ * SQLite-only — PG has no fts5 module.
+ */
+function initKbSearchIndexesSqlite(): void {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS kb_documents_fts USING fts5(
+      filename, content, content='kb_documents', content_rowid='rowid'
+    );
+    CREATE TRIGGER IF NOT EXISTS kb_docs_ai AFTER INSERT ON kb_documents BEGIN
+      INSERT INTO kb_documents_fts(rowid, filename, content) VALUES (new.rowid, new.filename, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS kb_docs_ad AFTER DELETE ON kb_documents BEGIN
+      INSERT INTO kb_documents_fts(kb_documents_fts, rowid, filename, content) VALUES('delete', old.rowid, old.filename, old.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS kb_docs_au AFTER UPDATE ON kb_documents BEGIN
+      INSERT INTO kb_documents_fts(kb_documents_fts, rowid, filename, content) VALUES('delete', old.rowid, old.filename, old.content);
+      INSERT INTO kb_documents_fts(rowid, filename, content) VALUES (new.rowid, new.filename, new.content);
+    END;
+  `);
+}
+
+/**
+ * Create PostgreSQL search indexes: pg_trgm GIN for ILIKE/similarity search.
+ * Replaces SQLite FTS5. CREATE EXTENSION may fail on managed PG without
+ * superuser — indexes then degrade to seq scan, still functional.
+ */
+function initKbSearchIndexesPg(): void {
+  try {
+    db.exec(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
+  } catch (err) {
+    logger.warn({ err }, 'pg_trgm extension unavailable — KB search degrades to seq scan');
+  }
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_kb_docs_content_trgm ON kb_documents USING gin (content gin_trgm_ops);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_kb_docs_filename_trgm ON kb_documents USING gin (filename gin_trgm_ops);`);
+  } catch (err) {
+    logger.warn({ err }, 'kb_documents trgm GIN index creation failed — KB search will seq-scan');
+  }
 }
 
 export interface HybridSearchRow {

@@ -23,6 +23,9 @@ const DATABASE_URL = process.env.DATABASE_URL || '';
 const usePostgres =
   DATABASE_URL.startsWith('postgresql://') || DATABASE_URL.startsWith('postgres://');
 
+/** True when running on the PostgreSQL sync-driver backend (multi-pod cloud mode). */
+export const isPostgresBackend = usePostgres && !isBun;
+
 let DatabaseConstructor: new (path: string) => any;
 
 if (usePostgres && !isBun) {
