@@ -40,7 +40,103 @@ export interface McpContext {
   kbIds?: string[];
 }
 
+// ─── Distributed Redis IPC mode (mirror mcp-bridge.ts) ────────────
+// In distributed mode (AGENT_RUNNER_MODE=distributed + REDIS_URL), the
+// Claude engine runs in an agent-runner Pod WITHOUT a shared PVC to the
+// web-server Pod. send_message / task requests must therefore go via Redis
+// pub/sub instead of the local file system — otherwise they are lost (the
+// web-server Pod never sees the IPC file). This mirrors the mcp-bridge.ts
+// pattern already used by the codex/opencode engines, publishing to the same
+// channels the web-server already subscribes to
+// (deepthink:ipc-out:{folder}:messages / :tasks).
+const REDIS_URL = process.env.DT_REDIS_URL || process.env.REDIS_URL || '';
+const DISTRIBUTED_MODE =
+  process.env.DT_DISTRIBUTED_MODE === 'true' ||
+  process.env.AGENT_RUNNER_MODE === 'distributed';
+const distributedMode = !!REDIS_URL && DISTRIBUTED_MODE;
+
+let _redisPub: any = null;
+let _redisSub: any = null;
+let _redisConnected = false;
+let _redisInitStarted = false;
+// Set from createMcpTools(ctx) — the agent-runner is per-group, so this is
+// stable for the process lifetime. Used as the Redis channel routing key.
+let _activeGroupFolder = '';
+
+const IPC_OUTPUT_PREFIX = 'deepthink:ipc-out:';
+const IPC_TASK_RESULT_PREFIX = 'deepthink:ipc-task:';
+
+async function initRedisBridge(): Promise<void> {
+  if (_redisInitStarted) return;
+  _redisInitStarted = true;
+  if (!distributedMode) return;
+  try {
+    const { createClient } = await import('redis');
+    _redisPub = createClient({ url: REDIS_URL });
+    _redisSub = createClient({ url: REDIS_URL });
+    _redisPub.on('error', () => {});
+    _redisSub.on('error', () => {});
+    await _redisPub.connect();
+    await _redisSub.connect();
+    _redisConnected = true;
+    console.error('[mcp-tools] Redis bridge connected — distributed IPC mode active');
+  } catch (err) {
+    console.error('[mcp-tools] Redis connection failed, falling back to file-system IPC:', err);
+    _redisConnected = false;
+  }
+}
+
+async function redisPublishMessage(data: object): Promise<void> {
+  if (!_redisConnected || !_activeGroupFolder) return;
+  try {
+    await _redisPub.publish(
+      `${IPC_OUTPUT_PREFIX}${_activeGroupFolder}:messages`,
+      JSON.stringify(data),
+    );
+  } catch { /* non-fatal */ }
+}
+
+async function redisRequestTask(
+  data: Record<string, unknown> & { requestId: string },
+  resultFilePrefix: string,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  const resultChannel = `${IPC_TASK_RESULT_PREFIX}${_activeGroupFolder}:${data.requestId}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { _redisSub.unsubscribe(resultChannel); } catch { /* ignore */ }
+      reject(new Error(`Task result timeout (${timeoutMs}ms)`));
+    }, timeoutMs);
+
+    _redisSub.subscribe(resultChannel, (raw: string) => {
+      clearTimeout(timer);
+      try { _redisSub.unsubscribe(resultChannel); } catch { /* ignore */ }
+      try {
+        resolve(JSON.parse(raw) as Record<string, unknown>);
+      } catch (err) {
+        reject(new Error(`Failed to parse task result: ${err}`));
+      }
+    }).catch(() => {
+      clearTimeout(timer);
+      reject(new Error('Failed to subscribe to result channel'));
+    });
+
+    _redisPub.publish(
+      `${IPC_OUTPUT_PREFIX}${_activeGroupFolder}:tasks`,
+      JSON.stringify(data),
+    ).catch(() => {});
+  });
+}
+
 function writeIpcFile(dir: string, data: object): string {
+  // Distributed mode: send_message (messages dir) goes via Redis (fire-and-
+  // forget). Task requests are handled by pollIpcResult's distributed path.
+  // basename check mirrors mcp-bridge's `dir === MESSAGES_DIR` (MESSAGES_DIR
+  // is factory-local here, but its basename is always 'messages').
+  if (_redisConnected && path.basename(dir) === 'messages') {
+    redisPublishMessage(data).catch(() => {});
+    return '';
+  }
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
   const tempPath = `${filepath}.tmp`;
@@ -68,6 +164,10 @@ async function pollIpcResult(
   resultFilePrefix: string,
   timeoutMs: number = 30_000,
 ): Promise<Record<string, unknown>> {
+  // Distributed mode: Redis request/response pattern (mirrors mcp-bridge).
+  if (_redisConnected) {
+    return redisRequestTask(data, resultFilePrefix, timeoutMs);
+  }
   const resultFileName = `${resultFilePrefix}_${data.requestId}.json`;
   const resultFilePath = path.join(dir, resultFileName);
 
@@ -200,6 +300,13 @@ export function buildSendMessageData(
  * Create all DeepThink MCP tool definitions for in-process SDK MCP server.
  */
 export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
+  // Capture the group folder for Redis IPC routing + kick off the Redis
+  // bridge (idempotent). In non-distributed mode this is a no-op and the
+  // file-system IPC path is used unchanged.
+  _activeGroupFolder = ctx.groupFolder;
+  initRedisBridge().catch((err) =>
+    console.error('[mcp-tools] initRedisBridge failed:', err),
+  );
   const MESSAGES_DIR = path.join(ctx.workspaceIpc, 'messages');
   const TASKS_DIR = path.join(ctx.workspaceIpc, 'tasks');
   const hasCrossGroupAccess = ctx.isAdminHome;
