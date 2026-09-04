@@ -8,7 +8,7 @@
 
 | # | 项 | 状态 | 实现要点 |
 |---|---|---|---|
-| 27 | PG 完整迁移(真实 PG 验证) | 🟡脚手架齐全 | sqlite-compat PG 后端 + pg-sync-driver 同步桥 + sql-translator(基础)。initDatabase 已在 PG 启动(83400ce 修 4 缺口)。全量查询验证进行中 |
+| 27 | PG 完整迁移(真实 PG 验证) | 🟡同步桥已修 | pg-sync-driver 同步桥死锁已修复(Atomics.wait 阻塞主线程 + 结果经 worker.on('message') 死锁 → 改用持久 MessageChannel + receiveMessageOnPort + worker 端 Int32Array 视图 Atomics.notify)。真实 PG 启动验证进行中 |
 | 28 | sqlite-vec → pgvector | ✅ | `db.ts` initKbSearchIndexesPg:`CREATE EXTENSION vector` + `kb_documents_vec vector(1536)` + HNSW `vector_cosine_ops`;updateDocEmbedding PG 分支 `?::vector`+ON CONFLICT;vectorSearchViaPgvector(`<=>` KNN,退化线性) |
 | 29 | FTS5 → PG 全文索引 | ✅(pg_trgm) | `initKbSearchIndexesPg`:`pg_trgm` + 2 GIN 索引;searchKbDocuments PG 分支 ILIKE+LEFT(content,200)(83400ce)。注:用 pg_trgm 而非 tsvector,语义贴近 SQLite LIKE |
 | 30 | MinIO/S3 对象存储 | ✅ | `src/object-store.ts` 插件式 fs/s3 后端(trace-io)。动态 import @aws-sdk/client-s3(variable name,tsc 不解析)。chat-trace 读写两端经 object-store,ref 对称(fs 绝对路径 / `s3://bucket/key`) |

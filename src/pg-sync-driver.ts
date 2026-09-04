@@ -48,7 +48,12 @@ let syncPort = null;
 function respond(msg, sync, sab) {
   if (sync && syncPort) {
     syncPort.postMessage(msg);
-    if (sab) { Atomics.store(sab, 0, 1); Atomics.notify(sab, 0); }
+    if (sab) {
+      // sab is a SharedArrayBuffer; Atomics needs an Int32Array view.
+      const flag = new Int32Array(sab);
+      Atomics.store(flag, 0, 1);
+      Atomics.notify(flag, 0);
+    }
   } else {
     parentPort.postMessage(msg);
   }
@@ -62,14 +67,15 @@ parentPort.on('message', (req) => {
   }
   const { id, sql, params, sync, sab } = req;
   pool.query(sql, params || []).then(result => {
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
     respond({
       id,
-      rows: result.rows,
-      rowCount: result.rowCount,
-      lastInsertRowid: result.rows.length > 0
-        ? (result.rows[0].id ?? result.rows[0][Object.keys(result.rows[0])[0]])
+      rows,
+      rowCount: result?.rowCount ?? 0,
+      lastInsertRowid: rows.length > 0
+        ? (rows[0].id ?? rows[0][Object.keys(rows[0])[0]])
         : undefined,
-      changes: result.rowCount,
+      changes: result?.rowCount ?? 0,
     }, sync, sab);
   }).catch(err => {
     respond({ id, error: err.message, code: err.code }, sync, sab);
