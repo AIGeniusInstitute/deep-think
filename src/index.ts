@@ -175,7 +175,7 @@ import type {
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop, stopSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
-import { isRedisConnected, subscribeAgentIpc, subscribeIpcOutput, publishIpcTaskResult, publishAgentTask, hasDistributedRunners } from './redis-bus.js';
+import { isRedisConnected, subscribeAgentIpc, subscribeIpcOutput, publishIpcTaskResult, publishAgentTask, hasDistributedRunners, incrUserActive, decrUserActive, initUserActiveMirror, getUserActiveMirror } from './redis-bus.js';
 import {
   startSupervisorLoop,
   bootRecoverSupervisor,
@@ -5180,11 +5180,17 @@ async function runAgent(
       });
 
       // Publish the task to the distributed agent-runner queue
-      await publishAgentTask(taskInput);
-
-      // Wait for the final output (or timeout)
-      output = await Promise.race([finalOutputPromise, timeoutPromise]);
-      ipcWatcherManager?.unregisterDistributedOutput(group.folder);
+      // Per-user distributed active counter (计费并发上限跨 Pod 生效):
+      // incr before dispatch, decr in finally on completion/timeout.
+      if (ownerId) await incrUserActive(ownerId);
+      try {
+        await publishAgentTask(taskInput);
+        // Wait for the final output (or timeout)
+        output = await Promise.race([finalOutputPromise, timeoutPromise]);
+      } finally {
+        ipcWatcherManager?.unregisterDistributedOutput(group.folder);
+        if (ownerId) await decrUserActive(ownerId);
+      }
     } else if (executionMode === 'host') {
       output = await runHostAgent(
         group,
@@ -11687,6 +11693,10 @@ async function main(): Promise<void> {
       if (queue.hasDirectActiveRunner(jid)) userActive++;
       userActive += queue.countActiveTaskRunners(jid);
     }
+    // Distributed in-flight tasks on agent-runner pods (cross-pod accurate via
+    // Redis mirror; 0 in single-process mode — no double-count with the
+    // in-process counts above, since distributed dispatch bypasses registerProcess).
+    userActive += getUserActiveMirror(owner.id);
     return { allowed: userActive < limit };
   });
   // Recovery: when agent process exits with unconsumed IPC messages,
