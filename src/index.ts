@@ -175,7 +175,7 @@ import type {
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop, stopSchedulerLoop, triggerTaskNow, computeNextRunForSchedule } from './task-scheduler.js';
-import { isRedisConnected, subscribeAgentIpc, subscribeIpcOutput, publishIpcTaskResult, publishAgentTask, hasDistributedRunners, incrUserActive, decrUserActive, initUserActiveMirror, getUserActiveMirror } from './redis-bus.js';
+import { isRedisConnected, subscribeAgentIpc, subscribeIpcOutput, publishIpcTaskResult, publishAgentTask, hasDistributedRunners, incrUserActive, decrUserActive, initUserActiveMirror, getUserActiveMirror, acquireOwnership, renewOwnership, releaseOwnership, withOwnership } from './redis-bus.js';
 import {
   startSupervisorLoop,
   bootRecoverSupervisor,
@@ -11538,16 +11538,18 @@ async function main(): Promise<void> {
   // Clean expired sessions every hour
   setInterval(
     () => {
-      try {
-        const expiredIds = getExpiredSessionIds();
-        for (const id of expiredIds) invalidateSessionCache(id);
-        const deleted = deleteExpiredSessions();
-        if (deleted > 0) {
-          logger.info({ deleted }, 'Cleaned expired user sessions');
+      withOwnership('deepthink:periodic:clean-sessions', 300000, async () => {
+        try {
+          const expiredIds = getExpiredSessionIds();
+          for (const id of expiredIds) invalidateSessionCache(id);
+          const deleted = deleteExpiredSessions();
+          if (deleted > 0) {
+            logger.info({ deleted }, 'Cleaned expired user sessions');
+          }
+        } catch (err) {
+          logger.error({ err }, 'Failed to clean expired sessions');
         }
-      } catch (err) {
-        logger.error({ err }, 'Failed to clean expired sessions');
-      }
+      }).catch((err) => logger.error({ err }, 'periodic lock failed: clean-sessions'));
     },
     60 * 60 * 1000,
   );
@@ -11555,20 +11557,22 @@ async function main(): Promise<void> {
   // Periodically clean completed agents (task + spawn, every 10 minutes)
   setInterval(
     () => {
-      try {
-        const tenMinutesAgo = new Date(
-          Date.now() - 10 * 60 * 1000,
-        ).toISOString();
-        const cleaned = deleteCompletedAgents(tenMinutesAgo);
-        if (cleaned > 0) {
-          logger.info(
-            { cleaned },
-            'Periodic cleanup: removed completed agents',
-          );
+      withOwnership('deepthink:periodic:clean-agents', 300000, async () => {
+        try {
+          const tenMinutesAgo = new Date(
+            Date.now() - 10 * 60 * 1000,
+          ).toISOString();
+          const cleaned = deleteCompletedAgents(tenMinutesAgo);
+          if (cleaned > 0) {
+            logger.info(
+              { cleaned },
+              'Periodic cleanup: removed completed agents',
+            );
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Failed periodic task agent cleanup');
         }
-      } catch (err) {
-        logger.warn({ err }, 'Failed periodic task agent cleanup');
-      }
+      }).catch((err) => logger.error({ err }, 'periodic lock failed: clean-agents'));
     },
     10 * 60 * 1000,
   );
@@ -11576,7 +11580,9 @@ async function main(): Promise<void> {
   // Billing: check expired subscriptions every hour
   setInterval(
     () => {
-      checkAndExpireSubscriptions();
+      withOwnership('deepthink:periodic:billing-expire', 300000, async () => {
+        checkAndExpireSubscriptions();
+      }).catch((err) => logger.error({ err }, 'periodic lock failed: billing-expire'));
     },
     60 * 60 * 1000,
   );
@@ -11584,25 +11590,27 @@ async function main(): Promise<void> {
   // Billing: reconcile monthly usage every 6 hours
   setInterval(
     () => {
-      if (!isBillingEnabled()) return;
-      try {
-        const month = new Date().toISOString().slice(0, 7);
-        // Reconcile all non-admin users with pagination
-        let page = 1;
-        const pageSize = 200;
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const batch = listUsers({ status: 'active', pageSize, page });
-          for (const u of batch.users) {
-            if (u.role === 'admin') continue;
-            reconcileMonthlyUsage(u.id, month);
+      withOwnership('deepthink:periodic:reconcile-monthly', 600000, async () => {
+        if (!isBillingEnabled()) return;
+        try {
+          const month = new Date().toISOString().slice(0, 7);
+          // Reconcile all non-admin users with pagination
+          let page = 1;
+          const pageSize = 200;
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const batch = listUsers({ status: 'active', pageSize, page });
+            for (const u of batch.users) {
+              if (u.role === 'admin') continue;
+              reconcileMonthlyUsage(u.id, month);
+            }
+            if (batch.users.length < pageSize) break;
+            page++;
           }
-          if (batch.users.length < pageSize) break;
-          page++;
+        } catch (err) {
+          logger.error({ err }, 'Failed to run monthly usage reconciliation');
         }
-      } catch (err) {
-        logger.error({ err }, 'Failed to run monthly usage reconciliation');
-      }
+      }).catch((err) => logger.error({ err }, 'periodic lock failed: reconcile-monthly'));
     },
     6 * 60 * 60 * 1000,
   );
@@ -11610,18 +11618,20 @@ async function main(): Promise<void> {
   // Billing: cleanup old daily_usage and billing_audit_log every 24 hours
   setInterval(
     () => {
-      try {
-        const deletedDaily = cleanupOldDailyUsage();
-        const deletedAudit = cleanupOldBillingAuditLog();
-        if (deletedDaily > 0 || deletedAudit > 0) {
-          logger.info(
-            { deletedDaily, deletedAudit },
-            'Cleaned up old billing data',
-          );
+      withOwnership('deepthink:periodic:cleanup-billing', 300000, async () => {
+        try {
+          const deletedDaily = cleanupOldDailyUsage();
+          const deletedAudit = cleanupOldBillingAuditLog();
+          if (deletedDaily > 0 || deletedAudit > 0) {
+            logger.info(
+              { deletedDaily, deletedAudit },
+              'Cleaned up old billing data',
+            );
+          }
+        } catch (err) {
+          logger.error({ err }, 'Failed to cleanup old billing data');
         }
-      } catch (err) {
-        logger.error({ err }, 'Failed to cleanup old billing data');
-      }
+      }).catch((err) => logger.error({ err }, 'periodic lock failed: cleanup-billing'));
     },
     24 * 60 * 60 * 1000,
   );
@@ -12042,6 +12052,20 @@ async function main(): Promise<void> {
     if (user.role === 'admin') imManager.registerAdminUser(user.id);
   }
 
+  // ─── IM leader gate (horizontal scaling) ────────────────────
+  // Only one Pod holds the IM-leader lease and connects user IM channels.
+  // Without this, every Pod connects every user's Feishu / Telegram /
+  // WhatsApp / Discord → duplicate message receipt, Telegram getUpdates
+  // contention (random loss/dupes), and WhatsApp multi-device bans. The
+  // lease renews every 10s; on loss the leader disconnects all user IM. A
+  // new Pod takes over at its own startup once the prior lease (TTL 30s)
+  // lapses. Single-process (no Redis): always leader — no behavior change.
+  const IM_LEADER_KEY = 'deepthink:im-leader';
+  const IM_LEADER_TTL_MS = 30_000;
+  const POD_TOKEN = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  let imLeader = false;
+  if (await acquireOwnership(IM_LEADER_KEY, POD_TOKEN, IM_LEADER_TTL_MS)) {
+    imLeader = true;
   let anyFeishuConnected = false;
 
   // Connect each user's IM channels concurrently — startup latency was
@@ -12216,6 +12240,40 @@ async function main(): Promise<void> {
       'Feishu is not connected. Configure credentials in Settings to enable Feishu sync.',
     );
   }
+  } else {
+    logger.info('IM leader lease held by another Pod — skipping user IM connect');
+  }
+
+  // IM leader renewal: keep the lease alive, or disconnect all user IM on
+  // loss so a new leader (this Pod on takeover, or another Pod at startup)
+  // can reconnect without duplicate connections.
+  setInterval(
+    async () => {
+      try {
+        if (!imLeader) return;
+        const ok = await renewOwnership(IM_LEADER_KEY, POD_TOKEN, IM_LEADER_TTL_MS);
+        if (!ok) {
+          imLeader = false;
+          logger.warn('Lost IM leader lease — disconnecting all user IM channels');
+          try {
+            const uids = imManager.getConnectedUserIds();
+            await Promise.allSettled(
+              uids.map((id) => imManager.disconnectAllUserChannels(id)),
+            );
+            if (feishuSyncInterval) {
+              clearInterval(feishuSyncInterval);
+              feishuSyncInterval = null;
+            }
+          } catch (e) {
+            logger.error({ err: e }, 'IM disconnect-on-leader-loss failed');
+          }
+        }
+      } catch (err) {
+        logger.error({ err }, 'IM leader renewal tick failed');
+      }
+    },
+    10_000,
+  );
 
   // Run health check once on startup to clean up orphaned bindings, then periodically
   void checkImBindingsHealth().then(() => {

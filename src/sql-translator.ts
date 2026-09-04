@@ -48,20 +48,36 @@ export function translateSqliteToPg(sql: string): string {
   // We leave strftime as-is for now and let PG handle errors case-by-case.
 
   // 5. INSERT OR REPLACE / INSERT OR IGNORE → PG ON CONFLICT.
-  // PG has no `INSERT OR REPLACE`/`OR IGNORE` syntax. Both become plain
-  // INSERT with `ON CONFLICT DO NOTHING` appended (no conflict target needed,
-  // catches any unique violation). This matches OR IGNORE exactly, and for
-  // OR REPLACE is a safe approximation on a fresh DB (no existing rows to
-  // "replace"); a true upsert would need the PK column list, which we can't
-  // infer generically. The schema_version write (the main OR REPLACE site)
-  // sets the same value either way, so DO NOTHING is equivalent.
-  if (/^\s*INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/im.test(result)) {
-    result = result.replace(
-      /^INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/im,
-      'INSERT INTO',
-    );
-    result = result.replace(/;?\s*$/, ' ON CONFLICT DO NOTHING');
-  }
+  // PG has no `INSERT OR REPLACE`/`OR IGNORE` syntax.
+  //  - INSERT OR IGNORE → `INSERT INTO ... ON CONFLICT DO NOTHING` (exact match).
+  //  - INSERT OR REPLACE → a true upsert: `INSERT INTO ... ON CONFLICT (pk)
+  //    DO UPDATE SET <non-pk cols> = excluded.<col>`. This requires the table's
+  //    conflict-target columns (PK/UNIQUE), which we can't infer generically —
+  //    so we keep an explicit registry of the tables used with OR REPLACE in
+  //    db.ts. For tables not in the registry, OR REPLACE falls back to
+  //    `ON CONFLICT DO NOTHING` (the old approximation — no regression).
+  //    We only transform the single-row `VALUES (...)` form; multi-row or
+  //    column-less INSERTs fall back too.
+  //    Why this matters: the two hottest write paths use OR REPLACE —
+  //    storeMessageInsert (messages, draft→finalize same id) and
+  //    setRouterState (router_state cursor, same key per batch). With
+  //    `ON CONFLICT DO NOTHING` they would silently skip the update, leaving
+  //    stale drafts and a frozen cursor → duplicate message processing.
+  result = translateInsertOrReplace(result);
+
+  // 5a. date(col, 'localtime') → substr(col, 1, 10).
+  // SQLite `date(X, 'localtime')` returns the local date of an ISO-text
+  // timestamp. Columns here store ISO-8601 TEXT (e.g. created_at). PG has no
+  // `date(text, 'localtime')` form. `substr(col, 1, 10)` extracts the leading
+  // `YYYY-MM-DD` from the ISO text identically in both backends — sufficient for
+  // the GROUP-BY-date usage reports that are the only consumers
+  // (getOpenPlatformUsage). The `'localtime'` second arg is dropped (the stored
+  // text already carries its wall-clock value). Single-arg `date(col)` is left
+  // untouched (PG accepts `date(timestamp)`).
+  result = result.replace(
+    /\bdate\(\s*([^,)]+?)\s*,\s*['"]localtime['"]\s*\)/gi,
+    'substr($1, 1, 10)',
+  );
 
   // 5b. PRAGMA table_info(table) → PG information_schema query.
   // SQLite's PRAGMA table_info returns one row per column; callers read .name
@@ -114,6 +130,144 @@ export function translateSqliteToPg(sql: string): string {
   );
 
   return result;
+}
+
+/**
+ * Conflict-target registry for tables used with `INSERT OR REPLACE` in db.ts.
+ * Maps table name → array of PK/UNIQUE columns that serve as the ON CONFLICT
+ * target. Only tables listed here get a true upsert; others fall back to
+ * `ON CONFLICT DO NOTHING` (no regression vs. the old behavior).
+ * PK definitions (from db.ts CREATE TABLE):
+ *   messages            : PRIMARY KEY (id, chat_jid)
+ *   router_state        : key TEXT PRIMARY KEY
+ *   chats               : jid TEXT PRIMARY KEY
+ *   registered_groups   : jid TEXT PRIMARY KEY
+ *   user_pinned_groups   : PRIMARY KEY (user_id, jid)
+ *   mcp_registry_tokens  : user_id TEXT PRIMARY KEY
+ */
+const UPSERT_CONFLICT_TARGETS: Record<string, string[]> = {
+  messages: ['id', 'chat_jid'],
+  router_state: ['key'],
+  chats: ['jid'],
+  registered_groups: ['jid'],
+  user_pinned_groups: ['user_id', 'jid'],
+  mcp_registry_tokens: ['user_id'],
+};
+
+/**
+ * Translate `INSERT OR REPLACE INTO t (cols) VALUES (...)` into a true PG
+ * upsert `INSERT INTO t (cols) VALUES (...) ON CONFLICT (pk) DO UPDATE SET
+ * <non-pk cols> = excluded.<col>`. Falls back to `ON CONFLICT DO NOTHING`
+ * when: the statement is OR IGNORE (not OR REPLACE); the table is absent from
+ * the registry; the INSERT has no explicit column list; or the VALUES clause
+ * is multi-row / cannot be matched.
+ *
+ * `INSERT OR REPLACE` in SQLite means "delete the existing row and insert the
+ * new one" — i.e. every listed column takes the new value. The PG equivalent
+ * is `ON CONFLICT (pk) DO UPDATE SET <each non-pk listed col> = excluded.<col>`,
+ * which writes exactly the new values for all listed non-PK columns (matching
+ * SQLite's replace semantics for listed columns).
+ */
+function translateInsertOrReplace(sql: string): string {
+  // Fast path: not an OR-INSERT — leave untouched.
+  if (!/^\s*INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/im.test(sql)) return sql;
+
+  // Attempt to match the explicit column-list form.
+  const head = /^\s*INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\s+([\w"]+)\s*\(([^]*)$/is.exec(sql);
+  if (!head) {
+    // No column list (e.g. `INSERT OR REPLACE INTO t VALUES (...)`) — can't
+    // build a targeted upsert; fall back to DO NOTHING (old behavior).
+    return stripOrPrefix(sql) + ' ON CONFLICT DO NOTHING';
+  }
+
+  const [, modeRaw, tableRaw, rest] = head;
+  const table = tableRaw.replace(/"/g, '').toLowerCase();
+  const mode = modeRaw.toUpperCase();
+
+  // The column list is everything up to the first `)` that closes the col list.
+  // `rest` starts right after the opening `(` of the column list.
+  // Find the matching close paren of the column list (columns contain no
+  // nested parens, so the first `)` at depth 0 is it).
+  let depth = 1;
+  let i = 0;
+  let colListEnd = -1;
+  while (i < rest.length) {
+    const ch = rest[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) { colListEnd = i; break; }
+    }
+    i++;
+  }
+  if (colListEnd === -1) {
+    // No explicit column list matched → fall back to DO NOTHING.
+    return stripOrPrefix(sql) + ' ON CONFLICT DO NOTHING';
+  }
+
+  const colListRaw = rest.slice(0, colListEnd);
+  const afterCols = rest.slice(colListEnd + 1); // should start with ` VALUES (...)`
+
+  // OR IGNORE → always DO NOTHING (exact SQLite semantics).
+  if (mode === 'IGNORE') {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+
+  // OR REPLACE → try true upsert. Need table in registry + single-row VALUES.
+  const targetCols = UPSERT_CONFLICT_TARGETS[table];
+  if (!targetCols) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+
+  // Parse column names (trim, drop quotes, lowercase for comparison).
+  const cols = colListRaw.split(',').map((c) => c.trim().replace(/"/g, ''));
+  if (cols.length === 0 || cols.some((c) => !/^[a-z_][a-z0-9_]*$/i.test(c))) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+  const colsLower = cols.map((c) => c.toLowerCase());
+
+  // Only transform single-row `VALUES (...)`. Detect multi-row via top-level
+  // `)` followed by `,` followed by `(` after the VALUES group.
+  const valuesMatch = /^\s*VALUES\s*\(/i.exec(afterCols);
+  if (!valuesMatch) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+  const valuesStart = valuesMatch.index! + valuesMatch[0].length;
+  let vd = 1;
+  let j = valuesStart;
+  let valuesEnd = -1;
+  while (j < afterCols.length) {
+    const ch = afterCols[j];
+    if (ch === '(') vd++;
+    else if (ch === ')') {
+      vd--;
+      if (vd === 0) { valuesEnd = j; break; }
+    }
+    j++;
+  }
+  if (valuesEnd === -1) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+  const afterValues = afterCols.slice(valuesEnd + 1);
+  // Multi-row if another group follows.
+  if (/^\s*,\s*\(/i.test(afterValues)) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT DO NOTHING`;
+  }
+
+  // Build the SET clause: every listed column that is NOT part of the conflict
+  // target gets `<col> = excluded.<col>`. Listed conflict-target columns are
+  // not assigned (they'd violate the conflict). If all listed columns are PK
+  // (nothing to update), use DO NOTHING.
+  const setCols = colsLower.filter((c) => !targetCols.includes(c));
+  if (setCols.length === 0) {
+    return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT (${targetCols.join(', ')}) DO NOTHING`;
+  }
+  const setClause = setCols.map((c) => `${c} = excluded.${c}`).join(', ');
+  return `INSERT INTO ${tableRaw} (${colListRaw})${afterCols} ON CONFLICT (${targetCols.join(', ')}) DO UPDATE SET ${setClause}`;
+}
+
+function stripOrPrefix(sql: string): string {
+  return sql.replace(/^\s*INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/ims, 'INSERT INTO');
 }
 
 /**

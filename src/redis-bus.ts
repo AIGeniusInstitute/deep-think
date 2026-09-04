@@ -181,6 +181,91 @@ export async function releaseLock(key: string): Promise<void> {
   }
 }
 
+// ─── Token-CAS ownership (cross-Pod safe) ────────────────────
+// acquireLock/releaseLock above use process.pid as the lock value, which is
+// NOT unique across K8s Pods (two containers can both be pid 1), so a
+// non-owner Pod could release another Pod's lock. The primitives below use a
+// caller-supplied token + Lua compare-and-swap, giving safe distributed
+// ownership for long-lived resources (IM connections) and periodic tasks.
+
+const RENEW_LUA = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2], 'XX') and 1 or 0 else return 0 end`;
+const RELEASE_LUA = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`;
+
+/**
+ * Acquire ownership of `key` with a caller-supplied token (SET NX PX).
+ * @returns true if this token now owns the key; false if someone else holds it.
+ * Single-process (no Redis): always true.
+ */
+export async function acquireOwnership(
+  key: string,
+  token: string,
+  ttlMs: number,
+): Promise<boolean> {
+  const pub = getPub();
+  if (!pub) return true;
+  try {
+    const result = await pub.set(key, token, { NX: true, PX: ttlMs });
+    return result === 'OK';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Renew ownership (extend TTL) — only succeeds if this token still owns the
+ * key. Call periodically to keep a long-lived resource (e.g. an IM connection)
+ * alive on this Pod. Returns false when ownership was lost (another Pod took
+ * over, or the lease lapsed) — the caller must then release the local resource.
+ */
+export async function renewOwnership(
+  key: string,
+  token: string,
+  ttlMs: number,
+): Promise<boolean> {
+  const pub = getPub();
+  if (!pub) return true;
+  try {
+    const res = await pub.eval(RENEW_LUA, { keys: [key], arguments: [token, String(ttlMs)] });
+    return res === 1 || res === '1';
+  } catch {
+    return true;
+  }
+}
+
+/** Release ownership (CAS delete). Safe even if this Pod no longer owns it. */
+export async function releaseOwnership(
+  key: string,
+  token: string,
+): Promise<void> {
+  const pub = getPub();
+  if (!pub) return;
+  try {
+    await pub.eval(RELEASE_LUA, { keys: [key], arguments: [token] });
+  } catch {
+    // non-fatal
+  }
+}
+
+/**
+ * Run `fn` under a short-lived exclusive ownership of `key` (acquire → fn →
+ * release). Used to gate periodic maintenance tasks so only one Pod runs them
+ * per interval. Returns fn's result, or undefined if the lock could not be
+ * acquired (another Pod is handling it).
+ */
+export async function withOwnership<T>(
+  key: string,
+  ttlMs: number,
+  fn: () => Promise<T>,
+): Promise<T | undefined> {
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  if (!(await acquireOwnership(key, token, ttlMs))) return undefined;
+  try {
+    return await fn();
+  } finally {
+    await releaseOwnership(key, token);
+  }
+}
+
 // ─── Agent IPC via Redis ────────────────────────────────
 
 const AGENT_IPC_CHANNEL_PREFIX = 'deepthink:ipc:';

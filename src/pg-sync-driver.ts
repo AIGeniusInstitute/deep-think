@@ -67,15 +67,35 @@ parentPort.on('message', (req) => {
     return;
   }
   const { id, sql, params, sync, sab } = req;
-  pool.query(sql, params || []).then(result => {
+  // For INSERT without an explicit RETURNING, append 'RETURNING *' so we can
+  // recover the inserted row's auto-generated id (better-sqlite3 exposes this
+  // as result.lastInsertRowid; PG has no equivalent without RETURNING, so
+  // without this the driver returns lastInsertRowid=0 for every INSERT,
+  // corrupting downstream updates that key off the new id — task logs, loop
+  // iterations, node locks, billing txs). Statements already containing
+  // RETURNING (or CTEs starting with WITH) are left untouched. ON CONFLICT
+  // DO NOTHING/UPDATE compose fine with RETURNING.
+  let execSql = sql;
+  if (/^\\s*INSERT\\b/i.test(sql) && !/\\bRETURNING\\b/i.test(sql)) {
+    execSql = sql.replace(/;\\s*$/, '') + ' RETURNING *';
+  }
+  pool.query(execSql, params || []).then(result => {
     const rows = Array.isArray(result?.rows) ? result.rows : [];
+    // pg returns BIGINT columns as strings (JS Number can't hold >2^53);
+    // better-sqlite3 returns lastInsertRowid as a Number. Coerce numeric
+    // ids back to Number so downstream code comparing/arithmetic works the
+    // same under both backends. Non-numeric ids (TEXT PKs) stay as-is.
+    const rawLid = rows.length > 0
+      ? (rows[0].id ?? rows[0][Object.keys(rows[0])[0]])
+      : undefined;
+    const lastInsertRowid = (typeof rawLid === 'string' && /^-?\\d+$/.test(rawLid))
+      ? Number(rawLid)
+      : rawLid;
     respond({
       id,
       rows,
       rowCount: result?.rowCount ?? 0,
-      lastInsertRowid: rows.length > 0
-        ? (rows[0].id ?? rows[0][Object.keys(rows[0])[0]])
-        : undefined,
+      lastInsertRowid,
       changes: result?.rowCount ?? 0,
     }, sync, sab);
   }).catch(err => {
