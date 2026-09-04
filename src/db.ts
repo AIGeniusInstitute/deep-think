@@ -1683,6 +1683,22 @@ export function initDatabase(): void {
   `);
 
   // v15 migration: backfill group_members for existing web groups
+  // PostgreSQL fresh-DB fast path: the schema block above already created all
+  // tables/columns at the latest version (59). On a fresh PG DB, schema_version
+  // is not yet persisted (it's written at the very end of initDatabase), so
+  // every `if (version < N)` migration guard below would evaluate true and run.
+  // Those migrations use SQLite-specific functions (json_extract / json_each)
+  // that PostgreSQL lacks, and on a fresh DB there is no data to migrate
+  // anyway. Set schema_version early so all version-gated migrations skip.
+  // SQLite keeps its existing per-version migration semantics.
+  if (isPostgresBackend) {
+    const existingVer = getRouterStateInternal('schema_version');
+    if (!existingVer) {
+      db.prepare(
+        'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
+      ).run('schema_version', '59');
+    }
+  }
   const currentVersion = getRouterStateInternal('schema_version');
   if (!currentVersion || parseInt(currentVersion, 10) < 15) {
     db.transaction(() => {
@@ -2452,6 +2468,11 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_collaborations_owner ON collaborations(owner_user_id, created_at DESC);
   `);
+
+  // PostgreSQL: FK constraints are stripped at CREATE TABLE time by
+  // translateCreateTable (sql-translator.ts) because PG enforces target-table
+  // existence at parse time while SQLite tolerates forward FK references.
+  // No session_replication_role toggle needed — FKs are simply absent in PG.
 
   const SCHEMA_VERSION = '59';
   db.prepare(

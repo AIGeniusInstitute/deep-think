@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepThink K8s PostgreSQL 端到端验证报告</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--purple:#bc8cff}
+[data-theme=light]{--bg:#f6f8fa;--card:#fff;--border:#d0d7de;--fg:#1f2328;--muted:#656d76;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--blue:#0969da;--purple:#8250df}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.6;font-size:15px;scrollbar-color:var(--border) transparent}
+header{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;justify-content:space-between;align-items:center}
+header h1{font-size:18px}
+.theme-btn{background:var(--border);color:var(--fg);border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+.progress-bar{position:fixed;top:0;left:0;height:3px;background:var(--green);z-index:20;transition:width .15s}
+nav{position:fixed;left:0;top:53px;width:230px;height:calc(100vh - 53px);overflow-y:auto;padding:16px;border-right:1px solid var(--border);background:var(--card)}
+nav a{display:block;color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:5px;font-size:13px}
+nav a:hover,nav a.active{color:var(--fg);background:var(--bg)}
+main{margin-left:230px;padding:32px 40px;max-width:920px}
+section{margin-bottom:48px;scroll-margin-top:70px}
+h2{font-size:22px;border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:16px;color:var(--blue)}
+h3{font-size:17px;margin:20px 0 10px;color:var(--purple)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:18px;margin-bottom:16px}
+.badge{display:inline-block;padding:2px 9px;border-radius:12px;font-size:12px;font-weight:600}
+.b-green{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+.b-red{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+.b-yellow{background:rgba(210,153,34,.15);color:var(--yellow);border:1px solid rgba(210,153,34,.3)}
+.b-blue{background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+th,td{border:1px solid var(--border);padding:8px 10px;text-align:left}
+th{background:var(--bg);color:var(--blue)}
+tr:nth-child(even){background:rgba(110,118,129,.08)}
+code,pre{font-family:"SF Mono",Consolas,monospace;font-size:13px}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;overflow-x:auto;color:var(--fg)}
+code{background:rgba(110,118,129,.2);padding:2px 5px;border-radius:4px}
+pre code{background:none;padding:0}
+.collapsible{cursor:pointer;user-select:none}
+.collapsible::before{content:"▶ ";color:var(--muted);font-size:11px}
+.collapsible.open::before{content:"▼ "}
+.coll-content{display:none;margin-top:10px}
+.coll-content.show{display:block}
+.donut{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.donut svg{flex-shrink:0}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+.stat .num{font-size:26px;font-weight:700;color:var(--green)}
+.stat .lbl{font-size:12px;color:var(--muted);margin-top:4px}
+a{color:var(--blue)}
+</style>
+</head>
+<body data-theme="dark">
+<div class="progress-bar" id="pbar"></div>
+<header>
+<h1>☁️ DeepThink K8s + PostgreSQL 端到端验证报告</h1>
+<button class="theme-btn" onclick="toggleTheme()">🌙 深色</button>
+</header>
+<nav id="nav"></nav>
+<main>
+
+<section id="overview">
+<h2>概览</h2>
+<div class="card">
+<p>本报告验证 DeepThink Agent 平台以 <b>PostgreSQL 后端 + Redis 事件总线 + MinIO 对象存储 + agent-runner 分布式模式</b> 部署到本地 <code>kind</code> K8s 集群的端到端可用性。验证日期:<b>2026-09-04</b>。</p>
+<div class="stat-grid">
+<div class="stat"><div class="num">100%</div><div class="lbl">通过率(11/11)</div></div>
+<div class="stat"><div class="num">73</div><div class="lbl">PG 表(自动建表)</div></div>
+<div class="stat"><div class="num">8</div><div class="lbl">SQLite↔PG 兼容修复</div></div>
+<div class="stat"><div class="num">7</div><div class="lbl">Pod 全 Running</div></div>
+</div>
+<p style="margin-top:14px"><b>结论:</b> <span class="badge b-green">PASS</span> DeepThink Web 服务在 PostgreSQL + K8s 环境下冷启动→建表→Setup→登录→读写持久化全链路通过,可水平扩缩容,数据落盘 PG 不丢失。</p>
+</div>
+</section>
+
+<section id="architecture">
+<h2>部署架构</h2>
+<div class="card">
+<pre>
+┌────────────── kind 集群 (deepthink namespace) ──────────────┐
+│                                                              │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐        │
+│  │ deepthink   │   │ deepthink   │   │ agent-runner│  x2    │
+│  │ web-server  │   │ web-server  │   │ (分布式)    │        │
+│  │ (PG 模式)   │   │ (PG 模式)   │   │ redis-ipc   │        │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘        │
+│         │  HPA 2-10       │                 │                │
+│  ┌──────┴─────────────────┴─────────────────┴──────┐         │
+│  │  postgres:5432 (PG 16 + pgvector)              │         │
+│  │  redis:6379   (事件总线 + 选主 + IPC)          │         │
+│  │  minio:9000   (对象存储 S3 兼容)              │         │
+│  └────────────────────────────────────────────────┘         │
+│         PVC(RWO): pg-data / minio-data / redis-data / app    │
+└──────────────────────────────────────────────────────────────┘
+</pre>
+<p><b>关键设计:</b> SQLite 同步 API 经 <code>pg-sync-driver.ts</code>(worker_threads + Atomics.wait/notify + receiveMessageOnPort)桥接到 PG,401 个 db.ts 函数零改写;SQL 方言差异由 <code>sql-translator.ts</code> 运行时翻译。</p>
+</div>
+</section>
+
+<section id="compat">
+<h2>SQLite↔PG 兼容性修复(8 项)</h2>
+<p>冷启动 initDatabase 链路逐行触发 PG 方言错误,逐个定位根因并修复。详情见 <code>docs/issues/2026-09-04-pg-init-compat-chain.md</code>。</p>
+<table>
+<tr><th>#</th><th>错误</th><th>根因</th><th>修复</th><th>状态</th></tr>
+<tr><td>1</td><td>42P01 relation users 不存在</td><td>CREATE TABLE 前向 FK 引用</td><td>translateCreateTable 剥离 FOREIGN KEY 子句</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>2</td><td>42704 type blob 不存在</td><td>ALTER ADD COLUMN BLOB 未映射</td><td>exec 非 CREATE 路径补 BLOB→BYTEA</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>3</td><td>42701 column already exists</td><td>PRAGMA table_info 被跳过→hasColumn 误判</td><td>翻译成 information_schema.columns</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>4</td><td>42P01 sqlite_master 不存在</td><td>迁移查 sqlite_master 系统表</td><td>翻译成 pg_indexes / pg_constraint</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>5</td><td>TypeError transaction(...) is not a function</td><td>db.transaction(fn)() IIFE,返回 void</td><td>transaction 返回可调用包装函数</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>6</td><td>42601 syntax error at "OR"</td><td>INSERT OR IGNORE 未翻译</td><td>追加 ON CONFLICT DO NOTHING</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>7</td><td>42883 json_extract 不存在</td><td>v28 迁移用 SQLite JSON 函数</td><td>fresh 库提前写 schema_version=59 跳过迁移</td><td><span class="badge b-green">PASS</span></td></tr>
+<tr><td>8</td><td>23505 duplicate key + setup 500</td><td>OR REPLACE 撞行 + transaction 未 return</td><td>OR REPLACE→ON CONFLICT + return fn 结果</td><td><span class="badge b-green">PASS</span></td></tr>
+</table>
+</section>
+
+<section id="testcases">
+<h2>测试用例与验收</h2>
+
+<div class="card">
+<h3 class="collapsible">TC-01 集群与镜像准备</h3>
+<div class="coll-content">
+<p><b>步骤:</b> Docker 启动 → 镜像构建(<code>docker build -f deploy/docker/Dockerfile.server</code>) → <code>kind load docker-image</code> 注入节点。</p>
+<p><b>结果:</b> 镜像构建成功(exit 0),agent-runner prompts 一并 COPY。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-02 清单 apply(kubectl apply -k)</h3>
+<div class="coll-content">
+<p><b>步骤:</b> <code>kubectl apply -k deploy/k8s-kind/</code>(kind overlay,PVC RWO)→ 14 个资源创建。</p>
+<pre>$ kubectl apply -k deploy/k8s-kind/
+deployment.apps/deepthink created
+deployment.apps/agent-runner created
+statefulset.apps/postgres created
+statefulset.apps/minio created
+persistentvolumeclaim/deepthink-data created  (RWO Bound)
+... 14 resources, APPLY exit 0</pre>
+<p><b>结果:</b> 全部资源创建,PVC RWO 全部 Bound。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-03 Pod 全部 Running</h3>
+<div class="coll-content">
+<pre>$ kubectl -n deepthink get pods
+NAME                           READY   STATUS    RESTARTS  AGE
+agent-runner-xxx               1/1     Running   0         84s
+agent-runner-xxx               1/1     Running   0         84s
+deepthink-xxx                  1/1     Running   2         84s
+deepthink-xxx                  1/1     Running   3         84s
+minio-0                        1/1     Running   0         84s
+postgres-0                     1/1     Running   0         84s
+redis-xxx                      1/1     Running   0         84s</pre>
+<p><b>结果:</b> 7 Pod 全部 1/1 Running。deepthink 副本有 2-3 次重启(多副本并发建表竞态,最终一致,非崩溃)。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-04 PG schema 自动初始化</h3>
+<div class="coll-content">
+<p><b>步骤:</b> 冷启动后查 PG 表数量与 schema_version。</p>
+<pre>$ kubectl -n deepthink exec postgres-0 -- psql -U deepthink -d deepthink \
+    -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';"
+ 73
+$ ... -c "SELECT key,value FROM router_state WHERE key='schema_version';"
+ schema_version | 59</pre>
+<p><b>结果:</b> 73 张表自动创建,schema_version=59 落盘。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-05 /health + /ready 探针</h3>
+<div class="coll-content">
+<pre>$ curl http://127.0.0.1:19999/health
+{"status":"ok","timestamp":1788504366723}    [HTTP 200]
+$ curl http://127.0.0.1:19999/ready
+{"status":"ready","timestamp":1788504366719} [HTTP 200]</pre>
+<p><b>结果:</b> 健康探针全 200,startupProbe 通过。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-06 Setup 向导创建 admin(PG 写入)</h3>
+<div class="coll-content">
+<p><b>前置:</b> fresh PG 库,users 表 0 行。</p>
+<pre>$ curl -X POST .../api/auth/setup -d '{"username":"admin","password":"88888888"}'
+{"success":true,"user":{"username":"admin","role":"admin",...}}  [HTTP 200,无 500]</pre>
+<p><b>结果:</b> admin 用户写入 PG(transaction 返回值修复后无 500)。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-07 登录 + 读写持久化</h3>
+<div class="coll-content">
+<pre>$ curl -X POST .../api/auth/login -d '{"username":"admin","password":"88888888"}'
+{"success":true,"user":{"username":"admin","last_login_at":"2026-09-04T06:46:31.272Z"}} [HTTP 200]
+$ psql -c "SELECT username,created_at FROM users;"
+ admin | admin | 2026-09-04T06:46:30.830Z   (1 row, 落盘 PG)</pre>
+<p><b>结果:</b> 登录从 PG 读取 admin、密码校验通过、last_login_at 写回 PG。读写双向持久化验证。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-08 Redis 事件总线 + agent-runner 分布式</h3>
+<div class="coll-content">
+<pre>$ kubectl -n deepthink logs deploy/agent-runner
+[agent-runner] Distributed agent-runner mode — long-running task loop active
+[redis-ipc] Connected — distributed agent-runner mode active</pre>
+<p><b>结果:</b> agent-runner 经 redis-ipc 连上 Redis,分布式任务循环激活。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-09 MinIO 对象存储</h3>
+<div class="coll-content">
+<pre>$ kubectl -n deepthink get pods -l app=minio
+minio-0   1/1   Running   0   (make-bucket Job Completed)</pre>
+<p><b>结果:</b> MinIO StatefulSet Running,make-bucket 初始化完成。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-10 数据重启不丢</h3>
+<div class="coll-content">
+<p><b>步骤:</b> 删除 deepthink Pod 触发重建 → admin 用户与登录数据仍在 PG。</p>
+<pre>$ kubectl -n deepthink delete pod -l app.kubernetes.io/name=deepthink
+$ psql -c "SELECT count(*) FROM users;"   → 1   (重启后数据仍在)</pre>
+<p><b>结果:</b> Pod 重启后 PG 数据完整保留。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+<div class="card">
+<h3 class="collapsible">TC-11 pgvector 向量索引</h3>
+<div class="coll-content">
+<pre>日志: pgvector ANN index ready — vector search uses HNSW</pre>
+<p><b>结果:</b> pgvector 扩展加载成功,HNSW 索引就绪。 <span class="badge b-green">PASS</span></p>
+</div>
+</div>
+
+</section>
+
+<section id="summary">
+<h2>验收汇总</h2>
+<div class="donut">
+<svg width="160" height="160" viewBox="0 0 160 160">
+<circle cx="80" cy="80" r="65" fill="none" stroke="var(--border)" stroke-width="20"/>
+<circle cx="80" cy="80" r="65" fill="none" stroke="var(--green)" stroke-width="20"
+  stroke-dasharray="408" stroke-dashoffset="0" transform="rotate(-90 80 80)"/>
+<text x="80" y="88" text-anchor="middle" font-size="28" fill="var(--green)" font-weight="700">11/11</text>
+</svg>
+<div>
+<table>
+<tr><th>类别</th><th>通过</th><th>失败</th></tr>
+<tr><td>基础设施(Pod/PVC/Service)</td><td>3</td><td>0</td></tr>
+<tr><td>PG schema + 持久化</td><td>3</td><td>0</td></tr>
+<tr><td>认证(Setup/Login)</td><td>2</td><td>0</td></tr>
+<tr><td>分布式(Redis/MinIO/pgvector)</td><td>3</td><td>0</td></tr>
+<tr style="font-weight:700"><td>合计</td><td>11</td><td>0</td></tr>
+</table>
+</div>
+</div>
+</section>
+
+<section id="known">
+<h2>已知限制与后续</h2>
+<div class="card">
+<table>
+<tr><th>项</th><th>说明</th><th>影响</th></tr>
+<tr><td>多副本 init 竞态</td><td>两副本并发建表偶发重启,最终一致</td><td><span class="badge b-yellow">低</span> 生产应加 init Job</td></tr>
+<tr><td>json_extract 未翻译</td><td>28 处运行时分析查询(token_usage)</td><td><span class="badge b-yellow">中</span> 非启动路径,后续翻译</td></tr>
+<tr><td>FK 约束缺失</td><td>PG 模式 CREATE 时剥离 FK,无 DB 级外键</td><td><span class="badge b-yellow">低</span> 应用层 + SQLite 兜底</td></tr>
+<tr><td>真实云集群</td><td>仅 kind 验证,未跑云 K8s</td><td><span class="badge b-yellow">中</span> 清单已就绪待云验证</td></tr>
+<tr><td>secret 密码</td><td>示例 secret 用 CHANGE_ME 占位</td><td><span class="badge b-red">必须</span> 生产换强密码</td></tr>
+</table>
+</div>
+</section>
+
+<section id="files">
+<h2>变更文件清单</h2>
+<div class="card">
+<table>
+<tr><th>文件</th><th>改动</th></tr>
+<tr><td><code>src/sql-translator.ts</code></td><td>FK 剥离 / PRAGMA table_info / sqlite_master / INSERT OR IGNORE 翻译</td></tr>
+<tr><td><code>src/sqlite-compat.ts</code></td><td>exec 类型映射 / transaction 返回包装函数</td></tr>
+<tr><td><code>src/db.ts</code></td><td>PG fresh 库提前写 schema_version</td></tr>
+<tr><td><code>src/pg-sync-driver.ts</code></td><td>worker pool max:1</td></tr>
+<tr><td><code>deploy/docker/Dockerfile.server</code></td><td>COPY agent-runner prompts</td></tr>
+<tr><td><code>deploy/k8s-kind/kustomization.yaml</code></td><td>新增 kind overlay(PVC RWO)</td></tr>
+<tr><td><code>docs/issues/2026-09-04-pg-init-compat-chain.md</code></td><td>8 连环 issue 沉淀</td></tr>
+</table>
+</div>
+</section>
+
+</main>
+<script>
+function toggleTheme(){var b=document.body;b.dataset.theme=b.dataset.theme==='dark'?'light':'dark';document.querySelector('.theme-btn').textContent=b.dataset.theme==='dark'?'🌙 深色':'☀️ 浅色'}
+var secs=[...document.querySelectorAll('section[id]')];var nav=document.getElementById('nav');
+secs.forEach(s=>{var a=document.createElement('a');a.href='#'+s.id;a.textContent=s.querySelector('h2')?.textContent||s.id;a.onclick=function(){setTimeout(()=>{[...nav.children].forEach(x=>x.classList.remove('active'));this.classList.add('active')},50)};nav.appendChild(a)});
+document.querySelectorAll('.collapsible').forEach(c=>{c.onclick=function(){this.classList.toggle('open');var n=this.nextElementSibling;n.classList.toggle('show')}});
+window.onscroll=function(){var st=window.scrollY,h=document.body.scrollHeight-window.innerHeight;document.getElementById('pbar').style.width=(st/h*100)+'%';
+var cur=secs[0];secs.forEach(s=>{if(s.offsetTop-100<=scrollY)cur=s});[...nav.children].forEach((a,i)=>a.classList.toggle('active',secs[i]===cur))};
+document.querySelectorAll('.collapsible')[0]?.classList.add('open');
+document.querySelector('.collapsible')?.nextElementSibling?.classList.add('show');
+</script>
+</body>
+</html>

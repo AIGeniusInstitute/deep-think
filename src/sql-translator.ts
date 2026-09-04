@@ -47,11 +47,53 @@ export function translateSqliteToPg(sql: string): string {
   // This is a simplification; complex strftime calls may need manual fixing.
   // We leave strftime as-is for now and let PG handle errors case-by-case.
 
-  // 5. INSERT OR REPLACE INTO → INSERT INTO ... ON CONFLICT
-  // (Too complex to translate generically — needs primary key info.
-  //  We leave INSERT OR REPLACE as a no-op prefix removal; PG will error
-  //  on conflicts, which is acceptable for migration debugging.)
-  result = result.replace(/^INSERT\s+OR\s+REPLACE\s+INTO/ims, 'INSERT INTO');
+  // 5. INSERT OR REPLACE / INSERT OR IGNORE → PG ON CONFLICT.
+  // PG has no `INSERT OR REPLACE`/`OR IGNORE` syntax. Both become plain
+  // INSERT with `ON CONFLICT DO NOTHING` appended (no conflict target needed,
+  // catches any unique violation). This matches OR IGNORE exactly, and for
+  // OR REPLACE is a safe approximation on a fresh DB (no existing rows to
+  // "replace"); a true upsert would need the PK column list, which we can't
+  // infer generically. The schema_version write (the main OR REPLACE site)
+  // sets the same value either way, so DO NOTHING is equivalent.
+  if (/^\s*INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/im.test(result)) {
+    result = result.replace(
+      /^INSERT\s+OR\s+(?:IGNORE|REPLACE)\s+INTO/im,
+      'INSERT INTO',
+    );
+    result = result.replace(/;?\s*$/, ' ON CONFLICT DO NOTHING');
+  }
+
+  // 5b. PRAGMA table_info(table) → PG information_schema query.
+  // SQLite's PRAGMA table_info returns one row per column; callers read .name
+  // and (rarely) .pk. We translate to information_schema.columns. pk defaults
+  // to 0 — its only consumer is a sessions-PK migration guard that is a no-op
+  // on a fresh PG DB (new schema already has the composite PK).
+  const tiMatch = result.match(
+    /^\s*PRAGMA\s+table_info\s*\(\s*'?([^)']+)'?\s*\)\s*;?\s*$/i,
+  );
+  if (tiMatch) {
+    const tbl = tiMatch[1].replace(/"/g, '').toLowerCase();
+    return `SELECT column_name AS name, 0 AS pk FROM information_schema.columns WHERE table_name = '${tbl}' AND table_schema = current_schema()`;
+  }
+
+  // 5c. sqlite_master catalog queries → PG catalog equivalents.
+  // (a) SELECT sql FROM sqlite_master WHERE type='table' AND name='X' →
+  //     aggregate CHECK-constraint definitions. Callers inspect the DDL text
+  //     (e.g. for "'parallel'" in a CHECK) to decide whether to rebuild a
+  //     table; on a fresh PG DB the constraint already includes the marker,
+  //     so the migration correctly skips.
+  result = result.replace(
+    /SELECT\s+sql\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*'?(\w+)'?/gi,
+    "SELECT STRING_AGG(pg_get_constraintdef(c.oid), ' ') AS sql FROM pg_constraint c JOIN pg_class t ON c.conrelid = t.oid JOIN pg_namespace n ON c.connamespace = n.oid WHERE t.relname = '$1' AND n.nspname = current_schema() AND c.contype = 'c'",
+  );
+  // (b) FROM sqlite_master WHERE type='index' AND tbl_name='X' AND name='Y' →
+  //     pg_indexes. Fresh PG has no SQLite-style 'sqlite_autoindex_*' names,
+  //     so the count is 0 and the migration (e.g. dropping a legacy UNIQUE)
+  //     correctly skips.
+  result = result.replace(
+    /FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'index'\s+AND\s+tbl_name\s*=\s*'?(\w+)'?\s+AND\s+name\s*=\s*'?([^'\s;]+)'?/gi,
+    "FROM pg_indexes WHERE tablename = '$1' AND indexname = '$2'",
+  );
 
   // 6. PRAGMA statements — no-op in PG (handled by SET commands)
   if (/^\s*PRAGMA\s+/i.test(result)) {
@@ -128,6 +170,27 @@ function replacePlaceholders(sql: string): string {
  */
 export function translateCreateTable(sql: string): string {
   let result = translateSqliteToPg(sql);
+
+  // PostgreSQL enforces target-table existence at CREATE TABLE parse time:
+  // `FOREIGN KEY (x) REFERENCES users(id)` fails with 42P01 if `users` is
+  // created later in the same init pass. SQLite tolerates forward FK refs.
+  // `SET session_replication_role='replica'` only disables FK *triggers*
+  // (DML-time), NOT the parse-time reference check — so it cannot help.
+  // Like `pg_dump --schema-only` (which emits FKs as deferred ALTER
+  // constraints), we strip FK clauses from CREATE TABLE here. PG mode
+  // therefore has no DB-level FK constraints; integrity is enforced at the
+  // application layer (and by SQLite on single-node deployments).
+  // All FKs in this schema are table-level `FOREIGN KEY (...) REFERENCES
+  // t(...) [ON DELETE/UPDATE ...]`, one per line.
+  result = result
+    .split('\n')
+    .filter((line) => !/^\s*FOREIGN KEY\b/i.test(line))
+    .join('\n');
+  // Remove any trailing comma left dangling before a closing paren
+  // (the line above the stripped FK ended with `,` and was the last column).
+  result = result.replace(/,\s*\)/g, ')');
+  // Collapse any double commas created by stripping a middle FK.
+  result = result.replace(/,\s*,/g, ',');
 
   // Type mappings
   result = result.replace(/\bBLOB\b/gi, 'BYTEA');

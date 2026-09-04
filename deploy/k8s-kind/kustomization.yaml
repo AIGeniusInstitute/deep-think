@@ -1,0 +1,20 @@
+# Kind overlay: adapts the base K8s bundle (../k8s/) for a local `kind` cluster.
+# kind's default StorageClass provisions only RWO volumes (single-node kind
+# allows multi-pod RWO). Apply with:
+#   kubectl apply -k deploy/k8s-kind/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: deepthink
+
+resources:
+  - ../k8s
+
+patches:
+  # PVC: RWX → RWO (kind storageclass supports RWO only)
+  - target:
+      kind: PersistentVolumeClaim
+      name: deepthink-data
+    patch: |-
+      - op: replace
+        path: /spec/accessModes/0
+        value: ReadWriteOnce

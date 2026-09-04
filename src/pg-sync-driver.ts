@@ -39,7 +39,8 @@ import pg from 'pg';
 
 const pool = new pg.Pool({
   connectionString: workerData.url,
-  max: 10,
+  max: 1,
+  idleTimeoutMillis: 0,
   statement_timeout: 30000,
 });
 

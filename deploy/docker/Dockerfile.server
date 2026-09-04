@@ -56,6 +56,9 @@ COPY --from=backend-builder /app/dist ./dist
 COPY --from=frontend-builder /app/web/dist ./web/dist
 COPY --from=agent-builder /app/container/agent-runner/dist ./container/agent-runner/dist
 
+# Copy agent-runner prompts (needed at runtime by loadPrompt)
+COPY container/agent-runner/prompts ./container/agent-runner/prompts
+
 # Copy runtime config and skills
 COPY config/ ./config/
 COPY container/skills/ ./container/skills/

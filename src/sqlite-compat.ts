@@ -80,20 +80,41 @@ function createPgDatabaseClass(): new (path: string) => any {
 
     exec(sql: string): void {
       const isCreate = /^\s*CREATE\s+TABLE/i.test(sql);
-      const pgSql = isCreate ? translateCreateTable(sql) : translateSqliteToPg(sql);
+      let pgSql: string;
+      if (isCreate) {
+        pgSql = translateCreateTable(sql);
+      } else {
+        pgSql = translateSqliteToPg(sql);
+        // ALTER TABLE ADD COLUMN may carry SQLite types (BLOB/REAL) that PG
+        // rejects (42704 "type blob does not exist"). Map them here — exec
+        // is DDL-only (CREATE/ALTER/PRAGMA), so this never touches row data.
+        pgSql = pgSql.replace(/\bBLOB\b/gi, 'BYTEA');
+        pgSql = pgSql.replace(/\bREAL\b/gi, 'DOUBLE PRECISION');
+      }
       if (pgSql.trim().startsWith('--')) return; // Skip PRAGMA comments
       this.getDriver().querySync(pgSql, []);
     }
 
-    transaction(fn: () => void): void {
-      this.getDriver().querySync('BEGIN', []);
-      try {
-        fn();
-        this.getDriver().querySync('COMMIT', []);
-      } catch (err) {
-        this.getDriver().querySync('ROLLBACK', []);
-        throw err;
-      }
+    transaction(fn: (...args: any[]) => void): (...args: any[]) => void {
+      // Match better-sqlite3 semantics: return a callable wrapper that runs
+      // fn inside BEGIN/COMMIT. This supports both idioms used in db.ts:
+      //   db.transaction(() => {})()        // IIFE
+      //   const tx = db.transaction(fn); tx(arg)
+      return (...args: any[]) => {
+        this.getDriver().querySync('BEGIN', []);
+        try {
+          const result = fn(...args);
+          this.getDriver().querySync('COMMIT', []);
+          return result;
+        } catch (err) {
+          try {
+            this.getDriver().querySync('ROLLBACK', []);
+          } catch {
+            /* ignore rollback failure */
+          }
+          throw err;
+        }
+      };
     }
 
     pragma(name: string, _value?: string): any {
