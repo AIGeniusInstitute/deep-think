@@ -10988,6 +10988,14 @@ async function main(): Promise<void> {
       logger.warn({ err }, 'Error closing database');
     }
 
+    // Close PostgreSQL sync driver worker thread (graceful, no-op when on SQLite).
+    try {
+      const { closePgSyncDriver } = await import('./pg-sync-driver.js');
+      closePgSyncDriver();
+    } catch (err) {
+      logger.warn({ err }, 'Error closing PG sync driver');
+    }
+
     logger.info('Shutdown complete');
     process.exit(0);
   };
