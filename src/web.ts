@@ -13,6 +13,7 @@ import {
   isRedisConnected,
   closeRedis,
   publishWsBroadcast,
+  initUserActiveMirror,
 } from './redis-bus.js';
 
 // Static asset root: injected by desktop launcher via env var; defaults to
@@ -3025,6 +3026,11 @@ export function startWebServer(webDeps: WebDeps): void {
       safeBroadcastLocal(msg as WsMessageOut, adminOnly, allowedUserIds);
     }).catch((err) => {
       logger.warn({ err }, 'Failed to subscribe to Redis WS broadcast channel');
+    });
+    // Subscribe to per-user distributed active counter broadcasts so the
+    // sync userConcurrentLimitFn reads an up-to-date cross-pod mirror.
+    initUserActiveMirror().catch((err) => {
+      logger.warn({ err }, 'Failed to init user-active mirror');
     });
   }).catch((err) => {
     logger.warn({ err }, 'Redis init failed — running in single-process mode');

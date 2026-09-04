@@ -263,6 +263,100 @@ export async function decrCounter(key: string): Promise<number> {
   }
 }
 
+// ─── Per-User Distributed Active Counter (计费并发上限) ────
+//
+// 问题:用户级并发上限检查(userConcurrentLimitFn)是 sync 签名,但分布式
+// dispatch(走 agent-runner Pod)是 async。分布式分支不调 registerProcess,
+// 故 hasDirectActiveRunner 在多 Pod 下只看到本 Pod 本地 spawn 的 agent,
+// 少算跨 Pod 的分布式 in-flight 任务 → 用户可突破计费并发上限。
+//
+// 方案:Redis 计数器 deepthink:user-active:{userId} 作全局真值,本地 Map
+// mirror 供 sync 检查器读。incr/decr 返回后直接写 mirror(本 Pod 即时准确),
+// 并 PUBLISH 新总数给其它 Pod 刷新其 mirror。语义为"set 新总数",idempotent,
+// 无自回声双计(自回声只是重设同一值)。
+//
+// 与本地 in-process 计数(hasDirectActiveRunner)互斥:分布式分支不碰
+// activeContainerCount,故 userActive = localInProcess + distributedMirror 不双计。
+//
+// 无 REDIS_URL 时 mirror 恒为 0,行为退化为现有单进程逻辑,零回归。
+
+const USER_ACTIVE_PREFIX = 'deepthink:user-active:';
+const USER_ACTIVE_PUB_CHANNEL = 'deepthink:user-active-pub';
+const _userActiveMirror = new Map<string, number>();
+
+/** 递增用户分布式活跃计数(分布式 dispatch 前调用)。 */
+export async function incrUserActive(userId: string): Promise<void> {
+  const pub = getPub();
+  if (!pub) return;
+  const key = `${USER_ACTIVE_PREFIX}${userId}`;
+  try {
+    const n = await pub.incr(key);
+    if (n === 1) await pub.expire(key, 3600);
+    _userActiveMirror.set(userId, n);
+    await pub.publish(
+      USER_ACTIVE_PUB_CHANNEL,
+      JSON.stringify({ userId, total: n }),
+    );
+  } catch (err) {
+    logger.warn({ err, userId }, 'Redis incrUserActive failed');
+  }
+}
+
+/** 递减用户分布式活跃计数(分布式 dispatch 完成后调用)。 */
+export async function decrUserActive(userId: string): Promise<void> {
+  const pub = getPub();
+  if (!pub) return;
+  const key = `${USER_ACTIVE_PREFIX}${userId}`;
+  try {
+    const n = await pub.decr(key);
+    if (n < 0) {
+      // 防漂移:不应为负,修正为 0
+      await pub.set(key, 0, { EX: 3600 });
+      _userActiveMirror.set(userId, 0);
+      await pub.publish(
+        USER_ACTIVE_PUB_CHANNEL,
+        JSON.stringify({ userId, total: 0 }),
+      );
+      return;
+    }
+    _userActiveMirror.set(userId, n);
+    await pub.publish(
+      USER_ACTIVE_PUB_CHANNEL,
+      JSON.stringify({ userId, total: n }),
+    );
+  } catch (err) {
+    logger.warn({ err, userId }, 'Redis decrUserActive failed');
+  }
+}
+
+/** 读取本 Pod 缓存的用户分布式活跃计数(sync,供 userConcurrentLimitFn)。 */
+export function getUserActiveMirror(userId: string): number {
+  return _userActiveMirror.get(userId) ?? 0;
+}
+
+/**
+ * 订阅用户活跃计数广播,刷新本 Pod mirror(跨 Pod 同步)。
+ * 必须在 initRedis 后调用。无 Redis 时 no-op。
+ */
+export async function initUserActiveMirror(): Promise<void> {
+  const sub = getSub();
+  if (!sub) return;
+  try {
+    await sub.subscribe(USER_ACTIVE_PUB_CHANNEL, (raw: string) => {
+      try {
+        const { userId, total } = JSON.parse(raw);
+        if (typeof userId === 'string' && typeof total === 'number') {
+          _userActiveMirror.set(userId, total);
+        }
+      } catch (err) {
+        logger.warn({ err, raw }, 'Failed to parse user-active pub');
+      }
+    });
+  } catch (err) {
+    logger.warn({ err }, 'initUserActiveMirror subscribe failed');
+  }
+}
+
 // ─── IPC Output: agent-runner/mcp-bridge → web server ────────
 
 const IPC_OUTPUT_PREFIX = 'deepthink:ipc-out:';
