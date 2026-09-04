@@ -1,0 +1,22 @@
+# Litestream config — real-time SQLite WAL replication to S3/MinIO.
+# Mounts onto the deepthink pod as a sidecar (see deployment-sqlite.yaml).
+# Litestream streams the SQLite WAL to s3://deepthink-litestream/ every
+# ~1s, enabling point-in-time recovery of the SQLite DB. Applies to SQLite
+# single-replica deployments; PostgreSQL deployments use PG native backup
+# (backup-cronjob.yaml pg_dump).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litestream-config
+  namespace: deepthink
+data:
+  litestream.yml: |
+    dbs:
+      - path: /data/db/messages.db
+        replicas:
+          - type: s3
+            bucket: deepthink-litestream
+            path: messages
+            endpoint: http://minio:9000
+            force-path-style: true
+            sync-interval: 1s

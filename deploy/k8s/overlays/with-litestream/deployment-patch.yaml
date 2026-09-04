@@ -1,0 +1,41 @@
+# Strategic merge patch: 给 deepthink-web Deployment 叠加 Litestream sidecar。
+# 复用 /data 卷(只读访问 messages.db)+ 挂 /backup + 挂配置。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepthink-web
+  namespace: deepthink
+spec:
+  template:
+    spec:
+      containers:
+        - name: litestream
+          image: litestream/litestream:0.3.13
+          args: ["replicate", "-config", "/etc/litestream/litestream.yml"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: backup
+              mountPath: /backup
+            - name: litestream-config
+              mountPath: /etc/litestream
+          env:
+            - name: LITESTREAM_S3_BUCKET
+              valueFrom:
+                secretKeyRef: { name: deepthink-secret, key: LITESTREAM_S3_BUCKET, optional: true }
+            - name: LITESTREAM_S3_ENDPOINT
+              valueFrom:
+                secretKeyRef: { name: deepthink-secret, key: LITESTREAM_S3_ENDPOINT, optional: true }
+            - name: LITESTREAM_S3_REGION
+              value: us-east-1
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+      volumes:
+        - name: backup
+          persistentVolumeClaim:
+            claimName: deepthink-backup
+        - name: litestream-config
+          configMap:
+            name: deepthink-litestream-config

@@ -27,3 +27,13 @@ data:
   # ─── Redis (multi-pod shared state) ─────────
   # Points to the Redis service in the same namespace
   REDIS_URL: "redis://redis:6379"
+
+  # ─── Object Store (large-file offload + Litestream target) ──
+  # OBJECT_STORE_PROVIDER: fs (default, PVC) | s3 (MinIO/S3)
+  # When s3, large trace I/O offloads to MinIO instead of local disk,
+  # enabling stateless pods. See src/object-store.ts.
+  OBJECT_STORE_PROVIDER: "fs"
+  S3_BUCKET: "deepthink"
+  S3_ENDPOINT: "http://minio:9000"
+  S3_REGION: "us-east-1"
+  S3_FORCE_PATH_STYLE: "true"

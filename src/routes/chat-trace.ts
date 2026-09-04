@@ -26,9 +26,9 @@ import {
   listTraceSteps,
   getTraceStep,
 } from '../db.js';
-import { readFileSync } from 'node:fs';
 import { resolve, relative } from 'node:path';
 import { DATA_DIR } from '../config.js';
+import { getTraceIo } from '../object-store.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
@@ -105,19 +105,26 @@ router.get('/:jid/trace/steps/:spanId/io', async (c) => {
   if (!step || !step.output_ref) {
     return c.json({ error: 'No offloaded I/O for this step' }, 404);
   }
-  // Path-traversal guard: the ref must resolve under DATA_DIR/trace-io/.
-  // Must match the WRITE side (chat-trace-persist.ts traceIoDir, which uses
-  // DATA_DIR). Earlier this read process.cwd()/data/trace-io while the writer
-  // used DATA_DIR — the mismatch made every offloaded I/O read fail the guard
-  // and return 400, so trace tool I/O was write-only / unreadable.
+  const ref = step.output_ref;
+  // S3 object-store refs (s3://bucket/key) — key is deterministic from
+  // buildTraceIoRef, not user-controlled, so no path-traversal concern.
+  if (ref.startsWith('s3://')) {
+    try {
+      const content = await getTraceIo(ref);
+      return c.json({ spanId, content });
+    } catch {
+      return c.json({ error: 'I/O object not found' }, 404);
+    }
+  }
+  // fs refs: path-traversal guard (must resolve under DATA_DIR/trace-io/).
   const ioRoot = resolve(DATA_DIR, 'trace-io');
-  const resolved = resolve(step.output_ref);
+  const resolved = resolve(ref);
   const rel = relative(ioRoot, resolved);
   if (rel.startsWith('..') || resolve(ioRoot, rel) !== resolved) {
     return c.json({ error: 'Invalid ref' }, 400);
   }
   try {
-    const content = readFileSync(resolved, 'utf8');
+    const content = await getTraceIo(resolved);
     return c.json({ spanId, content });
   } catch {
     return c.json({ error: 'I/O file not found' }, 404);

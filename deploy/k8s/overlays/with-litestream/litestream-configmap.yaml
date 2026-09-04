@@ -1,0 +1,31 @@
+# Litestream 配置 — 实时流式复制 SQLite WAL(秒级 RPO)。
+# 默认副本目标:本地 /backup PVC(独立于 /data,防 Pod/磁盘故障)。
+# 切 S3/MinIO:见 deployment-patch.yaml 的 env 注入 + 本文件 s3 段示例(注释),
+#   取消注释并填入端点即可;或用 S3_* env(litestream 支持 ${VAR} 展开)。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepthink-litestream-config
+  namespace: deepthink
+  labels:
+    app.kubernetes.io/name: deepthink
+    app.kubernetes.io/component: litestream-sidecar
+data:
+  litestream.yml: |
+    addr: ":9090"
+    dbs:
+      - path: /data/db/messages.db
+        replicas:
+          # 本地副本(默认,无外部依赖)
+          - type: file
+            path: /backup/messages
+            sync-interval: 1s
+            retention: 24h
+          # S3/MinIO 副本(可选,取消注释并填端点;或用下方 env 注入)
+          # - type: s3
+          #   bucket: ${LITESTREAM_S3_BUCKET}
+          #   path: litestream/messages
+          #   endpoint: ${LITESTREAM_S3_ENDPOINT}
+          #   region: ${LITESTREAM_S3_REGION:-us-east-1}
+          #   force-path-style: true
+          #   sync-interval: 1s

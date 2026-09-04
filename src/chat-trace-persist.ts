@@ -26,9 +26,7 @@ import {
 } from './db.js';
 import type { TraceStepUpsertInput } from './db.js';
 import { logger } from './logger.js';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { DATA_DIR } from './config.js';
+import { buildTraceIoRef, putTraceIo } from './object-store.js';
 
 const TOOL_IO_MAX = 64 * 1024; // 64KB per input/output JSON — trace volume guard
 const COARSE_NODE_TYPES = new Set([
@@ -114,21 +112,6 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) : s;
 }
 
-/** Resolve (and lazily create) the on-disk dir for a trace's large I/O files. */
-function traceIoDir(traceId: string): string {
-  // DATA_DIR points at the shared PVC in K8s (mountPath /data). Using
-  // process.cwd() here wrote to the ephemeral container fs (/app/data) —
-  // trace files were lost on pod restart, leaving DB output_ref as dangling
-  // pointers. Pin to DATA_DIR so offloaded I/O survives restarts.
-  const dir = join(DATA_DIR, 'trace-io', traceId);
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    // dir may already exist; ignore
-  }
-  return dir;
-}
-
 /**
  * If `text` exceeds the DB size guard, write the full payload to a file and
  * return the file path (stored in output_ref). Otherwise return the truncated
@@ -144,9 +127,11 @@ function offloadLargeIo(
     return { inline: truncate(text, TOOL_IO_MAX), ref: null };
   }
   try {
-    const file = join(traceIoDir(traceId), `${spanId}.${side}.json`);
-    writeFileSync(file, text);
-    return { inline: truncate(text, TOOL_IO_MAX), ref: file };
+    // Object-store-backed: fs (PVC) by default, S3/MinIO when configured.
+    // Ref is deterministic so write & read stay symmetric across backends.
+    const ref = buildTraceIoRef(traceId, spanId, side);
+    putTraceIo(ref, text, traceId);
+    return { inline: truncate(text, TOOL_IO_MAX), ref };
   } catch (err) {
     logger.warn({ err, traceId, spanId }, 'offloadLargeIo failed — truncating inline');
     return { inline: truncate(text, TOOL_IO_MAX), ref: null };

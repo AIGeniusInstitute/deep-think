@@ -1,0 +1,53 @@
+# Velero 灾备调度 — 定期全集群备份(含 PV 快照)。
+# 前置(集群级,不在本仓库清单内):
+#   1. 已安装 Velero operator(velero install)
+#   2. 已配置 BackupStorageLocation(default) + VolumeSnapshotLocation
+#   3. 存储:对象存储(S3/MinIO)作备份目标 + 存储类支持 snapshot
+# 多集群灾备:在主集群应用本 Schedule;灾备集群配置同名 BackupStorageLocation
+# 指向同一对象存储,`velero restore` 即可跨集群恢复。
+---
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: deepthink-daily-backup
+  namespace: velero
+  labels:
+    app.kubernetes.io/name: deepthink
+spec:
+  schedule: "17 3 * * *"   # 每天 03:17(避开整点)
+  template:
+    includedNamespaces:
+      - deepthink
+    includeVolumes: true
+    snapshotVolumes: true
+    ttl: 168h   # 保留 7 天
+    hooks:
+      pre:
+        # PG 一致性快照前先 pg_dump(防 WAL 事务中半截状态)
+        - name: pg-predump
+          namespace: deepthink
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+          exec:
+            container: postgres
+            command:
+              - /bin/sh
+              - -c
+              - "pg_dump -U deepthink deepthink > /backup/pre-velero-$(date +%s).sql || true"
+---
+# 元数据 + PV 周增量(更小 RPO)
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: deepthink-hourly-incremental
+  namespace: velero
+  labels:
+    app.kubernetes.io/name: deepthink
+spec:
+  schedule: "23 * * * *"   # 每小时 :23
+  template:
+    includedNamespaces:
+      - deepthink
+    includeVolumes: false   # 增量只备元数据,PV 靠快照保留策略
+    ttl: 48h

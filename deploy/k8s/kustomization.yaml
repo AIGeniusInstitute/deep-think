@@ -19,6 +19,8 @@ resources:
   - pvc.yaml
   - redis.yaml
   - postgres.yaml
+  - minio.yaml
+  - litestream-config.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml

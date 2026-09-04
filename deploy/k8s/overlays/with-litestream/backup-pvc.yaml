@@ -1,0 +1,11 @@
+# 独立备份卷,Litestream 副本落此地(与 /data PVC 分离,防同盘故障)。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: deepthink-backup
+  namespace: deepthink
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi

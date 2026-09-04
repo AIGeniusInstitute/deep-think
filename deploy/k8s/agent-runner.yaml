@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: agent-runner
-        image: deepthink/server:latest
+        image: deepthink-server:latest
         command: ["node", "container/agent-runner/dist/index.js"]
         envFrom:
         - configMapRef:
