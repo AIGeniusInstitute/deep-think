@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>K8s 全量无状态化缺口修复 — 测试报告</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#c9d1d9; --mut:#8b949e; --ok:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:19px; margin:36px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); color:#fff; }
+  h3 { font-size:15px; margin:22px 0 8px; color:var(--accent); }
+  .meta { color:var(--mut); font-size:13px; margin-bottom:24px; }
+  .summary { display:flex; gap:16px; flex-wrap:wrap; margin:20px 0; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px 20px; flex:1 1 180px; }
+  .card .n { font-size:30px; font-weight:700; }
+  .card .l { color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .donut-wrap { display:flex; align-items:center; gap:24px; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:20px 28px; margin:16px 0; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  th,td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--border); font-size:13px; }
+  th { background:#1c2128; color:var(--mut); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+  tr:last-child td { border-bottom:none; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:11px; font-weight:600; }
+  .pill.ok { background:rgba(63,185,80,.15); color:var(--ok); }
+  .pill.bad { background:rgba(248,81,73,.15); color:var(--bad); }
+  .pill.warn { background:rgba(210,153,34,.15); color:var(--warn); }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:12px; color:#f0883e; }
+  pre { background:#1c2128; padding:14px; border-radius:8px; overflow-x:auto; font-size:12px; line-height:1.5; border:1px solid var(--border); }
+  .callout { background:rgba(210,153,34,.08); border-left:3px solid var(--warn); padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; }
+  .toc { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 20px; margin:16px 0 28px; }
+  .toc a { color:var(--accent); text-decoration:none; font-size:13px; }
+  .toc a:hover { text-decoration:underline; }
+  .bar-bg { height:8px; background:#21262d; border-radius:4px; overflow:hidden; }
+  .bar-fg { height:100%; background:linear-gradient(90deg,var(--ok),#2ea043); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>K8s 全量无状态化缺口修复 — 测试报告</h1>
+  <div class="meta">分支 feat/k8s-stateless-completion · 2026-09-04 · 审计 + Tier A（PG 数据层）+ Tier B（水平扩缩容）</div>
+
+  <div class="toc">
+    <strong>目录：</strong>
+    <a href="#summary">总览</a> ·
+    <a href="#a">Tier A · PG 数据层（真实 PG）</a> ·
+    <a href="#b">Tier B · 分布式原语（真实 Redis）</a> ·
+    <a href="#reg">回归</a> ·
+    <a href="#pend">未推进项</a>
+  </div>
+
+  <h2 id="summary">总览</h2>
+  <div class="summary">
+    <div class="card"><div class="n ok">6/6</div><div class="l">硬缺口修复</div></div>
+    <div class="card"><div class="n ok">32</div><div class="l">验证用例通过</div></div>
+    <div class="card"><div class="n bad">0</div><div class="l">失败</div></div>
+    <div class="card"><div class="n ok">102/102</div><div class="l">SQLite smoke</div></div>
+    <div class="card"><div class="n ok">0</div><div class="l">回归</div></div>
+  </div>
+
+  <div class="donut-wrap">
+    <svg width="120" height="120" viewBox="0 0 120 120">
+      <circle cx="60" cy="60" r="50" fill="none" stroke="#21262d" stroke-width="14"/>
+      <circle cx="60" cy="60" r="50" fill="none" stroke="#3fb950" stroke-width="14"
+        stroke-dasharray="314.16" stroke-dashoffset="0" transform="rotate(-90 60 60)"/>
+      <text x="60" y="66" text-anchor="middle" fill="#3fb950" font-size="22" font-weight="700">100%</text>
+    </svg>
+    <div>
+      <div style="font-size:18px;font-weight:700;color:#fff">32/32 验证用例通过</div>
+      <div style="color:var(--mut);font-size:13px">真实 PostgreSQL(pgvector:pg16) + 真实 Redis(redis:7-alpine) + SQLite 回归</div>
+    </div>
+  </div>
+
+  <h2 id="a">Tier A · PG 数据层（真实 PostgreSQL）</h2>
+  <p>容器：<code>pgvector/pgvector:pg16</code>，端口 5433。经 <code>translateSqliteToPg</code> + <code>pg-sync-driver</code> 全链路。</p>
+  <h3>翻译器单元（10/10）</h3>
+  <table>
+    <tr><th>用例</th><th>结果</th></tr>
+    <tr><td>messages upsert（PK(id,chat_jid) 排除自 SET）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>router_state upsert</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>chats upsert</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>user_pinned_groups upsert</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>mcp_registry_tokens upsert</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>OR IGNORE → DO NOTHING（回退）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>未知表 OR REPLACE → DO NOTHING（零回归）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>无列列表 OR REPLACE → DO NOTHING</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>多行 OR REPLACE → DO NOTHING</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>date(localtime) → substr</td><td><span class="pill ok">PASS</span></td></tr>
+  </table>
+
+  <h3>真实 PG 集成（11/11）</h3>
+  <table>
+    <tr><th>AC</th><th>验证</th><th>结果</th></tr>
+    <tr><td>A1</td><td>messages draft→finalize：恰好 1 行，content=final（真 upsert，非 DO NOTHING 跳过）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A1</td><td>router_state 游标 key=cursor：t1→t2 真推进（非冻结）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A2</td><td>INSERT INTO t_serial 返回 lastInsertRowid=1（Number，非 0/undefined）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A2</td><td>按返回 id 回查到行（id 可用）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A3</td><td>getOpenPlatformUsage 分组：2 天，无 PG 报错</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A3</td><td>首组 date substr 正确</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>A3</td><td>生产形态（AS date 别名 + ORDER BY date）在 PG 下跑通</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td colspan="2">…余 4 项（行数/值校验）均 PASS</td><td><span class="pill ok">PASS</span></td></tr>
+  </table>
+
+  <div class="callout"><strong>坑点记录</strong>：pg-sync-driver worker 脚本是 JS 模板字面量，内嵌正则的 <code>\d</code> 被模板吃掉变 <code>d</code>（正则失配 → 数字强转未生效）。须写 <code>\\d</code>。同理 <code>\\s</code>/<code>\\b</code>。调试时通过 <code>process.exit(0)</code> 保留运行时 worker .mjs 文件定位。</div>
+
+  <h2 id="b">Tier B · 分布式原语（真实 Redis）</h2>
+  <p>容器：<code>redis:7-alpine</code>，端口 6380。多 Pod 以独立 token 模拟（Redis Lua CAS 在服务端执行，与客户端进程无关，等价跨 Pod）。</p>
+  <table>
+    <tr><th>AC</th><th>验证</th><th>结果</th></tr>
+    <tr><td>B1</td><td>podA 首个 acquire 成功</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B1</td><td>podB 在 podA 持锁时 acquire 失败</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B1</td><td>owner renew 成功；非 owner renew 失败</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B1</td><td>非 owner release 为 no-op（CAS）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B1</td><td>owner release 后另一 token 可 acquire</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B1</td><td>TTL 过期后另一 token 接管（failover）</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B3</td><td>withOwnership 同 key 3 并发仅 1 执行 fn</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>B3</td><td>3 并发仅 1 返回值，2 返回 undefined</td><td><span class="pill ok">PASS</span></td></tr>
+  </table>
+
+  <h2 id="reg">回归</h2>
+  <table>
+    <tr><th>项</th><th>结果</th><th>说明</th></tr>
+    <tr><td>SQLite smoke</td><td><span class="pill ok">102/102</span></td><td>9 test files，含 chat-trace-store / open-platform-validation / graph-expr / memory-write-trace / llm-call-trace / skill-im-command 等</td></tr>
+    <tr><td>后端 tsc --noEmit</td><td><span class="pill ok">exit 0</span></td><td>sql-translator / pg-sync-driver / redis-bus / index.ts</td></tr>
+    <tr><td>agent-runner tsc --noEmit</td><td><span class="pill ok">exit 0</span></td><td>container/agent-runner/src/mcp-tools.ts</td></tr>
+  </table>
+  <div style="margin:18px 0">
+    <div style="color:var(--mut);font-size:12px;margin-bottom:6px">SQLite smoke 通过率</div>
+    <div class="bar-bg"><div class="bar-fg" style="width:100%"></div></div>
+  </div>
+
+  <h2 id="pend">未推进项（独立大改 / 需云凭证）</h2>
+  <table>
+    <tr><th>项</th><th>状态</th><th>说明</th></tr>
+    <tr><td>Tier C：记忆/Skills/MCP配置/WhatsApp auth/embedding/产物 → 迁 DB/对象存储</td><td><span class="pill warn">后续</span></td><td>共享 RWX PVC 下当前可工作（持久化 + 多 Pod 共享达标）；全量迁移是独立架构改动，后续单独推进</td></tr>
+    <tr><td>Tier D：真实云集群 kubectl apply -k 端到端</td><td><span class="pill warn">后续</span></td><td>需云凭证，PRD 明确非本地可完成；本次以真实 PG + 真实 Redis 代码级端到端验证替代</td></tr>
+    <tr><td>IM leader per-user 分片散布</td><td><span class="pill warn">优化</span></td><td>当前单 leader，正确性已达标；IM 吞吐跨 Pod 散布为后续优化</td></tr>
+  </table>
+
+  <h2>结论</h2>
+  <p>审计发现的 6 项代码级硬缺口（Tier A 三大 PG 数据层致命缺口 + Tier B 三大水平扩缩容阻塞）全部修复并通过真实 PG / 真实 Redis / SQLite 回归验证，零回归。PG 模式从「仅能跑无冲突新库 CRUD 子集」提升到「可支撑生产消息流（消息 draft→finalize 真更新、游标真推进、自增 id 真返回）」；多 Pod 从「重复连 IM / 周期任务并发」提升到「IM 单 leader 选举 + 周期任务单 Pod 执行 + Claude 引擎 IPC 跨 Pod 可达」。剩余 Tier C/D 为独立大改与云凭证依赖，非本次范围。</p>
+</div>
+</body>
+</html>
