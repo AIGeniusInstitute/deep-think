@@ -16,6 +16,7 @@
  */
 
 import { translateSqliteToPg, translateCreateTable } from './sql-translator.js';
+import { getPgSyncDriver, closePgSyncDriver } from './pg-sync-driver.js';
 
 const isBun = typeof (globalThis as any).Bun !== 'undefined';
 
@@ -62,8 +63,7 @@ function createPgDatabaseClass(): new (path: string) => any {
 
     private getDriver(): any {
       // Access the singleton driver (already initialized by index.ts)
-      const mod = require('./pg-sync-driver.js');
-      const driver = mod.getPgSyncDriver();
+      const driver = getPgSyncDriver();
       if (!driver?.isInitialized()) {
         throw new Error(
           'PostgreSQL sync driver not initialized. ' +
@@ -110,8 +110,7 @@ function createPgDatabaseClass(): new (path: string) => any {
     }
 
     close(): void {
-      const mod = require('./pg-sync-driver.js');
-      mod.closePgSyncDriver();
+      closePgSyncDriver();
     }
   };
 }

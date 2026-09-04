@@ -62,7 +62,7 @@ COPY container/skills/ ./container/skills/
 COPY container/entrypoint.sh ./container/entrypoint.sh
 
 # Non-root user
-RUN useradd -r -u 1000 -g root deepthink \
+RUN useradd -o -r -u 1000 -g root deepthink \
     && mkdir -p /data \
     && chown -R deepthink:root /app /data
 

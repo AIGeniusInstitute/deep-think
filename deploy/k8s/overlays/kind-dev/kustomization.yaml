@@ -1,0 +1,44 @@
+# kind 本地端到端验证 overlay（精简 SQLite 单进程）
+# 叠加到 base（deploy/k8s/），patches 覆盖:
+# - REDIS_URL 清空（无 Redis 依赖 → app 优雅降级单进程 SQLite）
+# - PVC RWO + kind standard SC
+# - 单副本 + Recreate
+# - Service NodePort 30080
+# base 含的 redis/postgres/agent-runner/ingress/hpa/backup 会一并 apply,
+# 但 web pod 无 REDIS_URL → 单进程,不连它们;无害。
+# 用法:先建 secret(见 README),再 kubectl apply -k deploy/k8s/overlays/kind-dev/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: deepthink
+resources:
+  - ../../
+patches:
+  - target: { kind: ConfigMap, name: deepthink-config }
+    patch: |
+      - op: replace
+        path: /data/REDIS_URL
+        value: ""
+  - target: { kind: PersistentVolumeClaim, name: deepthink-data }
+    patch: |
+      - op: replace
+        path: /spec/accessModes/0
+        value: ReadWriteOnce
+      - op: add
+        path: /spec/storageClassName
+        value: standard
+  - target: { kind: Deployment, name: deepthink-web }
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/strategy/type
+        value: Recreate
+  - target: { kind: Service, name: deepthink }
+    patch: |
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30080

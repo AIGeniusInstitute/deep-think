@@ -53,11 +53,23 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          # Startup probe: PG-mode cold start creates 59 tables through the
+          # worker-thread sync bridge, which can take over a minute. The
+          # startup probe (up to 30×10s = 300s) prevents liveness from killing
+          # the pod during this initial schema build.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 15
+            initialDelaySeconds: 0
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
