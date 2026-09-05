@@ -4,6 +4,20 @@ All notable changes to DeepThink are documented here. For the full release notes
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.3.0] — 2026-09-06
+
+A **cloud-native & collaboration** release. DeepThink evolves from "single-node multi-agent orchestration + open services" (v1.2.0) to "K8s fully stateless + horizontal multi-Pod scaling + collaborative work + deeper platform capabilities".
+
+- **Cloud-native: single-node → K8s fully stateless horizontal scaling** — the release's dominant engineering arc, closed across 5 phases: K8s cloud deployment & data persistence (Phase 1); true multi-Pod statelessness (**Redis event bus + distributed leader election + PostgreSQL sync bridge**); **Agent IPC Redis message-driven + Agent Runner as an independent Service**; Phase 3 production-grade (**pgvector** over Milvus, **MinIO/S3** object storage, **Litestream** WAL backup), followed by a full stateless-gap audit (Tier A PG data-layer: true upsert / lastInsertRowid / date(localtime); Tier B scaling: IM leader election / Claude-engine Redis IPC / periodic-task gating) and a shared concurrency counter wired to Redis so per-user/global limits hold across Pods.
+- **Multi-user collaboration** — three work modes (orchestrator-worker / peer / critic-adversarial) + group-shared workspaces (`collaborations/{collabId}/` deliverables/manifest/shared-memory), all expressed as `agent + gate` graph nodes with zero intrusion into the graph-engineering core.
+- **Platform capability deepening** — full-lifecycle trace (`trace_steps` atomic table + span chains + timeline API + DAG render), validate nodes & hooks (json-schema-validator + onFail fail/retry/fallback + business webhooks with HMAC/timeout/retry/idempotency), harness-eval assertions (json_schema/json_path/numeric_range/llm_judge) + eval dashboard, Skills version management (snapshot/rollback) + tools overview page. Schema 56→58; 1634 tests passing.
+- **Enterprise tool governance & least-privilege baseline** — side-effect grading (read/write/admin), write idempotency keys, tool-call audit log, sliding-window rate limiting (read=120/write=30/admin=10 per 60s), AES-256-GCM credential encryption.
+- **PG INTEGER→BIGINT timestamp overflow fix** + **local persistent storage stack** (`deploy/local/` docker-compose: PG+pgvector / Redis AOF / MinIO S3).
+- First-level navigation simplified to 7 items; ops toolchain + one-click deploy + desktop packaging hardening.
+- Image-build 403/slow-source fix, desktop packaging `tsc not found`, `_ensure-native-abi` better-sqlite3 detection, start-prod watchdog auto-restart.
+
+📖 Full notes: [docs/release_notes/v1.3.0.md](docs/release_notes/v1.3.0.md)
+
 ## [v1.2.0] — 2026-08-28
 
 An **orchestration & opening-up** release. DeepThink evolves from "a single autonomous Agent's vertical leap" (v1.1.0) to "multi-agent horizontal orchestration + standardized external services".
