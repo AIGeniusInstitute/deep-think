@@ -9,9 +9,13 @@ FROM node:22-slim
 # See issue #403.
 #
 # APT_MIRROR: container build can't read host apt config, China networks time
-# out on deb.debian.org. Default to Tsinghua mirror; override with
+# out on deb.debian.org. Default to USTC mirror; override with
 # `--build-arg APT_MIRROR=` (empty) for direct connection, or another mirror.
-ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+# Why USTC not Tsinghua: the Tsinghua mirror's IPv6 node returns HTTP 403 for
+# most debian pool .deb files (IPv4 is fine), but buildkit over `--network=host`
+# prefers IPv6, so the whole apt-get install layer aborts with exit 100. USTC
+# serves both IPv4 and IPv6 at 200 (~0.5s per file).
+ARG APT_MIRROR=mirrors.ustc.edu.cn
 RUN if [ -n "${APT_MIRROR}" ]; then \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
         /etc/apt/sources.list.d/debian.sources; \
@@ -97,12 +101,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Symlink fd-find → fd (Debian names it fdfind)
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# Copy uv from official image (multi-arch, no extra download).
-# Placed AFTER the apt-get layer: uv:latest releases frequently, so its digest
-# changes invalidate this layer on most rebuilds. Keeping the heavy apt-get
-# layer above ensures it stays cached across uv version bumps. See issue #403.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/bin/uvx
+# Install uv (Astral, https://docs.astral.sh/uv/). uv/uvx are standalone binaries
+# the agent may invoke inside the container; not used by entrypoint/agent-runner.
+# Source: `pip install uv` ships pre-built native binaries per arch — no image
+# pull. Pinned to Aliyun mirror: ghcr.io is ~280s/23MB on CN networks and the
+# Tsinghua mirror returns 403 for some packages; Aliyun serves `uv` and
+# `headroom-ai` at 0.1s. `--break-system-packages`: PIP_BREAK_SYSTEM_PACKAGES
+# ENV is set below, but this RUN runs before that ENV takes effect.
+RUN pip install --break-system-packages \
+      --index-url https://mirrors.aliyun.com/pypi/simple/ uv \
+    && uv --version \
+    && command -v uvx
 
 # Locale environment
 ENV LANG=en_US.UTF-8
@@ -149,10 +158,12 @@ RUN npm install
 # 曾因 [memory]→torch 把镜像撑爆; `headroom --version` 自检只挡『装不上』挡不住
 # 体积/行为漂移, 故锁定已验证的 ~550MB footprint, 仅允许 0.27.x 补丁更新.
 #
-# PIP_INDEX_URL default to Tsinghua mirror: same root cause as NPM_REGISTRY —
+# PIP_INDEX_URL default to Aliyun mirror: same root cause as NPM_REGISTRY —
 # container build can't read host pip config, China networks time out on pypi.org.
+# Aliyun (not Tsinghua): the Tsinghua mirror returns HTTP 403 for `headroom-ai`
+# (not synced / filtered), which aborts this layer; Aliyun serves it at 0.1s.
 # Override with `--build-arg PIP_INDEX_URL=https://pypi.org/simple`.
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 RUN pip install --index-url "${PIP_INDEX_URL}" "headroom-ai[code,mcp]~=0.27.0" \
     && headroom --version
 

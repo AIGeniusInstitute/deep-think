@@ -197,18 +197,13 @@ export interface StreamEvent {
     /** Short excerpt of the injected reminder text. */
     summary: string;
   };
-  /** Evidence item: ties a judgment (gate / supervisor / eval) to the
-   *  underlying proof it relied on. `ref` is a stable handle (trace span_id,
-   *  tool_use_id, file path, log line) the UI can follow to the source. */
-  evidence?: Array<{
-    type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
-    ref: string;
-    detail?: string;
-  }>;
-  /** Trace node metadata for DAG visualization. Persisted to chat_trace_nodes
-   *  (coarse types) and trace_steps (atomic types). */
+  /** Trace node metadata for DAG visualization. Persisted to loop_trace_nodes. */
   traceNode?: {
     nodeId: number;
+    /** Coarse DAG types (chat_trace_nodes) OR atomic step types (trace_steps).
+     *  The persist layer (chat-trace-persist.ts) splits on COARSE_NODE_TYPES;
+     *  non-coarse values route to trace_steps. Must stay in sync with
+     *  container/agent-runner/src/trace-node-allocator.ts TraceNodeDescriptor. */
     nodeType:
       | 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent'
       | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
@@ -229,21 +224,22 @@ export interface StreamEvent {
      *  persist layer can join trace_tool_calls without re-reading the event. */
     toolName?: string;
     toolUseId?: string;
-    /** Atomic Step Trace (v57): full-linkage IDs. traceId ties every step in a
-     *  conversation together; spanId is this step's unique id; parentSpanId
-     *  links to the enclosing step (e.g. a thinking span under a turn). */
+    /** Atomic Step Trace (v57): span linkage so a coarse DAG node cross-
+     *  references its fine-grained trace_steps row. traceId/spanId identify
+     *  the span this node belongs to; parentSpanId mirrors parentNodeId in
+     *  span space. Optional — coarse nodes may lack span info. */
     traceId?: string;
     spanId?: string;
     parentSpanId?: string | null;
-    /** Evidence backing a judgment emitted by this node (gate/supervisor/eval). */
+    /** Inline evidence items (mirrors db.ts TraceEvidenceItem — kept inline so
+     *  this shared file stays import-free for cross-project copying). */
     evidence?: Array<{
       type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
       ref: string;
       detail?: string;
-    }>;
-    /** File ref for >64KB tool I/O (persist layer offloads full payload to
-     *  data/trace-io/{traceId}/{spanId}.{in|out}.json and stores the path here). */
-    outputRef?: string;
+    }> | null;
+    /** Object-store ref for offloaded large I/O (see chat-trace-persist.ts). */
+    outputRef?: string | null;
   };
   /** Super Agent Team P1: a human approval node paused the run and is awaiting
    *  the user's decision in the DeepThink chat. The frontend renders an

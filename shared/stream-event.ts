@@ -200,7 +200,15 @@ export interface StreamEvent {
   /** Trace node metadata for DAG visualization. Persisted to loop_trace_nodes. */
   traceNode?: {
     nodeId: number;
-    nodeType: 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent';
+    /** Coarse DAG types (chat_trace_nodes) OR atomic step types (trace_steps).
+     *  The persist layer (chat-trace-persist.ts) splits on COARSE_NODE_TYPES;
+     *  non-coarse values route to trace_steps. Must stay in sync with
+     *  container/agent-runner/src/trace-node-allocator.ts TraceNodeDescriptor. */
+    nodeType:
+      | 'turn' | 'tool' | 'review' | 'goal_check' | 'skill' | 'subagent'
+      | 'thinking' | 'compact' | 'memory_recall' | 'memory_write'
+      | 'tool_select' | 'llm_call' | 'permission_check' | 'context_audit'
+      | 'validation';
     parentNodeId?: number | null;
     title?: string;
     inputSummary?: string;
@@ -216,6 +224,22 @@ export interface StreamEvent {
      *  persist layer can join trace_tool_calls without re-reading the event. */
     toolName?: string;
     toolUseId?: string;
+    /** Atomic Step Trace (v57): span linkage so a coarse DAG node cross-
+     *  references its fine-grained trace_steps row. traceId/spanId identify
+     *  the span this node belongs to; parentSpanId mirrors parentNodeId in
+     *  span space. Optional — coarse nodes may lack span info. */
+    traceId?: string;
+    spanId?: string;
+    parentSpanId?: string | null;
+    /** Inline evidence items (mirrors db.ts TraceEvidenceItem — kept inline so
+     *  this shared file stays import-free for cross-project copying). */
+    evidence?: Array<{
+      type: 'message' | 'test' | 'file' | 'log' | 'trace_node' | 'tool_call' | 'metric';
+      ref: string;
+      detail?: string;
+    }> | null;
+    /** Object-store ref for offloaded large I/O (see chat-trace-persist.ts). */
+    outputRef?: string | null;
   };
   /** Super Agent Team P1: a human approval node paused the run and is awaiting
    *  the user's decision in the DeepThink chat. The frontend renders an

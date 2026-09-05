@@ -36,8 +36,8 @@ echo "Image: ${IMAGE_NAME}:${TAG}"
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 BUILD_NETWORK="${BUILD_NETWORK:-host}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
-PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-APT_MIRROR="${APT_MIRROR-mirrors.tuna.tsinghua.edu.cn}"
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+APT_MIRROR="${APT_MIRROR-mirrors.ustc.edu.cn}"
 GITHUB_MIRROR="${GITHUB_MIRROR-https://gh-proxy.com/}"
 
 build_with_args() {
