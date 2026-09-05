@@ -176,6 +176,7 @@ export function RegistryPanel() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
                               <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-muted">{t.httpBinding.method}</span>
+                              <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${t.sideEffect === 'admin' ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' : t.sideEffect === 'write' ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'}`} title="副作用等级">{t.sideEffect ?? 'read'}</span>
                               <span className="font-mono text-sm font-medium">{t.mcpName}</span>
                               {!t.enabled && (
                                 <span className="text-xs text-muted-foreground">（停用）</span>

@@ -380,7 +380,8 @@ test-smoke: ## 最小回归测试集（CI 门禁，< 60s）
 	  tests/graph-expr.test.ts \
 	  tests/units/memory-write-trace.test.ts \
 	  tests/units/llm-call-trace.test.ts \
-	  tests/units/skill-im-command.test.ts
+	  tests/units/skill-im-command.test.ts \
+	  tests/units/tool-governance.test.ts
 
 format: ## 格式化代码
 	$(PKG) run format

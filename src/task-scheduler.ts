@@ -50,6 +50,8 @@ import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
 import { checkOwnerActive } from './owner-gate.js';
 import { stripAgentInternalTags } from './utils.js';
+import { cleanupExpiredIdempotency } from './mcp-registry/governance.js';
+import { sweepEmptyBuckets } from './mcp-registry/rate-limit.js';
 
 /**
  * Resolve the actual group JID to send a task to.
@@ -1172,6 +1174,14 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           }
         } catch (err) {
           logger.error({ err }, 'Failed to cleanup old task run logs');
+        }
+        // 工具治理：清理过期幂等缓存 + 限流空桶
+        try {
+          const removed = cleanupExpiredIdempotency();
+          if (removed > 0) logger.info({ removed }, 'Cleaned up expired idempotency records');
+          sweepEmptyBuckets();
+        } catch (err) {
+          logger.warn({ err }, 'tool governance cleanup failed (non-fatal)');
         }
       }
 

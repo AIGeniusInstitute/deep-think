@@ -590,7 +590,7 @@ function buildConfig(
   };
 }
 
-function getOrCreateEncryptionKey(): Buffer {
+export function getOrCreateEncryptionKey(): Buffer {
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
 
   if (fs.existsSync(CLAUDE_CONFIG_KEY_FILE)) {
