@@ -8,9 +8,10 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import crypto from 'crypto';
 import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
-import { authMiddleware } from '../middleware/auth.js';
+import { authMiddleware, adminRoleMiddleware } from '../middleware/auth.js';
 import { logger } from '../logger.js';
 import {
   listRegistryServers,
@@ -27,18 +28,22 @@ import {
   getOrCreateRegistryToken,
   rotateRegistryToken,
   getUserIdByRegistryToken,
+  listToolCallAuditLog,
 } from '../db.js';
 import {
   RegistryServerCreateSchema,
   RegistryServerUpdateSchema,
   RegistryToolCreateSchema,
   RegistryToolUpdateSchema,
+  RegistrySideEffectSchema,
 } from '../schemas.js';
 import {
   executeRegistryTool,
   parseRegistryToolRow,
   sanitizeServerPrefix,
 } from '../mcp-registry/engine.js';
+import { resolveSideEffect, type SideEffect } from '../mcp-registry/governance.js';
+import { checkRateLimit } from '../mcp-registry/rate-limit.js';
 import { parseOpenApi } from '../mcp-registry/openapi-parser.js';
 
 const mcpRegistryRoutes = new Hono<{ Variables: Variables }>();
@@ -59,6 +64,12 @@ function toolToApi(
   let httpBinding: unknown = {};
   try { inputSchema = JSON.parse(row.input_schema); } catch { /* keep default */ }
   try { httpBinding = JSON.parse(row.http_binding); } catch { /* keep default */ }
+  // 副作用：DB side_effect 列优先，否则按 httpBinding.method 推断
+  const method = (httpBinding as { method?: string } | undefined)?.method;
+  const sideEffect = resolveSideEffect(
+    (row.side_effect as SideEffect | undefined) ?? null,
+    method,
+  );
   return {
     id: row.id,
     server_id: row.server_id,
@@ -67,6 +78,7 @@ function toolToApi(
     enabled: row.enabled === 1,
     inputSchema,
     httpBinding,
+    sideEffect,
     mcpName: `${sanitizeServerPrefix(serverName)}__${row.name}`,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -161,6 +173,7 @@ mcpRegistryRoutes.post('/servers/:id/tools', authMiddleware, async (c) => {
     input_schema: JSON.stringify(v.data.inputSchema),
     http_binding: JSON.stringify(v.data.httpBinding),
     enabled: v.data.enabled,
+    side_effect: resolveSideEffect(v.data.sideEffect ?? null, v.data.httpBinding.method),
   });
   if (!row) return c.json({ error: 'Server not found' }, 404);
   return c.json({ tool: toolToApi(row, server.name) });
@@ -182,6 +195,7 @@ mcpRegistryRoutes.patch('/tools/:id', authMiddleware, async (c) => {
     ...(v.data.inputSchema !== undefined ? { input_schema: JSON.stringify(v.data.inputSchema) } : {}),
     ...(v.data.httpBinding !== undefined ? { http_binding: JSON.stringify(v.data.httpBinding) } : {}),
     ...(v.data.enabled !== undefined ? { enabled: v.data.enabled } : {}),
+    ...(v.data.sideEffect !== undefined ? { side_effect: v.data.sideEffect } : {}),
   });
   if (!row) return c.json({ error: 'Tool not found' }, 404);
   return c.json({ tool: toolToApi(row, server?.name ?? '') });
@@ -214,10 +228,17 @@ mcpRegistryRoutes.post('/tools/:id/test', authMiddleware, async (c) => {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return c.json({ error: 'arguments must be an object' }, 400);
   }
-  const result = await executeRegistryTool(tool, args);
+  const requestId = c.req.header('X-Request-Id') || crypto.randomUUID();
+  c.header('X-Request-Id', requestId);
+  const result = await executeRegistryTool(tool, args, {
+    userId: authUser.id,
+    requestId,
+    idempotencyKey: c.req.header('Idempotency-Key') || null,
+  });
   return c.json({
     isError: result.isError === true,
     content: result.content,
+    idempotentReplay: result.idempotentReplay === true,
   });
 });
 
@@ -289,6 +310,7 @@ mcpRegistryRoutes.post('/import-openapi/confirm', authMiddleware, async (c) => {
       description: v.data.description ?? '',
       input_schema: JSON.stringify(v.data.inputSchema),
       http_binding: JSON.stringify(v.data.httpBinding),
+      side_effect: resolveSideEffect(v.data.sideEffect ?? null, v.data.httpBinding.method),
     });
     if (row) created.push(toolToApi(row, server.name));
   }
@@ -309,6 +331,20 @@ mcpRegistryRoutes.post('/token/rotate', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   const token = rotateRegistryToken(authUser.id);
   return c.json({ token });
+});
+
+// GET /audit-log — 工具调用审计（admin）
+mcpRegistryRoutes.get('/audit-log', authMiddleware, adminRoleMiddleware, async (c) => {
+  const userId = c.req.query('user_id') || null;
+  const toolId = c.req.query('tool_id') || null;
+  const sideEffect = c.req.query('side_effect') || null;
+  if (sideEffect && !RegistrySideEffectSchema.safeParse(sideEffect).success) {
+    return c.json({ error: 'invalid side_effect' }, 400);
+  }
+  const limit = Number(c.req.query('limit') ?? 50);
+  const offset = Number(c.req.query('offset') ?? 0);
+  const { rows, total } = listToolCallAuditLog({ userId, toolId, sideEffect, limit, offset });
+  return c.json({ rows, total });
 });
 
 // ─── MCP streamable-HTTP 端点 ──────────────────────────────
@@ -347,7 +383,7 @@ function resolveUserFromRequest(c: Context<{ Variables: Variables }>): string | 
 
 type Ctx = Context<{ Variables: Variables }>;
 
-async function handleMcp(c: Ctx, req: JsonRpcRequest) {
+async function handleMcp(c: Ctx, req: JsonRpcRequest, requestId: string) {
   // 鉴权
   const userId = resolveUserFromRequest(c);
   if (!userId) {
@@ -387,6 +423,10 @@ async function handleMcp(c: Ctx, req: JsonRpcRequest) {
           name: `${prefix}__${r.name}`,
           description: r.description || `${prefix}.${r.name}`,
           inputSchema,
+          sideEffect: resolveSideEffect(
+            (r.side_effect as SideEffect | undefined) ?? null,
+            undefined,
+          ),
         };
       });
       return c.json(jsonRpcResponse(req.id, { tools }));
@@ -420,11 +460,30 @@ async function handleMcp(c: Ctx, req: JsonRpcRequest) {
       if (!tool) {
         return c.json(jsonRpcError(req.id, -32603, 'Tool binding is corrupt'), 200);
       }
-      const result = await executeRegistryTool(tool, args);
+      // 限流：per-user + per-tool + sideEffect
+      const sideEff = resolveSideEffect(tool.sideEffect, tool.httpBinding.method);
+      const rl = checkRateLimit(userId, tool.id, sideEff);
+      if (!rl.allowed) {
+        c.header('Retry-After', String(Math.ceil(rl.retryAfterMs / 1000) || 1));
+        return c.json(
+          jsonRpcError(
+            req.id,
+            -32000,
+            `Rate limit exceeded (${sideEff}: ${rl.limit}/60s). Retry after ${Math.ceil(rl.retryAfterMs / 1000)}s.`,
+          ),
+          429,
+        );
+      }
+      const result = await executeRegistryTool(tool, args, {
+        userId,
+        requestId,
+        idempotencyKey: c.req.header('Idempotency-Key') || null,
+      });
       return c.json(
         jsonRpcResponse(req.id, {
           content: result.content,
           ...(result.isError ? { isError: true } : {}),
+          ...(result.idempotentReplay ? { idempotentReplay: true } : {}),
         }),
         200,
       );
@@ -459,10 +518,14 @@ mcpRegistryRoutes.all('/mcp', async (c) => {
   if (!req || req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
     return c.json(jsonRpcError(req?.id, -32600, 'Invalid Request'), 400);
   }
+  // 注入 requestId：优先取 X-Request-Id 头，无则生成；响应头回写。
+  const requestId = c.req.header('X-Request-Id') || crypto.randomUUID();
+  c.header('X-Request-Id', requestId);
   try {
-    return await handleMcp(c, req);
+    return await handleMcp(c, req, requestId);
   } catch (err) {
-    logger.error({ err, method: req.method }, 'MCP registry endpoint error');
+    logger.error({ err, method: req.method, requestId }, 'MCP registry endpoint error');
+    c.header('X-Request-Id', requestId);
     return c.json(
       jsonRpcError(req.id, -32603, 'Internal error'),
       200,

@@ -17,6 +17,7 @@ import {
   type RegistryHttpBinding,
   type RegistryInputSchema,
   type RegistryTool,
+  type SideEffect,
 } from '../../stores/mcp-registry';
 
 interface Props {
@@ -28,6 +29,7 @@ interface Props {
     inputSchema: RegistryInputSchema;
     httpBinding: RegistryHttpBinding;
     enabled?: boolean;
+    sideEffect?: SideEffect;
   }) => Promise<void>;
   initial?: RegistryTool | null;
   serverName?: string;
@@ -67,6 +69,7 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
   const [authHeaderValue, setAuthHeaderValue] = useState('');
   const [inputSchema, setInputSchema] = useState('{\n  "type": "object",\n  "properties": {},\n  "required": []\n}');
   const [enabled, setEnabled] = useState(true);
+  const [sideEffect, setSideEffect] = useState<'auto' | SideEffect>('auto');
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -91,6 +94,7 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
       setAuthHeaderValue(initial.httpBinding.authHeader?.value ?? '');
       setInputSchema(JSON.stringify(initial.inputSchema, null, 2));
       setEnabled(initial.enabled);
+      setSideEffect(initial.sideEffect ?? 'auto');
     } else {
       setName('');
       setDescription('');
@@ -109,6 +113,7 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
       setAuthHeaderValue('');
       setInputSchema('{\n  "type": "object",\n  "properties": {},\n  "required": []\n}');
       setEnabled(true);
+      setSideEffect('auto');
     }
   }, [open, initial]);
 
@@ -161,6 +166,7 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
         inputSchema: parsedSchema,
         httpBinding: hb,
         enabled,
+        ...(sideEffect !== 'auto' ? { sideEffect } : {}),
       });
       toast.success(initial ? '工具已更新' : '工具已创建');
       onClose();
@@ -199,7 +205,7 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
 
           <div className="border-t pt-4 space-y-3">
             <h4 className="text-sm font-semibold">HTTP 绑定</h4>
-            <div className="grid grid-cols-[120px_1fr] gap-3">
+            <div className="grid grid-cols-[120px_1fr_140px] gap-3">
               <div className="space-y-2">
                 <Label>方法</Label>
                 <Select value={method} onValueChange={(v) => setMethod(v as RegistryHttpBinding['method'])}>
@@ -214,6 +220,18 @@ export function ToolEditorDialog({ open, onClose, onSave, initial, serverName }:
               <div className="space-y-2">
                 <Label>URL *</Label>
                 <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.example.com/v1/current" />
+              </div>
+              <div className="space-y-2">
+                <Label>副作用</Label>
+                <Select value={sideEffect} onValueChange={(v) => setSideEffect(v as 'auto' | SideEffect)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">自动推断</SelectItem>
+                    <SelectItem value="read">read</SelectItem>
+                    <SelectItem value="write">write</SelectItem>
+                    <SelectItem value="admin">admin</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>

@@ -1071,6 +1071,8 @@ export const RegistryInputSchemaObject = z
   })
   .passthrough();
 
+export const RegistrySideEffectSchema = z.enum(['read', 'write', 'admin']);
+
 export const RegistryToolCreateSchema = z.object({
   name: z
     .string()
@@ -1081,6 +1083,7 @@ export const RegistryToolCreateSchema = z.object({
   inputSchema: RegistryInputSchemaObject,
   httpBinding: RegistryHttpBindingSchema,
   enabled: z.boolean().optional(),
+  sideEffect: RegistrySideEffectSchema.optional(),
 });
 
 export const RegistryToolUpdateSchema = z.object({
@@ -1094,6 +1097,7 @@ export const RegistryToolUpdateSchema = z.object({
   inputSchema: RegistryInputSchemaObject.optional(),
   httpBinding: RegistryHttpBindingSchema.optional(),
   enabled: z.boolean().optional(),
+  sideEffect: RegistrySideEffectSchema.optional(),
 });
 
 export const RegistryServerCreateSchema = z.object({

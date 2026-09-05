@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
+export type SideEffect = 'read' | 'write' | 'admin';
+
 export interface RegistryHttpBinding {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   url: string;
@@ -47,6 +49,7 @@ export interface RegistryTool {
   enabled: boolean;
   inputSchema: RegistryInputSchema;
   httpBinding: RegistryHttpBinding;
+  sideEffect?: SideEffect;
   mcpName: string;
   created_at: string;
   updated_at: string;
@@ -57,6 +60,7 @@ export interface CandidateTool {
   description: string;
   inputSchema: RegistryInputSchema;
   httpBinding: RegistryHttpBinding;
+  sideEffect?: SideEffect;
 }
 
 interface McpRegistryState {

@@ -10,6 +10,15 @@
  */
 
 import { logger } from '../logger.js';
+import { decryptSecret } from './crypto.js';
+import {
+  resolveSideEffect,
+  hashArgs,
+  logToolCallAudit,
+  getIdempotencyRecord,
+  saveIdempotencyRecord,
+  type SideEffect,
+} from './governance.js';
 
 export interface HttpBinding {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -47,11 +56,23 @@ export interface RegistryTool {
   description: string;
   inputSchema: InputSchemaObject;
   httpBinding: HttpBinding;
+  sideEffect?: SideEffect;
 }
 
 export interface McpToolResult {
   content: { type: 'text'; text: string }[];
   isError?: boolean;
+  /** 回放标记：命中幂等缓存时为 true。 */
+  idempotentReplay?: boolean;
+  /** 上游 HTTP 状态码（用于审计）。 */
+  httpStatus?: number;
+}
+
+/** 执行上下文：治理所需。全部可选，不传时退化为旧行为（零回归）。 */
+export interface ExecCtx {
+  userId?: string;
+  requestId?: string | null;
+  idempotencyKey?: string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 15000;
@@ -127,10 +148,94 @@ function missingRequired(
 /**
  * 执行一个 registry tool。
  * 不抛错；所有失败以 isError ToolResult 返回。
+ * 可选 ctx 启用治理（审计/幂等/解密 authHeader）；不传则退化为旧行为。
  */
 export async function executeRegistryTool(
   tool: RegistryTool,
   args: Record<string, unknown>,
+  ctx?: ExecCtx,
+): Promise<McpToolResult> {
+  const startedAt = Date.now();
+  const sideEff = resolveSideEffect(tool.sideEffect, tool.httpBinding.method);
+  const argsHash = hashArgs(args);
+
+  // 幂等回放：仅写工具 + 有 key + 命中成功记录
+  if (ctx?.idempotencyKey && ctx?.userId && sideEff !== 'read') {
+    const cached = getIdempotencyRecord(ctx.userId, tool.id, ctx.idempotencyKey);
+    if (cached) {
+      try {
+        const replay = JSON.parse(cached.resultContent) as McpToolResult;
+        replay.idempotentReplay = true;
+        if (cached.httpStatus != null) replay.httpStatus = cached.httpStatus;
+        // 回放也留审计
+        if (ctx.userId) {
+          logToolCallAudit({
+            userId: ctx.userId,
+            toolId: tool.id,
+            toolName: `${tool.serverName}__${tool.name}`,
+            sideEffect: sideEff,
+            argsHash,
+            requestId: ctx.requestId ?? null,
+            idempotencyKey: ctx.idempotencyKey,
+            resultStatus: cached.resultIsError ? 'error' : 'success',
+            httpStatus: cached.httpStatus,
+            durationMs: Date.now() - startedAt,
+          });
+        }
+        return replay;
+      } catch {
+        /* 缓存损坏，忽略并继续执行 */
+      }
+    }
+  }
+
+  const result = await executeRegistryToolInner(tool, args, sideEff);
+
+  // 审计 + 幂等缓存（fire-and-forget，失败仅 warn）
+  if (ctx?.userId) {
+    logToolCallAudit({
+      userId: ctx.userId,
+      toolId: tool.id,
+      toolName: `${tool.serverName}__${tool.name}`,
+      sideEffect: sideEff,
+      argsHash,
+      requestId: ctx.requestId ?? null,
+      idempotencyKey: ctx.idempotencyKey ?? null,
+      resultStatus: result.isError ? 'error' : 'success',
+      httpStatus: result.httpStatus ?? null,
+      durationMs: Date.now() - startedAt,
+    });
+    // 幂等缓存：仅写工具 + 有 key + 成功
+    if (ctx.idempotencyKey && sideEff !== 'read' && !result.isError) {
+      saveIdempotencyRecord(
+        ctx.userId,
+        tool.id,
+        ctx.idempotencyKey,
+        JSON.stringify(result),
+        false,
+        result.httpStatus ?? null,
+      );
+    } else if (ctx.idempotencyKey && sideEff !== 'read' && result.isError) {
+      // 失败也存（标记 isError=1），getIdempotencyRecord 对失败记录返回 null，
+      // 允许重试；但需在 saveIdempotencyRecord 内部以 saveIdempotencyRecord 写 resultContent。
+      saveIdempotencyRecord(
+        ctx.userId,
+        tool.id,
+        ctx.idempotencyKey,
+        JSON.stringify(result),
+        true,
+        result.httpStatus ?? null,
+      );
+    }
+  }
+  return result;
+}
+
+/** 内部执行：参数校验→HTTP 调用→响应提取。 */
+async function executeRegistryToolInner(
+  tool: RegistryTool,
+  args: Record<string, unknown>,
+  sideEff: SideEffect,
 ): Promise<McpToolResult> {
   const b = tool.httpBinding;
   const timeoutMs = Math.min(Math.max(b.timeoutMs ?? DEFAULT_TIMEOUT_MS, 500), MAX_TIMEOUT_MS);
@@ -189,8 +294,15 @@ export async function executeRegistryTool(
     }
   }
   // 凭证注入（仅引擎可见，不进 inputSchema / tools/list）
+  // authHeader.value 落库为 enc:v1: 密文，此处解密注入；兼容未迁移明文。
   if (b.authHeader && b.authHeader.name && b.authHeader.value) {
-    headers[b.authHeader.name] = b.authHeader.value;
+    let headerVal = b.authHeader.value;
+    try {
+      headerVal = decryptSecret(b.authHeader.value);
+    } catch (err) {
+      logger.warn({ err, toolId: tool.id }, 'failed to decrypt authHeader; using raw value');
+    }
+    headers[b.authHeader.name] = headerVal;
   }
 
   // 5. body
@@ -265,6 +377,7 @@ export async function executeRegistryTool(
         },
       ],
       isError: true,
+      httpStatus: resp.status,
     };
   }
 
@@ -286,7 +399,7 @@ export async function executeRegistryTool(
     output = truncateText(output, MAX_RESULT_LEN);
   }
 
-  return { content: [{ type: 'text', text: output }] };
+  return { content: [{ type: 'text', text: output }], httpStatus: resp.status };
 }
 
 /** 把 DB 行（input_schema/http_binding 为 JSON 字符串）解析为 RegistryTool。 */
@@ -298,12 +411,16 @@ export function parseRegistryToolRow(
     description: string;
     input_schema: string;
     http_binding: string;
+    side_effect?: string;
   },
   serverName: string,
 ): RegistryTool | null {
   try {
     const inputSchema = JSON.parse(row.input_schema) as InputSchemaObject;
     const httpBinding = JSON.parse(row.http_binding) as HttpBinding;
+    const sideRaw = row.side_effect;
+    const sideEffect: SideEffect | undefined =
+      sideRaw === 'read' || sideRaw === 'write' || sideRaw === 'admin' ? sideRaw : undefined;
     return {
       id: row.id,
       serverId: row.server_id,
@@ -312,6 +429,7 @@ export function parseRegistryToolRow(
       description: row.description,
       inputSchema,
       httpBinding,
+      sideEffect,
     };
   } catch (err) {
     logger.warn({ toolId: row.id, err }, 'Failed to parse registry tool binding');

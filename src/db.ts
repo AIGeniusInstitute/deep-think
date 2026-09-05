@@ -4,7 +4,7 @@ import Database, { isPostgresBackend } from './sqlite-compat.js';
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { STORE_DIR, GROUPS_DIR, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import {
   AgentKind,
@@ -1367,8 +1367,41 @@ export function initDatabase(): void {
     CREATE TABLE IF NOT EXISTS mcp_registry_tokens (
       user_id TEXT PRIMARY KEY,
       token TEXT NOT NULL UNIQUE,
+      token_hash TEXT,
       created_at TEXT NOT NULL
     );
+
+    -- 工具调用审计（F3）：每次 tools/call / 试调留痕，request_id 串联链路
+    CREATE TABLE IF NOT EXISTS tool_call_audit_log (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      side_effect TEXT NOT NULL,
+      args_hash TEXT NOT NULL,
+      request_id TEXT,
+      idempotency_key TEXT,
+      result_status TEXT NOT NULL,
+      http_status INTEGER,
+      duration_ms INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tca_user ON tool_call_audit_log(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_tca_tool ON tool_call_audit_log(tool_id, created_at);
+
+    -- 写操作幂等缓存（F2）：(user,tool,key) 唯一，命中且成功则回放
+    CREATE TABLE IF NOT EXISTS tool_call_idempotency (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      result_content TEXT NOT NULL,
+      result_is_error INTEGER NOT NULL,
+      http_status INTEGER,
+      created_at TEXT NOT NULL,
+      UNIQUE(user_id, tool_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tci_expire ON tool_call_idempotency(created_at);
   `);
 
   // ── Knowledge-base full-text search indexes ──────────────────────────────
@@ -1389,6 +1422,11 @@ export function initDatabase(): void {
   ensureColumn('marketplace_items', 'submitted_by', 'TEXT');
   // 补齐 status 列后再创建索引（老库 marketplace_items 缺 status 列）
   db.exec('CREATE INDEX IF NOT EXISTS idx_market_status ON marketplace_items(status);');
+
+  // 工具治理基线（feat/tool-governance-least-privilege）
+  ensureColumn('mcp_registry_tools', 'side_effect', "TEXT NOT NULL DEFAULT 'read'");
+  ensureColumn('mcp_registry_servers', 'rate_limit_override', 'TEXT');
+  ensureColumn('mcp_registry_tokens', 'token_hash', 'TEXT');
 
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
@@ -1696,7 +1734,7 @@ export function initDatabase(): void {
     if (!existingVer) {
       db.prepare(
         'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
-      ).run('schema_version', '59');
+      ).run('schema_version', '60');
     }
   }
   const currentVersion = getRouterStateInternal('schema_version');
@@ -2474,7 +2512,17 @@ export function initDatabase(): void {
   // existence at parse time while SQLite tolerates forward FK references.
   // No session_replication_role toggle needed — FKs are simply absent in PG.
 
-  const SCHEMA_VERSION = '59';
+  // v59→v60: 工具治理基线 — 加密回写老明文 authHeader + 回填 token_hash。
+  // 幂等、try/catch + warn，不阻断启动。
+  {
+    const v = getRouterStateInternal('schema_version');
+    const numV = v ? parseInt(v, 10) : 0;
+    if (!v || numV < 60) {
+      migrateToolGovernanceV60();
+    }
+  }
+
+  const SCHEMA_VERSION = '60';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -9753,6 +9801,7 @@ export type McpRegistryToolRow = {
   description: string;
   input_schema: string;
   http_binding: string;
+  side_effect: string;
   enabled: number;
   created_at: string;
   updated_at: string;
@@ -11717,6 +11766,61 @@ export function getRegistryTool(
   return row ?? null;
 }
 
+// ─── MCP Registry 凭据加密（内联，读 runtime-config 同一 key 文件）──────────
+// 内联目的：db.ts 静态 import crypto.ts → runtime-config 会拉起 config 全量导出，
+// 破坏仅部分 mock config 的既有测试。此处直接读同一 key 文件，零新依赖。
+// 密文格式与 mcp-registry/crypto.ts 保持一致：`enc:v1:<base64(iv[12]||tag[16]||data)>`
+const SECRET_PREFIX = 'enc:v1:';
+let _dbEncryptionKey: Buffer | null = null;
+function dbEncryptionKey(): Buffer {
+  if (_dbEncryptionKey) return _dbEncryptionKey;
+  const keyDir = path.join(DATA_DIR, 'config');
+  const keyFile = path.join(keyDir, 'claude-provider.key');
+  fs.mkdirSync(keyDir, { recursive: true });
+  if (fs.existsSync(keyFile)) {
+    const raw = fs.readFileSync(keyFile, 'utf-8').trim();
+    const key = Buffer.from(raw, 'hex');
+    if (key.length === 32) {
+      _dbEncryptionKey = key;
+      return key;
+    }
+  }
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(keyFile, key.toString('hex') + '\n', { encoding: 'utf-8', mode: 0o600 });
+  _dbEncryptionKey = key;
+  return key;
+}
+
+function dbEncryptSecret(plain: string): string {
+  if (plain.startsWith(SECRET_PREFIX)) return plain;
+  const key = dbEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return SECRET_PREFIX + Buffer.concat([iv, tag, enc]).toString('base64');
+}
+
+function dbDecryptSecret(stored: string): string {
+  if (!stored.startsWith(SECRET_PREFIX)) return stored;
+  const buf = Buffer.from(stored.slice(SECRET_PREFIX.length), 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const key = dbEncryptionKey();
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
+
+function dbIsEncrypted(s: string): boolean {
+  return typeof s === 'string' && s.startsWith(SECRET_PREFIX);
+}
+
+function dbHashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 export function createRegistryTool(
   userId: string,
   input: {
@@ -11726,6 +11830,7 @@ export function createRegistryTool(
     input_schema: string;
     http_binding: string;
     enabled?: boolean;
+    side_effect?: string;
   },
 ): McpRegistryToolRow | null {
   // 校验 server 归属
@@ -11733,10 +11838,35 @@ export function createRegistryTool(
   if (!server) return null;
   const id = crypto.randomUUID();
   const now = isoNow();
+  // http_binding 中 authHeader.value 加密落库
+  let httpBindingStored = input.http_binding;
+  try {
+    const hb = JSON.parse(input.http_binding) as {
+      authHeader?: { name: string; value: string } | null;
+    };
+    if (hb.authHeader && hb.authHeader.value && !dbIsEncrypted(hb.authHeader.value)) {
+      hb.authHeader.value = dbEncryptSecret(hb.authHeader.value);
+      httpBindingStored = JSON.stringify(hb);
+    }
+  } catch {
+    /* 解析失败原样落库 */
+  }
   db.prepare(
-    `INSERT INTO mcp_registry_tools (id, server_id, user_id, name, description, input_schema, http_binding, enabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, input.server_id, userId, input.name, input.description ?? '', input.input_schema, input.http_binding, input.enabled === false ? 0 : 1, now, now);
+    `INSERT INTO mcp_registry_tools (id, server_id, user_id, name, description, input_schema, http_binding, side_effect, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.server_id,
+    userId,
+    input.name,
+    input.description ?? '',
+    input.input_schema,
+    httpBindingStored,
+    input.side_effect ?? 'read',
+    input.enabled === false ? 0 : 1,
+    now,
+    now,
+  );
   return getRegistryTool(id, userId);
 }
 
@@ -11749,6 +11879,7 @@ export function updateRegistryTool(
     input_schema?: string;
     http_binding?: string;
     enabled?: boolean;
+    side_effect?: string;
   },
 ): McpRegistryToolRow | null {
   const existing = getRegistryTool(id, userId);
@@ -11759,7 +11890,23 @@ export function updateRegistryTool(
   if (patch.name !== undefined) { fields.push('name = ?'); values.push(patch.name); }
   if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description ?? ''); }
   if (patch.input_schema !== undefined) { fields.push('input_schema = ?'); values.push(patch.input_schema); }
-  if (patch.http_binding !== undefined) { fields.push('http_binding = ?'); values.push(patch.http_binding); }
+  if (patch.http_binding !== undefined) {
+    // 加密新 authHeader（若未加密）
+    let hbStored = patch.http_binding;
+    try {
+      const hb = JSON.parse(patch.http_binding) as {
+        authHeader?: { name: string; value: string } | null;
+      };
+      if (hb.authHeader && hb.authHeader.value && !dbIsEncrypted(hb.authHeader.value)) {
+        hb.authHeader.value = dbEncryptSecret(hb.authHeader.value);
+        hbStored = JSON.stringify(hb);
+      }
+    } catch {
+      /* 原样 */
+    }
+    fields.push('http_binding = ?'); values.push(hbStored);
+  }
+  if (patch.side_effect !== undefined) { fields.push('side_effect = ?'); values.push(patch.side_effect); }
   if (patch.enabled !== undefined) { fields.push('enabled = ?'); values.push(patch.enabled ? 1 : 0); }
   if (fields.length === 0) return existing;
   fields.push('updated_at = ?'); values.push(now);
@@ -11776,28 +11923,128 @@ export function deleteRegistryTool(id: string, userId: string): boolean {
 }
 
 export function getOrCreateRegistryToken(userId: string): string {
+  // 优先按 hash 查（新链路）；命中即返回解密后的明文（兼容老明文行透传）。
   const existing = db
     .prepare('SELECT token FROM mcp_registry_tokens WHERE user_id = ?')
     .get(userId) as { token: string } | undefined;
-  if (existing) return existing.token;
+  if (existing) {
+    try {
+      return dbDecryptSecret(existing.token);
+    } catch {
+      // 解密失败则回退原值（兼容异常态）
+      return existing.token;
+    }
+  }
   const token = crypto.randomUUID();
   db.prepare(
-    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, created_at) VALUES (?, ?, ?)',
-  ).run(userId, token, isoNow());
+    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, token_hash, created_at) VALUES (?, ?, ?, ?)',
+  ).run(userId, dbEncryptSecret(token), dbHashToken(token), isoNow());
   return token;
 }
 
 export function rotateRegistryToken(userId: string): string {
   const token = crypto.randomUUID();
   db.prepare(
-    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, created_at) VALUES (?, ?, ?)',
-  ).run(userId, token, isoNow());
+    'INSERT OR REPLACE INTO mcp_registry_tokens (user_id, token, token_hash, created_at) VALUES (?, ?, ?, ?)',
+  ).run(userId, dbEncryptSecret(token), dbHashToken(token), isoNow());
   return token;
 }
 
 export function getUserIdByRegistryToken(token: string): string | null {
+  // 按 sha256 hash 比对，避免对加密列做等值查询（IV 随机导致密文不可比对）。
   const row = db
+    .prepare('SELECT user_id FROM mcp_registry_tokens WHERE token_hash = ?')
+    .get(dbHashToken(token)) as { user_id: string } | undefined;
+  if (row) return row.user_id;
+  // 兼容：未迁移的老明文行（token_hash 为空）按明文 token 查
+  const legacy = db
     .prepare('SELECT user_id FROM mcp_registry_tokens WHERE token = ?')
     .get(token) as { user_id: string } | undefined;
-  return row?.user_id ?? null;
+  return legacy?.user_id ?? null;
+}
+
+/**
+ * v60 迁移：把 mcp_registry_tools.http_binding 中明文 authHeader.value 加密回写，
+ * 把 mcp_registry_tokens 的明文 token 加密 + 回填 token_hash。
+ * 幂等：已加密跳过；逐条 try/catch + warn，不阻断启动。
+ */
+export function migrateToolGovernanceV60(): void {
+  // 1) 加密工具 authHeader
+  const tools = db
+    .prepare('SELECT id, http_binding FROM mcp_registry_tools')
+    .all() as { id: string; http_binding: string }[];
+  for (const t of tools) {
+    try {
+      const hb = JSON.parse(t.http_binding) as {
+        authHeader?: { name: string; value: string } | null;
+      };
+      if (hb.authHeader && hb.authHeader.value && !dbIsEncrypted(hb.authHeader.value)) {
+        hb.authHeader.value = dbEncryptSecret(hb.authHeader.value);
+        db.prepare('UPDATE mcp_registry_tools SET http_binding = ? WHERE id = ?').run(
+          JSON.stringify(hb),
+          t.id,
+        );
+      }
+    } catch (err) {
+      logger.warn({ err, toolId: t.id }, 'v60 migrate authHeader failed (skip)');
+    }
+  }
+  // 2) 加密 registry token + 回填 token_hash
+  const tokens = db
+    .prepare('SELECT user_id, token, token_hash FROM mcp_registry_tokens')
+    .all() as { user_id: string; token: string; token_hash: string | null }[];
+  for (const tk of tokens) {
+    try {
+      if (tk.token_hash && dbIsEncrypted(tk.token)) continue; // 已迁移
+      const plain = dbIsEncrypted(tk.token) ? dbDecryptSecret(tk.token) : tk.token;
+      db.prepare(
+        'UPDATE mcp_registry_tokens SET token = ?, token_hash = ? WHERE user_id = ?',
+      ).run(dbEncryptSecret(plain), dbHashToken(plain), tk.user_id);
+    } catch (err) {
+      logger.warn({ err, userId: tk.user_id }, 'v60 migrate registry token failed (skip)');
+    }
+  }
+}
+
+export interface ToolCallAuditRow {
+  id: string;
+  user_id: string;
+  tool_id: string;
+  tool_name: string;
+  side_effect: string;
+  args_hash: string;
+  request_id: string | null;
+  idempotency_key: string | null;
+  result_status: string;
+  http_status: number | null;
+  duration_ms: number;
+  created_at: string;
+}
+
+export function listToolCallAuditLog(opts: {
+  userId?: string | null;
+  toolId?: string | null;
+  sideEffect?: string | null;
+  limit?: number;
+  offset?: number;
+}): { rows: ToolCallAuditRow[]; total: number } {
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (opts.userId) { where.push('user_id = ?'); params.push(opts.userId); }
+  if (opts.toolId) { where.push('tool_id = ?'); params.push(opts.toolId); }
+  if (opts.sideEffect) { where.push('side_effect = ?'); params.push(opts.sideEffect); }
+  const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `SELECT * FROM tool_call_audit_log ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    )
+    .all(...params, limit, offset) as ToolCallAuditRow[];
+  const total = (
+    db
+      .prepare(`SELECT COUNT(*) AS c FROM tool_call_audit_log ${whereClause}`)
+      .get(...params) as { c: number }
+  ).c;
+  return { rows, total };
 }
